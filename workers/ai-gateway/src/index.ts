@@ -12,7 +12,7 @@
  * Env/secrets:
  *   AI_PROVIDER      — 'workers-ai' (default) | 'groq' | 'openrouter' | 'anthropic'
  *   AI_API_KEY       — upstream key for non-CF providers (wrangler secret put)
- *   AI_CHAT_MODEL    — default '@cf/meta/llama-3.1-8b-instruct' (CF) or provider model
+ *   AI_CHAT_MODEL    — default '@cf/meta/llama-3.2-3b-instruct' (CF) or provider model
  *   AI_STT_MODEL     — default '@cf/openai/whisper-large-v3-turbo'
  *   AI_TTS_MODEL     — default '@cf/deepgram/aura-1'
  *   AI_BASE_URL      — override upstream base (OpenRouter/compatible endpoints)
@@ -76,7 +76,7 @@ async function chat(req: Request, env: Env): Promise<Response> {
 
 	if (provider === 'workers-ai') {
 		if (!env.AI) return json({ error: 'workers-ai binding missing' }, 503);
-		const res = await env.AI.run(env.AI_CHAT_MODEL ?? '@cf/meta/llama-3.1-8b-instruct', {
+		const res = await env.AI.run(env.AI_CHAT_MODEL ?? '@cf/meta/llama-3.2-3b-instruct', {
 			messages: [
 				{ role: 'system', content: system },
 				{ role: 'user', content: user }

@@ -20,6 +20,7 @@ import { translateText } from '../ai/translate';
 import { budget as creditsBudget, quote as creditsQuote, confirm as creditsConfirm, balance as creditsBalance } from '../ledger/credits';
 import { startLink, pollLink, sessionToken } from './account';
 import { artifactsFor, noteArtifact, type Artifact } from './artifacts';
+import { initRoomPush, ringRoom } from './push';
 import type { Op } from '../wire/messages';
 
 type Frame = Record<string, unknown>;
@@ -479,6 +480,11 @@ class RoomBridge {
 				this.frame({ t: 'snapshot', room: this.snapshot(), seq: this.seq });
 				const items = this.recordingsItems();
 				if (items.length) this.frame({ t: 'recordings', items });
+				// push: subscribe this device (only when the user already granted
+				// notifications) and ring the room's subscribers — someone just
+				// entered the circle. Rate-limited per device inside ringRoom.
+				initRoomPush(this.code, location.href);
+				ringRoom(this.code);
 				// event frames dropped while this peer's socket was down — flush
 				// after welcome+snapshot so prod applies state before events
 				const queued = pendingFrames.get(this.pendingKey);

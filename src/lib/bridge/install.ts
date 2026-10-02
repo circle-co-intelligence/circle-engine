@@ -131,7 +131,13 @@ function patchFetch() {
 		// outside the shim (Pages Functions/Workers in prod; 404 in dev → the
 		// client falls back to env/STUN/mesh). Must not be swallowed by the
 		// catch-all below.
-		if (path === '/api/ice' || path.startsWith('/api/sfu/')) return orig(input, init);
+		if (
+			path === '/api/ice' ||
+			path.startsWith('/api/sfu/') ||
+			path.startsWith('/api/ai/') ||
+			path.startsWith('/api/push/')
+		)
+			return orig(input, init);
 
 		if (path.startsWith('/api/')) return json({ error: 'not found' }, 404);
 		return orig(input, init);
@@ -167,6 +173,8 @@ function patchWebSocket(roomKey?: string) {
 			const path = base && u.pathname.startsWith(`${base}/`) ? u.pathname.slice(base.length) : u.pathname;
 			console.debug('[cic-ws] open', path, local ? '(local)' : '(external)');
 			if (local) {
+				// our own DO-backed signaling bus — real socket, Pages proxies to the worker
+				if (path.startsWith('/sig/')) return new NativeWS(url, protocols) as unknown as WebSocket;
 				if (path.startsWith('/ws/room/')) {
 					const code = decodeURIComponent(path.split('/ws/room/')[1]);
 					const sock = new RoomSocket(u.href, roomKey);

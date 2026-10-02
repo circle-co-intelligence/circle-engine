@@ -17,7 +17,7 @@
     "probe": "node probe-flows.mjs",
     "probe:pw": "node probe-pw.mjs",
     "build:pages": "CIC_BASE=/circle-engine vite build && rm -rf build/models && cp build/index.html build/404.html && touch build/.nojekyll && CIC_BASE=/circle-engine node scripts/patch-pages.mjs",
-    "build:cf": "vite build && rm -rf build/models && node scripts/patch-pages.mjs"
+    "build:cf": "VITE_CIC_SFU_ENDPOINT=/api/sfu VITE_CIC_AI_ENDPOINT=/api/ai VITE_CIC_SIGNAL_WS=/sig VITE_CIC_LANES=mqtt,ws vite build && rm -rf build/models && node scripts/patch-pages.mjs"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.13.0",

@@ -13,4 +13,4 @@ class_name = "PushSubs"
 
 [[migrations]]
 tag = "v1"
-new_classes = ["PushSubs"]
+new_sqlite_classes = ["PushSubs"]

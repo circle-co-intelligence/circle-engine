@@ -1,7 +1,9 @@
 // Multi-lane Trystero transport — the entire networking surface.
 //
 // Lanes (env: VITE_CIC_LANES, default 'mqtt'): mqtt | nostr | torrent | ipfs
-// | supabase. Each lane is an independent joinRoom on the same roomSecret and
+// | supabase | ws. 'ws' uses our own Durable-Object bus (VITE_CIC_SIGNAL_WS —
+// the cic-signaling worker); the rest are trystero strategies. Each lane is an
+// independent joinRoom on the same roomSecret and
 // shared selfId; peers reachable on ANY lane are merged into one view, so a
 // broker/relay outage on one lane doesn't break the circle. Ops are deduped
 // by opId; identical realtime frames arriving on multiple lanes within a
@@ -49,7 +51,7 @@ function mkListenerSet<A extends unknown[]>(set: (fn: (...args: A) => void) => v
 	};
 }
 
-type LaneName = 'mqtt' | 'nostr' | 'torrent' | 'ipfs' | 'supabase';
+type LaneName = 'mqtt' | 'nostr' | 'torrent' | 'ipfs' | 'supabase' | 'ws';
 
 const env = import.meta.env as Record<string, string | undefined>;
 const trysteroConfig = { appId: 'co-intelligence-circle' };
@@ -59,7 +61,9 @@ function laneList(): LaneName[] {
 	return raw
 		.split(',')
 		.map((s) => s.trim())
-		.filter((s): s is LaneName => ['mqtt', 'nostr', 'torrent', 'ipfs', 'supabase'].includes(s));
+		.filter((s): s is LaneName =>
+			['mqtt', 'nostr', 'torrent', 'ipfs', 'supabase', 'ws'].includes(s)
+		);
 }
 
 async function joinLane(lane: LaneName, secret: string, rtcConfig: RTCConfiguration): Promise<Room | null> {
@@ -87,6 +91,16 @@ async function joinLane(lane: LaneName, secret: string, rtcConfig: RTCConfigurat
 			case 'ipfs': {
 				const { joinRoom } = await import('trystero/ipfs');
 				return joinRoom({ ...trysteroConfig, rtcConfig }, secret);
+			}
+			case 'ws': {
+				// our DO-backed bus — '/sig' on CF Pages deploys (VITE_CIC_SIGNAL_WS
+				// may be a path or a full URL; a path resolves to same-origin)
+				let bus = env.VITE_CIC_SIGNAL_WS;
+				if (bus?.startsWith('/') && typeof location !== 'undefined')
+					bus = `${location.origin}${bus}`;
+				if (!bus) return null;
+				const { openWsRoom } = await import('./wsRoom');
+				return openWsRoom(bus, secret, rtcConfig);
 			}
 			case 'supabase': {
 				const url = env.VITE_CIC_SUPABASE_URL;
@@ -167,6 +181,9 @@ export function openRoom(roomSecret: string): RoomHandle {
 	const pendingOps: OpEnvelope[] = [];
 	const pendingRt: { msg: RealtimeMessage; to?: string }[] = [];
 	const pendingStreams: { stream: MediaStream; targets?: string[] }[] = [];
+	// streams currently requested of the mesh — re-applied to lanes that
+	// connect late (retry path) so late-joining lanes aren't media-blind
+	const activeStreams: { stream: MediaStream; targets?: string[] }[] = [];
 	let connected = false;
 
 	// dedupe: ops carry opId; realtime frames dedupe identical content within
@@ -282,39 +299,67 @@ export function openRoom(roomSecret: string): RoomHandle {
 		window.addEventListener('online', restartAll);
 	}
 
-	const ready = (async () => {
-		const rtcConfig = await iceServers();
-		for (const name of laneList()) {
-			const room = await joinLane(name, roomSecret, rtcConfig).catch(() => null);
-			if (!room) continue;
-			const [sendOp] = room.makeAction<OpEnvelope>('op') as unknown as [Lane['sendOp']];
-			const [sendRt] = room.makeAction<RealtimeMessage>('rt') as unknown as [Lane['sendRt']];
-			wireLane({
-				name,
-				room,
-				sendOp,
-				sendRt,
-				onJoin: mkListenerSet(room.onPeerJoin),
-				onLeave: mkListenerSet(room.onPeerLeave),
-				onStream: mkListenerSet(room.onPeerStream),
-				iceStates: new Map()
-			});
+	const applyStreams = (lane: Lane) => {
+		for (const { stream, targets } of activeStreams) {
+			if (!targets) {
+				lane.room.addStream(stream);
+				continue;
+			}
+			const here = targets.filter((t) => laneOfPeer.get(t)?.has(lane));
+			if (here.length) lane.room.addStream(stream, here);
 		}
-		if (!lanes.length) throw new Error('no signaling lanes available');
-		connected = true;
-		// flush queued traffic
+	};
+
+	// a lane that fails at boot (relay down, worker cold-start) retried in the
+	// background and wired in when it finally connects — MultiRoom degrades
+	// instead of dying on one lane's outage
+	const attach = (name: LaneName, room: Room) => {
+		const [sendOp] = room.makeAction<OpEnvelope>('op') as unknown as [Lane['sendOp']];
+		const [sendRt] = room.makeAction<RealtimeMessage>('rt') as unknown as [Lane['sendRt']];
+		const lane: Lane = {
+			name,
+			room,
+			sendOp,
+			sendRt,
+			onJoin: mkListenerSet(room.onPeerJoin),
+			onLeave: mkListenerSet(room.onPeerLeave),
+			onStream: mkListenerSet(room.onPeerStream),
+			iceStates: new Map()
+		};
+		wireLane(lane);
+		applyStreams(lane);
+	};
+
+	const flushPending = () => {
 		for (const env of pendingOps.splice(0)) sendOpAll(env);
 		for (const { msg, to } of pendingRt.splice(0)) sendRtTo(msg, to);
-		for (const { stream, targets } of pendingStreams.splice(0)) {
-			for (const lane of lanes) {
-				if (!targets) {
-					lane.room.addStream(stream);
-					continue;
+		for (const s of pendingStreams.splice(0)) activeStreams.push(s);
+	};
+
+	const LANE_RETRIES = 6;
+	// first successful attach unblocks sends; the rest keep retrying in the
+	// background and join the composite whenever they connect
+	const joinWithRetry = async (name: LaneName, rtcConfig: RTCConfiguration) => {
+		for (let i = 0; i < LANE_RETRIES; i++) {
+			const room = await joinLane(name, roomSecret, rtcConfig).catch(() => null);
+			if (room) {
+				attach(name, room);
+				if (!connected) {
+					connected = true;
+					flushPending();
 				}
-				const here = targets.filter((t) => laneOfPeer.get(t)?.has(lane));
-				if (here.length) lane.room.addStream(stream, here);
+				return true;
 			}
+			await new Promise((r) => setTimeout(r, Math.min(1000 * 2 ** i, 15000)));
 		}
+		console.warn(`[net] lane ${name} gave up after ${LANE_RETRIES} attempts`);
+		return false;
+	};
+
+	const ready = (async () => {
+		const rtcConfig = await iceServers();
+		await Promise.all(laneList().map((name) => joinWithRetry(name, rtcConfig)));
+		if (!lanes.length) throw new Error('no signaling lanes available');
 	})();
 
 	// composite room exposing merged peer connections (E2EE attach, ICE repair)
@@ -380,6 +425,7 @@ export function openRoom(roomSecret: string): RoomHandle {
 				pendingStreams.push({ stream, targets });
 				return;
 			}
+			activeStreams.push({ stream, targets });
 			for (const lane of lanes) {
 				if (!targets) {
 					lane.room.addStream(stream);
@@ -389,7 +435,11 @@ export function openRoom(roomSecret: string): RoomHandle {
 				if (here.length) lane.room.addStream(stream, here);
 			}
 		},
-		removeStream: (stream) => lanes.forEach((l) => l.room.removeStream(stream)),
+		removeStream: (stream) => {
+			const i = activeStreams.findIndex((s) => s.stream === stream);
+			if (i >= 0) activeStreams.splice(i, 1);
+			lanes.forEach((l) => l.room.removeStream(stream));
+		},
 		leave: () => compositeRoom.leave(),
 		raw: compositeRoom,
 		peerConnState: (peerId) => {
