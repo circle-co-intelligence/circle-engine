@@ -1,0 +1,3 @@
+# Cloudflare Pages SPA fallback — deep links (/room/X, /join?code=…) return
+# index.html with a real 200 instead of Pages' 404. Static files match first.
+/* /index.html 200

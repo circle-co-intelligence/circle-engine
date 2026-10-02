@@ -1,0 +1,10 @@
+name = "cic-ice"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+# Secrets (never committed):
+#   wrangler secret put TURN_KEY_ID
+#   wrangler secret put TURN_API_TOKEN
+# Create a TURN key: CF dashboard → Realtime → TURN → Create key.
+# To mount on the Pages site, add a Pages Function route for /api/ice
+# or a custom domain route to this worker.
