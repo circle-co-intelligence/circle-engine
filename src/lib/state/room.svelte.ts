@@ -145,7 +145,7 @@ export class RoomSession {
 	ai = $state<{
 		name?: string; enabled?: boolean; transcription?: boolean; contextProcessing?: boolean;
 		instructions?: string; voice?: string; standby?: boolean; scope?: string; storeTranscript?: boolean;
-	}>({ name: 'Milo' });
+	}>({ name: 'Milo', enabled: false });
 	waiting = $state<{ id: string; name: string; joinedAt: number }[]>([]);
 	peerMuted = $state<Record<string, { audio: boolean; video: boolean }>>({});
 	peerAway = $state<Set<string>>(new Set());
@@ -938,7 +938,13 @@ export class RoomSession {
 		}
 	}
 	startRecording() {
-		if (!this.allConsented) return this.proposeRecording();
+		if (!this.allConsented) {
+			this.proposeRecording();
+			// solo room: self-consent is the whole quorum — complete it now or
+			// the proposal pends forever and prod's 15s start ack times out
+			this.maybeStartRecording();
+			return;
+		}
 		this.emitOp({ t: 'recording-start' });
 	}
 	stopRecording() { this.emitOp({ t: 'recording-stop' }); }

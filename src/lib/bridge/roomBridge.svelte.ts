@@ -220,14 +220,14 @@ class RoomBridge {
 	private participantOf(peerId: string): ProdParticipant {
 		const s = this.session!;
 		const tracks: ProdParticipant['tracks'] = [];
-		if (s.remoteStreams[peerId] || peerId === s.selfId) {
-			tracks.push({ sessionId: `${peerId}:audio`, kind: 'audio' });
-			if (!s.videoMuted) tracks.push({ sessionId: `${peerId}:video`, kind: 'video' });
-			if (s.peerSharing.has(peerId)) tracks.push({ sessionId: `${peerId}:screen`, kind: 'screen' });
-		}
 		const muted = peerId === s.selfId
 			? { audio: s.selfMuted, video: s.videoMuted }
 			: (s.peerMuted[peerId] ?? { audio: false, video: false });
+		if (s.remoteStreams[peerId] || peerId === s.selfId) {
+			tracks.push({ sessionId: `${peerId}:audio`, kind: 'audio' });
+			if (!muted.video) tracks.push({ sessionId: `${peerId}:video`, kind: 'video' });
+			if (s.peerSharing.has(peerId)) tracks.push({ sessionId: `${peerId}:screen`, kind: 'screen' });
+		}
 		return {
 			id: this.prodId(peerId),
 			name: s.names[peerId] ?? (peerId === s.selfId ? this.name : 'Guest'),
