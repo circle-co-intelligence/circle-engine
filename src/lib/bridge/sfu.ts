@@ -25,6 +25,9 @@ export class SfuLoopback {
 	private wanted = new Map<string, { kind: string; trackName: string }>(); // sessionId -> pull request
 	private negotiating = false;
 	private pendingOffer = false;
+	private publishInFlight = false;
+	private pullTimer: number | null = null;
+	private senderBySession = new Map<string, RTCRtpSender>(); // sessionId -> pull sender
 	private session: RoomSession | null = null;
 	private sentSessionIds = new Set<string>(); // announced in sfu-pull
 	private pullMidSession = new Map<string, string>(); // mid -> sessionId (ours)
@@ -43,6 +46,8 @@ export class SfuLoopback {
 			this.session?.publishLocal(ev.streams[0] ?? new MediaStream([ev.track]));
 		};
 		pc.onicecandidate = () => {}; // candidates embedded after gathering
+		pc.onconnectionstatechange = () =>
+			console.debug('[sfu] pc conn', pc.connectionState, '| ice', pc.iceConnectionState, '| sig', pc.signalingState);
 		this.pc = pc;
 		return pc;
 	}
@@ -53,18 +58,38 @@ export class SfuLoopback {
 	async publish(sdpOffer: string, connectionId?: string, requestId?: string) {
 		if (!sdpOffer) return;
 		const pc = this.ensurePc();
-		await pc.setRemoteDescription({ type: 'offer', sdp: sdpOffer });
-		const answer = await pc.createAnswer();
-		await pc.setLocalDescription(answer);
-		await iceGathered(pc);
-		this.bridge.frame({
-			t: 'sfu-answer',
-			sdp: pc.localDescription?.sdp ?? answer.sdp,
-			connectionId,
-			requestId
-		});
-		// pulls parked before publish now have a transport to ride
-		if (this.wanted.size) void this.negotiatePull(connectionId ?? '');
+		this.publishInFlight = true;
+		try {
+			// glare: prod's publish wins over a pull offer we have in flight —
+			// prod's pc is impolite (its sfu-offer handler has no rollback), so
+			// we must never offer while a publish exchange could be open
+			if (pc.signalingState !== 'stable') {
+				await pc.setLocalDescription({ type: 'rollback' });
+				// our in-flight pull offer is dead — re-offer once stable
+				this.negotiating = false;
+				this.pendingOffer = true;
+			}
+			await pc.setRemoteDescription({ type: 'offer', sdp: sdpOffer });
+			const answer = await pc.createAnswer();
+			await pc.setLocalDescription(answer);
+			await iceGathered(pc);
+			this.bridge.frame({
+				t: 'sfu-answer',
+				sdp: pc.localDescription?.sdp ?? answer.sdp,
+				connectionId,
+				requestId
+			});
+		} catch (e) {
+			console.debug('[sfu] publish failed', e);
+			this.publishInFlight = false;
+			return;
+		}
+		// prod applies our answer asynchronously — hold pull offers a beat so an
+		// sfu-offer can't land while its pc is still have-local-offer
+		window.setTimeout(() => {
+			this.publishInFlight = false;
+			if (this.wanted.size || this.pendingOffer) void this.negotiatePull(connectionId ?? '');
+		}, 400);
 	}
 
 	// ---- pull leg: we offer mesh tracks to the frontend ----
@@ -77,7 +102,11 @@ export class SfuLoopback {
 	}
 
 	answer(sdp: string, _connectionId: string) {
-		void this.pc?.setRemoteDescription({ type: 'answer', sdp });
+		const pc = this.pc;
+		// only valid while we hold an outstanding offer — a stale/duplicate
+		// answer on a stable pc throws and churns prod's media stack
+		if (pc && pc.signalingState === 'have-local-offer')
+			pc.setRemoteDescription({ type: 'answer', sdp }).catch(() => {});
 		this.negotiating = false;
 		if (this.pendingOffer) {
 			this.pendingOffer = false;
@@ -94,7 +123,26 @@ export class SfuLoopback {
 			for (const t of fresh) this.sentSessionIds.add(t.sessionId);
 			this.bridge.frame({ t: 'sfu-pull', tracks: fresh });
 		}
-		if (this.wanted.size) void this.negotiatePull('');
+		// only renegotiate if a wanted pull actually lacks a sender for its
+		// track — remoteStreams can fire again with no real track change
+		// (trystero keepalive/renegotiation), and unconditionally offering
+		// here forces a full SFU renegotiation on every such no-op firing.
+		// Repeated enough, prod's client reads that churn as an unstable
+		// media connection and reconnects its whole room socket.
+		if (!this.pc) return;
+		// a replaced track object (mesh reconnect) swaps into its existing
+		// sender without renegotiation — only a genuinely unsent track needs an offer
+		let needsOffer = false;
+		for (const sessionId of this.wanted.keys()) {
+			const track = this.trackFor(sessionId);
+			const sender = this.senderBySession.get(sessionId);
+			if (track && sender && sender.track !== track) {
+				void sender.replaceTrack(track).catch(() => {});
+				continue;
+			}
+			if (track && !sender) { needsOffer = true; break; }
+		}
+		if (needsOffer) void this.negotiatePull('');
 	}
 
 	private trackFor(sessionId: string): MediaStreamTrack | null {
@@ -115,8 +163,24 @@ export class SfuLoopback {
 		return out;
 	}
 
-	private async negotiatePull(connectionId: string) {
+	private negotiatePull(connectionId: string) {
 		if (!this.pc) return; // no shared transport until publish arrives
+		// prod's pc is impolite: an sfu-offer arriving while it holds a local
+		// (publish) offer throws sfu_renegotiate_failed → media close + room
+		// socket reconnect. Defer until the publish exchange has settled, and
+		// debounce bursts of subscribe/track events into one offer.
+		if (this.pullTimer !== null) window.clearTimeout(this.pullTimer);
+		this.pullTimer = window.setTimeout(() => {
+			this.pullTimer = null;
+			void this.doNegotiatePull(connectionId);
+		}, 250);
+	}
+
+	private async doNegotiatePull(connectionId: string) {
+		if (!this.pc || this.publishInFlight) {
+			if (this.publishInFlight) this.pendingOffer = true;
+			return;
+		}
 		if (this.negotiating) {
 			this.pendingOffer = true;
 			return;
@@ -124,10 +188,16 @@ export class SfuLoopback {
 		this.negotiating = true;
 		try {
 			const pc = this.pc;
-			const senders = new Set(pc.getSenders().map((sn) => sn.track));
+			if (!pc) return;
 			for (const [sessionId] of this.wanted) {
 				const track = this.trackFor(sessionId);
-				if (track && !senders.has(track)) pc.addTrack(track, this.session!.remoteStreams[sessionId.split(':')[0]]);
+				if (!track) continue;
+				const sender = this.senderBySession.get(sessionId);
+				if (sender) {
+					if (sender.track !== track) await sender.replaceTrack(track).catch(() => {});
+				} else {
+					this.senderBySession.set(sessionId, pc.addTrack(track, this.session!.remoteStreams[sessionId.split(':')[0]]));
+				}
 			}
 			const offer = await pc.createOffer();
 			await pc.setLocalDescription(offer);
@@ -141,6 +211,8 @@ export class SfuLoopback {
 					return { mid: tr.mid ?? '', ownerId: sessionId.split(':')[0], kind: tr.sender.track!.kind, sessionId };
 				});
 			this.bridge.frame({ t: 'sfu-offer', sdp: pc.localDescription?.sdp ?? offer.sdp, pulls, connectionId });
+		} catch (e) {
+			console.debug('[sfu] pull negotiate failed', e);
 		} finally {
 			this.negotiating = false;
 		}
@@ -155,10 +227,13 @@ export class SfuLoopback {
 	}
 
 	dispose() {
+		if (this.pullTimer !== null) window.clearTimeout(this.pullTimer);
+		this.pullTimer = null;
 		this.pc?.close();
 		this.pc = null;
 		this.wanted.clear();
 		this.sentSessionIds.clear();
+		this.senderBySession.clear();
 	}
 }
 

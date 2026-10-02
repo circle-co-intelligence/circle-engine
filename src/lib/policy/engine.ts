@@ -7,19 +7,36 @@ import type { Op, RoomState } from '../wire/messages';
  * Every client evaluates every op against these rules before applying it.
  */
 
-type Policy = { evaluate(input: unknown): { result: unknown }[] };
+import { base } from '$app/paths';
+
+type Policy = { evaluate(input: unknown, entrypoint?: string): { result: unknown }[] };
 
 let policy: Policy | null = null;
+let policyPromise: Promise<void> | null = null;
 
-export async function initPolicy(): Promise<void> {
-	const wasm = await fetch('/policy/cic.wasm').then((r) => r.arrayBuffer());
-	policy = await loadPolicy(wasm);
+export function initPolicy(): Promise<void> {
+	policyPromise ??= (async () => {
+		try {
+			const wasm = await fetch(`${base}/policy/cic.wasm`).then((r) => r.arrayBuffer());
+			policy = await loadPolicy(wasm);
+			console.debug('[engine] policy loaded');
+		} catch (e) {
+			console.error('[engine] policy load failed', e);
+		}
+	})();
+	return policyPromise;
+}
+
+export function policyLoaded(): boolean {
+	return !!policy;
 }
 
 function evalEntry<T>(entrypoint: string, input: unknown): T | undefined {
 	if (!policy) return undefined;
-	const out = policy.evaluate(input) as { result: Record<string, T> }[];
-	return out[0]?.result?.[entrypoint];
+	// opa-wasm evaluate(input, entrypoint) → [{result: value}] — the value is the
+	// rule's document itself (deny set / allow boolean), not keyed by entrypoint
+	const out = policy.evaluate(input, entrypoint);
+	return out[0]?.result as T | undefined;
 }
 
 export interface Actor {

@@ -52,7 +52,13 @@ export const op = z.discriminatedUnion('t', [
 	z.object({ t: z.literal('recording-start') }),
 	z.object({ t: z.literal('recording-stop') }),
 	z.object({ t: z.literal('room-end') }),
-	z.object({ t: z.literal('breakout-open'), count: z.number().int().min(1).max(8) }),
+	z.object({
+		t: z.literal('breakout-open'),
+		count: z.number().int().min(1).max(8),
+		freeJoin: z.boolean().optional(),
+		allowReturn: z.boolean().optional(),
+		names: z.array(z.string()).optional()
+	}),
 	z.object({ t: z.literal('breakout-close') }),
 	z.object({ t: z.literal('heart-set'), on: z.boolean() }), // Heart-Sharing forces rec/transcription off
 	z.object({ t: z.literal('lobby-set'), enabled: z.boolean() }),
@@ -84,6 +90,8 @@ export const op = z.discriminatedUnion('t', [
 	}),
 	z.object({ t: z.literal('milo-wake-set'), mode: z.enum(['hey_milo', 'click']) }),
 	z.object({ t: z.literal('mute-set'), id: participantId, kind: z.enum(['audio', 'video']), on: z.boolean() }), // authority remote-mute — can never force-open
+	z.object({ t: z.literal('peer-remove'), id: participantId }), // host kick — the ejected peer's own session terminates on apply
+	z.object({ t: z.literal('password-set'), hash: z.string().max(128) }), // sha256(code + ':' + password); '' clears
 	z.object({ t: z.literal('tr-fanout-set'), lanes: z.array(z.string().max(12)).max(16) }),
 	z.object({ t: z.literal('turn-timer-set'), minutes: z.number().int().min(0).max(120) }),
 	z.object({ t: z.literal('erasure'), scope: z.enum(['self', 'participant']), target: participantId })
@@ -117,6 +125,7 @@ export const realtimeMessage = z.discriminatedUnion('t', [
 	z.object({ t: z.literal('reaction'), emoji: z.string().max(8) }),
 	z.object({ t: z.literal('chat'), text: z.string().max(4000), whisperTo: participantId.optional() }),
 	z.object({ t: z.literal('caption-update'), text: z.string().max(500), final: z.boolean(), lang: z.string().max(12) }),
+	z.object({ t: z.literal('caption-sections'), update: z.record(z.string(), z.any()) }), // prod-shaped personal-caption update (sourceId/generation/sections)
 	z.object({ t: z.literal('transcript-line'), seq: z.number().int(), hash: z.string(), scope: transcriptScope }),
 	z.object({ t: z.literal('recorder-heartbeat'), role: z.enum(['primary', 'standby']) }),
 	z.object({ t: z.literal('recording-consent'), state: recordingConsent }), // prod-verbatim name
@@ -134,7 +143,36 @@ export const realtimeMessage = z.discriminatedUnion('t', [
 	z.object({ t: z.literal('ask-ai'), text: z.string().max(2000).optional() }), // explicit Milo ask
 	z.object({ t: z.literal('reaction-kind'), kind: z.string().max(24), name: z.string().max(80).optional() }),
 	z.object({ t: z.literal('lobby-join'), name: z.string().max(80) }), // announce self into waiting room
+	z.object({ t: z.literal('lobby-wait') }), // member confirms: you're in the waiting room
+	// manager-owned waiting list — members adopt it so heldPeers/waiting converge
+	// across sessions whose lobbyEnabled learned the lobby-set at different times
+	z.object({
+		t: z.literal('lobby-waiting'),
+		entries: z.array(z.object({ id: participantId, name: z.string().max(80), joinedAt: z.number().int() })).max(200)
+	}),
+	z.object({ t: z.literal('lobby-decline'), to: participantId }), // host declined a waiting joiner
+	z.object({ t: z.literal('access-denied') }), // password proof failed — joiner leaves
+	// late-joiner catch-up: a member replays its signed op-log to a new peer;
+	// each op re-verifies signature + policy, epoch follows the replayed log
+	z.object({ t: z.literal('op-sync'), ops: z.array(opEnvelope).max(4096) }),
 	z.object({ t: z.literal('milo-state'), state: z.enum(['off', 'standby', 'listening', 'speaking']) }),
+	z.object({ t: z.literal('milo-stop') }), // anyone may rest Milo — prod's "Stop" control
+	z.object({ t: z.literal('tr-lang'), lang: z.string().max(12), langs: z.array(z.string().max(12)).max(8) }), // participant's caption/translation language preference
+	// translated segment fanout — the speaker's device translates its own ASR
+	// output and ships tr-caption/caption-audio payloads to subscribers; the
+	// remote bridge re-emits them on that subscriber's room socket
+	z.object({
+		t: z.literal('tr-segment'),
+		to: participantId,
+		lang: z.string().max(12),
+		which: z.enum(['partial', 'final']),
+		delta: z.string().max(2000),
+		sourceId: z.string(),
+		generation: z.string(),
+		pcm: z.string().max(400_000).optional(),
+		cueId: z.number().int().optional(),
+		original: z.string().max(2000).optional()
+	}),
 	z.object({ t: z.literal('e2ee-key'), epoch, data: z.string() }), // wrapped EpochAnnouncement (JSON)
 	z.object({ t: z.literal('sas'), emoji: z.string().max(16) }) // emoji fingerprint verify
 ]);

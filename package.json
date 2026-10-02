@@ -10,10 +10,13 @@
     "preview": "vite preview",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run",
-    "policy:build": "rm -rf /tmp/cic-pol && mkdir -p /tmp/cic-pol && opa build -t wasm -e cic/allow -e cic/deny src/lib/policy/cic.rego -o /tmp/cic-pol/policy.tar.gz && tar -xzf /tmp/cic-pol/policy.tar.gz -C /tmp/cic-pol policy.wasm && cp /tmp/cic-pol/policy.wasm static/policy/cic.wasm",
+    "policy:build": "rm -rf /tmp/cic-pol && mkdir -p /tmp/cic-pol && opa build -t wasm -e cic/allow -e cic/deny src/lib/policy/cic.rego -o /tmp/cic-pol/policy.tar.gz && tar -xzf /tmp/cic-pol/policy.tar.gz -C /tmp/cic-pol && cp /tmp/cic-pol/policy.wasm static/policy/cic.wasm",
     "test:e2e": "playwright test --project=chromium",
     "models:fetch": "bash scripts/fetch-models.sh",
-    "models:fetch:heavy": "FETCH_HEAVY=1 bash scripts/fetch-models.sh"
+    "models:fetch:heavy": "FETCH_HEAVY=1 bash scripts/fetch-models.sh",
+    "probe": "node probe-flows.mjs",
+    "probe:pw": "node probe-pw.mjs",
+    "build:pages": "CIC_BASE=/circle-engine vite build && rm -rf build/models && cp build/index.html build/404.html && touch build/.nojekyll && CIC_BASE=/circle-engine node scripts/patch-pages.mjs"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.13.0",
@@ -50,6 +53,7 @@
     "dompurify": "^3.2.3",
     "emoji-picker-element": "^1.26.0",
     "flexsearch": "^0.8.0",
+    "libarchive.js": "^2.0.2",
     "linkify-it": "^5.0.0",
     "lucide-svelte": "^0.469.0",
     "marked": "^15.0.0",

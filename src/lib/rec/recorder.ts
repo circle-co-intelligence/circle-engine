@@ -3,7 +3,8 @@ import {
 	WebMOutputFormat,
 	BufferTarget,
 	CanvasSource,
-	MediaStreamAudioTrackSource
+	MediaStreamAudioTrackSource,
+	QUALITY_MEDIUM
 } from 'mediabunny';
 import Dexie, { type EntityTable } from 'dexie';
 
@@ -82,7 +83,9 @@ export class Recorder {
 		this.output.addVideoTrack(canvasSource, { frameRate: 24 });
 		const audioTrack = this.mixDest.stream.getAudioTracks()[0];
 		if (audioTrack) {
-			this.output.addAudioTrack(new MediaStreamAudioTrackSource(audioTrack, { codec: 'opus' }));
+			this.output.addAudioTrack(
+				new MediaStreamAudioTrackSource(audioTrack, { codec: 'opus', quality: QUALITY_MEDIUM })
+			);
 		}
 		await this.output.start();
 	}

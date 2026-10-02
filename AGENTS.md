@@ -16,6 +16,17 @@ Zero-server, client-only P2P video circle app. SvelteKit (adapter-static, `ssr=f
   LD_LIBRARY_PATH, so libs MUST live there, not in a custom path. Run with
   `PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=1`. If Playwright updates webkit-*, re-copy
   libs into the new dir.
+  NOTE: browsers may live under `~/.local/share/ms-playwright` (playwright's default
+  durable path) — probes run with `PLAYWRIGHT_BROWSERS_PATH=$HOME/.local/share/ms-playwright`.
+- `pnpm probe` / `pnpm probe:pw` — multi-page UI probes driving the real production
+  frontend (probe-flows.mjs covers captions/recording/breakouts/translation/
+  force-mute/account-link/lobby/remove/recordings/password; probe-pw.mjs is the
+  focused lobby+password lane). Dev server must be running (`pnpm dev`).
+  Probe seams: `window.__cicSend(code, frame)` injects a prod-protocol frame
+  through the real RoomSocket dispatch; `window.__cicDebug(code)` returns the
+  session's authority/lobby/password/waiting view — use it to find the
+  authority page (`self === auth`) since manager ops are policy-gated.
+  Prod's Lobby & access UI is gated on canManageRoom (drawer → Options tab).
 
 ## Invariants (do not violate)
 - No server code in `cic-core`. Static bundle only.

@@ -59,6 +59,25 @@ export class OpLog {
 		this.epoch++;
 	}
 
+	/**
+	 * Replayed op from a peer's log (late-joiner sync) — same signature +
+	 * policy verification, but tolerates the log's historical epochs: the
+	 * joiner adopts the replayed epoch instead of fencing against it (it has
+	 * no prior state to protect; members fence live ops as usual).
+	 */
+	applyReplay(env: OpEnvelope): string[] | null {
+		if (this.seen.has(env.opId)) return ['replay'];
+		if (env.roomEpoch < this.epoch) return [`stale epoch ${env.roomEpoch} (have ${this.epoch})`];
+		const { sig, ...unsigned } = env;
+		if (!this.identity.verify(env.senderId, canonicalBytes(unsigned), sig)) return ['bad signature'];
+		const denies = this.validate(env);
+		if (denies.length) return denies;
+		this.seen.add(env.opId);
+		this.log.push(env);
+		this.epoch = env.roomEpoch;
+		return null;
+	}
+
 	get entries(): readonly OpEnvelope[] {
 		return this.log;
 	}

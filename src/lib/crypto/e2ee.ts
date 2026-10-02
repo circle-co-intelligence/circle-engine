@@ -121,7 +121,15 @@ export class E2EESession {
 	private async applyEpochToCryptors() {
 		const params = this.epochParams();
 		if (!params) return;
-		for (const c of this.cryptors.values()) await c.setEpoch(params);
+		for (const [key, c] of this.cryptors) {
+			// a receiver cryptor for a peer the epoch map doesn't cover yet (no
+			// cap[1] e2ee key, or joined after this epoch was authored) can't be
+			// keyed — their hello triggers a rotation that includes them
+			if (key.startsWith('r:') && !(key.slice(2) in params.peerIndexMap)) continue;
+			try {
+				await c.setEpoch(params);
+			} catch { /* stale cryptor — next rotation rekeys it */ }
+		}
 	}
 
 	private makeCryptor(role: 'sender' | 'receiver', peerId: string): FrameCryptor | null {
@@ -135,7 +143,8 @@ export class E2EESession {
 			onWorkerError: (d) => console.warn('[sframe]', d)
 		});
 		const params = this.epochParams();
-		if (params) void c.setEpoch(params);
+		if (params && (role === 'sender' || peerId in params.peerIndexMap))
+			void c.setEpoch(params).catch(() => {});
 		return c;
 	}
 

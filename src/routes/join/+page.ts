@@ -1,0 +1,3 @@
+// Real emitted file (build/join/index.html) → GitHub Pages serves /join at 200
+// instead of the 404-status SPA fallback — prod's invite links target /join?code=…
+export const prerender = true;

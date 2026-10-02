@@ -72,6 +72,31 @@ deny contains "breakout close requires manager" if {
 	not input.actor.canManageRoom
 }
 
+deny contains "remote mute requires manager" if {
+	input.op.t == "mute-set"
+	not input.actor.canManageRoom
+}
+
+deny contains "peer removal requires manager" if {
+	input.op.t == "peer-remove"
+	not input.actor.canManageRoom
+}
+
+deny contains "peer cannot remove self" if {
+	input.op.t == "peer-remove"
+	input.op.id == input.actor.id
+}
+
+deny contains "password requires manager" if {
+	input.op.t == "password-set"
+	not input.actor.canManageRoom
+}
+
+deny contains "lobby change requires manager" if {
+	input.op.t == "lobby-set"
+	not input.actor.canManageRoom
+}
+
 # --- erasure ----------------------------------------------------------------
 deny contains "erasure only self or authority" if {
 	input.op.t == "erasure"

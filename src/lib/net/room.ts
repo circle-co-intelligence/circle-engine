@@ -1,7 +1,7 @@
 // MQTT strategy: 3 public brokers, redundancy=4 → peers share a broker reliably.
 // Nostr's default relay pool fragmented discovery in e2e runs.
 import { joinRoom, selfId, type Room, type ActionReceiver } from 'trystero/mqtt';
-import { opEnvelope, realtimeMessage, type Op, type OpEnvelope, type RealtimeMessage } from '../wire/messages';
+import { opEnvelope, realtimeMessage, type OpEnvelope, type RealtimeMessage } from '../wire/messages';
 
 /**
  * Trystero transport adapter — the entire networking surface.
@@ -13,7 +13,7 @@ const trysteroConfig = { appId: 'co-intelligence-circle' };
 
 export interface RoomHandle {
 	selfId: string;
-	sendOp: (op: Op, sig: string, roomEpoch: number) => void;
+	sendOp: (env: OpEnvelope) => void;
 	sendRealtime: (msg: RealtimeMessage, to?: string) => void;
 	onOp: ActionReceiver<OpEnvelope>;
 	onRealtime: ActionReceiver<RealtimeMessage>;
@@ -42,15 +42,11 @@ export function openRoom(roomSecret: string): RoomHandle {
 	const [sendOpRaw, onOp] = room.makeAction<OpEnvelope>('op');
 	const [sendRt, onRealtime] = room.makeAction<RealtimeMessage>('rt');
 
-	let seq = 0;
 	return {
 		selfId,
-		sendOp(op, sig, roomEpoch) {
-			const envelope = opEnvelope.parse({
-				v: 1, t: 'op', opId: crypto.randomUUID(), roomEpoch,
-				senderId: selfId, sentAt: seq++, op, sig
-			});
-			sendOpRaw(envelope);
+		sendOp(env) {
+			// broadcast the exact signed envelope — peers verify canonicalBytes(env-sig)
+			sendOpRaw(opEnvelope.parse(env));
 		},
 		sendRealtime(msg, to) {
 			void sendRt(realtimeMessage.parse(msg), to ?? null);

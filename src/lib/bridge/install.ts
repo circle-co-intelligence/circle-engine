@@ -12,6 +12,7 @@
  *   other same-origin /ws/* → refused (nothing claims those paths)
  *   external wss://      → real WebSocket passthrough (browser enforces CSP)
  */
+import { base } from '$app/paths';
 import { RoomSocket } from './roomBridge.svelte';
 import { CaptionSocket } from './stt';
 import { LocalSocket } from './localSocket';
@@ -35,7 +36,22 @@ export function installCicShims(roomKey?: string) {
 	seedLocalStorage();
 	patchFetch();
 	patchWebSocket(roomKey);
+	// test seam: probes inject frames through the same entry path the app's own
+	// ws client uses (JSON → bridge.command) — real dispatch, no DOM flakiness
+	(window as unknown as { __cicSend: (code: string, frame: Record<string, unknown>) => void }).__cicSend =
+		(code, frame) => roomSockets.get(code)?.send(JSON.stringify(frame));
+	(window as unknown as { __cicDebug: (code: string) => unknown }).__cicDebug =
+		(code) => roomSockets.get(code)?.session?.debugView() ?? null;
 }
+
+/**
+ * Production room links normally carry a dashboard-minted ?grant= — an opener
+ * capability the server validates on hello. There is no dashboard here and the
+ * local bridge accepts grant-less hellos, so we deliberately do NOT mint one:
+ * a grant also tells prod "this visitor has an account" (it hides the
+ * drawer's "Log in" row), and the local account-link flow is the real feature.
+ * A bare link = an unauthenticated guest, matching production semantics.
+ */
 
 function seedLocalStorage() {
 	try {
@@ -51,8 +67,17 @@ function patchFetch() {
 	const orig = window.fetch.bind(window);
 	window.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
 		const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, location.href);
+
+		// dotlottie-player.wasm — prod hardcodes cdn.jsdelivr.net/unpkg URLs;
+		// serve the vendored copy instead so nothing leaves the origin
+		if (url.pathname.endsWith('/dotlottie-player.wasm'))
+			return orig(`${base}/dotlottie-player.wasm`, init);
+
 		if (url.origin !== location.origin) return orig(input, init); // external → real fetch (CSP-bound)
-		const path = url.pathname;
+		// on subpath deploys (GH Pages: /<repo>/) same-origin URLs carry the
+		// base prefix — strip it so bridge paths match vendored absolute calls
+		let path = url.pathname;
+		if (base && path.startsWith(`${base}/`)) path = path.slice(base.length);
 
 		// UI persistence — real localStorage-backed store
 		if (path === '/api/room-ui/themes' || path === '/api/room-ui/preferences' || path === '/api/room-ui/defaults') {
@@ -70,7 +95,7 @@ function patchFetch() {
 		// brand assets — real local files
 		if (path.startsWith('/api/site-brand/')) {
 			const name = path.split('/').pop() ?? 'symbol-light';
-			return orig(`/brand/${name === 'symbol-dark' ? 'logo.svg' : `${name}.png`}`, init);
+			return orig(`${base}/brand/${name === 'symbol-dark' ? 'logo.svg' : `${name}.png`}`, init);
 		}
 
 		// telemetry sinks — accepted locally, stored nowhere else
@@ -130,18 +155,19 @@ function patchWebSocket(roomKey?: string) {
 			// the production app always builds wss://{host}/ws/… even on http dev —
 			// ws/wss ↔ http/https are the same site, so compare hosts not origins
 			const local = (u.protocol === 'ws:' || u.protocol === 'wss:') && u.host === location.host;
-			console.debug('[cic-ws] open', u.pathname, local ? '(local)' : '(external)');
+			const path = base && u.pathname.startsWith(`${base}/`) ? u.pathname.slice(base.length) : u.pathname;
+			console.debug('[cic-ws] open', path, local ? '(local)' : '(external)');
 			if (local) {
-				if (u.pathname.startsWith('/ws/room/')) {
-					const code = decodeURIComponent(u.pathname.split('/ws/room/')[1]);
+				if (path.startsWith('/ws/room/')) {
+					const code = decodeURIComponent(path.split('/ws/room/')[1]);
 					const sock = new RoomSocket(u.href, roomKey);
 					roomSockets.set(code, sock);
 					return sock as unknown as WebSocket;
 				}
-				if (u.pathname.startsWith('/ws/caption/')) {
-					const code = u.pathname.split('/ws/caption/')[1].split('?')[0];
+				if (path.startsWith('/ws/caption/')) {
+					const code = path.split('/ws/caption/')[1].split('?')[0];
 					const room = roomSockets.get(decodeURIComponent(code));
-					return new CaptionSocket(u.href, room?.emitter() ?? { frame: () => {} }, room?.session ?? null, room?.selfId ?? '') as unknown as WebSocket;
+					return new CaptionSocket(u.href, room?.emitter() ?? { frame: () => {} }, room?.session ?? null, room?.selfId ?? '', 'en', room?.captionSub ?? 0) as unknown as WebSocket;
 				}
 				return new RefusedSocket(u.href) as unknown as WebSocket;
 			}

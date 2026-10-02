@@ -6,4 +6,3 @@ build
 *.tar.gz
 .DS_Store
 static/models/
-static/wllama/

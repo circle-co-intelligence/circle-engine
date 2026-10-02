@@ -1,0 +1,5 @@
+# comlink@4.4.2 ships a Dockerfile for its own CI inside the published npm
+# package. It is vendored test infrastructure under node_modules — never
+# built or deployed by this project.
+DS-0002
+DS-0017

@@ -3,3 +3,9 @@ allowBuilds:
   esbuild: true
   msw: true
   protobufjs: true
+
+overrides:
+  # CVE-2026-101916 (grpc-js auth bypass) — transitive via trystero/firebase
+  '@grpc/grpc-js': ^1.14.5
+  # CVE-2026-86039 (attacker-signed PeerRecords) — transitive via trystero/waku
+  '@libp2p/peer-store': ^12.0.24

@@ -7,6 +7,7 @@
  */
 
 import { Wllama } from '@wllama/wllama';
+import { WLLAMA_WASM } from './translate';
 
 export interface MiloConfig {
 	modelUrl: string; // e.g. /models/llm/SmolLM2-135M-Instruct-Q4_K_M.gguf
@@ -25,22 +26,24 @@ export class Milo {
 
 	async init(cfg: MiloConfig) {
 		try {
-			this.llm = new Wllama({
-				'single-thread/wllama.wasm': '/wllama/wllama-single.wasm',
-				'multi-thread/wllama.wasm': '/wllama/wllama-multi.wasm'
-			});
-			await this.llm.loadModelFromUrl(cfg.modelUrl, { n_ctx: cfg.maxContextTokens });
+			this.llm = new Wllama(WLLAMA_WASM);
+			// wllama fetches inside a blob worker — relative URLs don't resolve there
+			await this.llm.loadModelFromUrl(new URL(cfg.modelUrl, location.origin).href, { n_ctx: cfg.maxContextTokens });
 			this.state = 'standby';
 			return true;
-		} catch {
+		} catch (e) {
+			console.warn('[milo] wllama load failed:', e);
 			this.state = 'off'; // model unavailable — visible degrade
 			return false;
 		}
 	}
 
+	private generation = 0;
+
 	/** direct-address only: caller (KWS) has already confirmed "Milo" prefix */
 	async ask(prompt: string, transcriptWindow: string[]): Promise<string> {
 		if (!this.llm || this.state === 'off') return '';
+		const gen = this.generation;
 		this.state = 'listening';
 		const context = transcriptWindow.slice(-40).join('\n');
 		const text = await this.llm.createChatCompletion(
@@ -50,13 +53,20 @@ export class Milo {
 			],
 			{ nPredict: 96 }
 		);
+		if (gen !== this.generation) return ''; // interrupted while generating
 		this.state = 'speaking';
 		this.onSay(text);
 		this.state = 'standby';
 		return text;
 	}
 
-	stop() {
+	/** prod "Stop" — discards in-flight output and returns to standby */
+	interrupt() {
+		this.generation++;
 		this.state = 'standby';
+	}
+
+	stop() {
+		this.interrupt();
 	}
 }
