@@ -26,8 +26,10 @@ if (typeof window === 'undefined') {
 		if (window.crossOriginIsolated) return;
 		if (!('serviceWorker' in navigator)) return;
 
+		// register at its own URL → scope = the deploy base (works under /repo/)
+		const src = document.currentScript?.src ?? new URL('coi-serviceworker.js', document.baseURI).href;
 		navigator.serviceWorker
-			.register(new URL('coi-serviceworker.js', document.baseURI).href)
+			.register(src)
 			.then((reg) => {
 				reg.addEventListener('updatefound', () => {
 					const w = reg.installing;
