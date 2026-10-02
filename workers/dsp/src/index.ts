@@ -78,17 +78,37 @@ async function relaySpeech(req: Request, env: Env): Promise<Response> {
 	let upstream: string;
 	const headers: Record<string, string> = { upgrade: 'websocket' };
 	if (provider === 'assemblyai') {
-		upstream = `wss://streaming.assemblyai.com/v3/ws?sample_rate=16000&token=${env.SPEECH_API_KEY}&speaker_labels=true`;
+		upstream = `https://streaming.assemblyai.com/v3/ws?sample_rate=16000&token=${env.SPEECH_API_KEY}&speaker_labels=true`;
 	} else {
-		// Speechmatics RT — SaaS or self-hosted/on-prem (same protocol);
-		// the API key authenticates via the upgrade Authorization header
-		// (?jwt= is only for short-lived client-side temp keys)
-		upstream = env.SPEECH_BASE_URL ?? 'wss://eu2.rt.speechmatics.com/v2';
-		if (env.SPEECH_API_KEY) headers.authorization = `Bearer ${env.SPEECH_API_KEY}`;
+		// Speechmatics RT — SaaS or self-hosted/on-prem (same protocol).
+		// Workers' outbound-WS fetch drops arbitrary headers, so Bearer
+		// auth can't ride the upgrade — mint a 60s temp JWT server-side
+		// and connect with ?jwt= instead (the only RT auth that works
+		// header-less). On-prem endpoints (SPEECH_BASE_URL) need no key.
+		// workerd outbound-WS wants https:// + Upgrade header, not wss://
+		upstream = (env.SPEECH_BASE_URL ?? 'https://eu2.rt.speechmatics.com/v2')
+			.replace(/^wss:/, 'https:');
+		if (env.SPEECH_API_KEY) {
+			const mint = await fetch('https://mp.speechmatics.com/v1/api_keys?type=rt', {
+				method: 'POST',
+				headers: {
+					'content-type': 'application/json',
+					authorization: `Bearer ${env.SPEECH_API_KEY}`
+				},
+				body: JSON.stringify({ ttl: 60 })
+			});
+			if (!mint.ok) return new Response(`mint failed: ${mint.status}`, { status: 502 });
+			const { key_value } = (await mint.json()) as { key_value?: string };
+			if (!key_value) return new Response('mint empty', { status: 502 });
+			upstream += `?jwt=${key_value}`;
+		}
 	}
-	const up = await fetch(upstream, { headers });
+	const up = await fetch(upstream, { headers }).catch((e: Error) => e);
+	if (up instanceof Error)
+		return new Response(`provider connect threw: ${up.message}`, { status: 502 });
 	const upWs = up.webSocket;
-	if (!upWs) return new Response('provider connect failed', { status: 502 });
+	if (!upWs)
+		return new Response(`provider connect failed: HTTP ${up.status}`, { status: 502 });
 	upWs.accept();
 
 	const pair = new WebSocketPair();

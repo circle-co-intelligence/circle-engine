@@ -980,9 +980,11 @@ export class RoomSession {
 	async enableEdgeDenoise(): Promise<boolean> {
 		if (!this.sfuSession || this.edgeProcessed) return this.edgeProcessed;
 		if (!(await paidEntitled(this.roomCode))) return false; // paid lane only
-		const base =
+		// adapter URL is dialed by the SFU — wants ws(s)://
+		const base = (
 			(import.meta.env as Record<string, string | undefined>).VITE_CIC_DSP_ENDPOINT ??
-			'wss://cic-dsp.example.workers.dev';
+			'https://cic-dsp.terexmaps.workers.dev'
+		).replace(/^http/, 'ws');
 		const res = await fetch(
 			`${(import.meta.env as Record<string, string | undefined>).VITE_CIC_SFU_ENDPOINT ?? '/api/sfu'}/sessions/${this.sfuSession}/adapters/new`,
 			{
@@ -1018,18 +1020,21 @@ export class RoomSession {
 		// direct mode: Speechmatics RT endpoint reachable by the client —
 		// SaaS (temp JWT from cic-dsp/speech-token), on-prem appliance, or
 		// On-Device's local service in a native shell
+		// VITE_CIC_DSP_ENDPOINT is an https origin; WS paths derive ws(s)://
+		const dsp = env.VITE_CIC_DSP_ENDPOINT;
+		const dspWs = dsp?.replace(/^http/, 'ws');
 		if (env.VITE_CIC_SPEECH_URL) {
 			let url = env.VITE_CIC_SPEECH_URL;
-			if (!url.includes('jwt=') && env.VITE_CIC_DSP_ENDPOINT) {
-				const tok = await fetch(`${env.VITE_CIC_DSP_ENDPOINT}/speech-token`)
+			if (!url.includes('jwt=') && dsp) {
+				const tok = await fetch(`${dsp}/speech-token`)
 					.then((r) => r.json() as Promise<{ key_value?: string }>)
 					.catch(() => null);
 				if (tok?.key_value) url += `${url.includes('?') ? '&' : '?'}jwt=${tok.key_value}`;
 			}
 			this.sensory = new SensoryPipe(url, this, true);
-		} else if (env.VITE_CIC_DSP_ENDPOINT) {
+		} else if (dspWs) {
 			// relay mode: cic-dsp owns provider auth, we ship raw PCM16
-			this.sensory = new SensoryPipe(`${env.VITE_CIC_DSP_ENDPOINT}/speech`, this);
+			this.sensory = new SensoryPipe(`${dspWs}/speech`, this);
 		} else {
 			return false;
 		}
