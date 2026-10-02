@@ -25,8 +25,13 @@
 		for (const style of doc.querySelectorAll('style'))
 			document.head.appendChild(document.createElement('style')).textContent = style.textContent;
 		markup = doc.body.innerHTML
-			// authored addition: pricing section + nav link (scraped file stays pristine)
+			// authored additions (scraped file stays pristine):
+			// pricing section + nav link, GitHub repo link in the footer
 			.replace('<a href="#faq">FAQ</a>', '<a href="#pricing">Pricing</a><a href="#faq">FAQ</a>')
+			.replace(
+				'<a href="/site/imprint.html">Imprint</a>',
+				'<a href="/site/imprint.html">Imprint</a><a href="https://github.com/circle-co-intelligence/circle-engine" rel="noopener" target="_blank">GitHub</a>'
+			)
 			.replace('<section class="ea-faq', `${PRICING}<section class="ea-faq`);
 	});
 

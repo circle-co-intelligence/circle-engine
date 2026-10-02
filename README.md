@@ -351,6 +351,11 @@ docs/                PROTOCOL.md, SECURITY-MODEL.md, DESIGN-DELTAS.md
 
 ## Licenses
 
-Code in this repo is available for commercial use; vendored and upstream
-components carry their own licenses — see `NOTICE.md`, `LICENSES.md`, and
-`pnpm licenses` for the generated report.
+Authored code in this repo is licensed under the **GNU Affero General Public
+License v3.0** ([`LICENSE`](LICENSE)) — copyleft, commercial use permitted;
+if you run a modified version as a network service you must offer its source.
+Commercial/proprietary licensing is available separately — contact
+hello@co-intelligence.online.
+
+Vendored and upstream components carry their own licenses — see `NOTICE.md`,
+`LICENSES.md`, and `pnpm licenses` for the generated report.
