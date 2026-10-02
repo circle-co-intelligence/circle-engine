@@ -324,18 +324,28 @@ up edge infrastructure — none of them see room secrets or plaintext media:
 
 | Env | Effect |
 |---|---|
-| `VITE_CIC_LANES` | signaling lanes, comma-separated: `mqtt` (default), `nostr`, `torrent`, `ipfs`, `supabase` |
+| `VITE_CIC_LANES` | signaling lanes, comma-separated: `mqtt` (default), `ws`, `nostr`, `torrent`, `ipfs`, `supabase` |
+| `VITE_CIC_SIGNAL_WS` | ws lane endpoint — own DO-backed bus, same-origin `/sig` on Pages |
 | `VITE_CIC_MQTT_BROKERS` / `VITE_CIC_NOSTR_RELAYS` | relay URL lists for those lanes |
 | `VITE_CIC_SUPABASE_URL` / `VITE_CIC_SUPABASE_KEY` | enable the supabase lane |
 | `VITE_CIC_TURN` | JSON `RTCIceServer[]` static TURN entries (prefer the `/api/ice` broker for real deploys) |
 | `VITE_CIC_SFU_ENDPOINT` | cloud-SFU adapter endpoint (default shape: `/api/sfu`, proxy to CF Realtime) |
 | `VITE_CIC_AI_ENDPOINT` | zero-retention AI gateway endpoint (`/ai/chat`, `/ai/stt`, `/ai/tts`); unset → on-device sherpa/wllama |
 
-`functions/api/ice.ts` + `functions/api/sfu/[[path]].ts` are Cloudflare Pages
-Functions (TURN credential broker, SFU auth proxy) — deployed automatically
-with `pnpm build:cf` on Pages. `workers/` holds standalone Worker variants
-(ice, signaling DO, VAPID push, ai-gateway) for non-Pages mounts; each has its
-own `wrangler.toml` and takes secrets via `wrangler secret put`.
+Cloudflare Pages deployment (`pnpm build:cf` bakes the endpoints):
+
+- `functions/api/ice.ts` — TURN credential broker (`TURN_KEY_ID` + `TURN_API_TOKEN` secrets)
+- `functions/api/sfu/[[path]].ts` — CF Realtime auth proxy (`CALLS_APP_ID` + `CALLS_APP_SECRET` secrets)
+- `functions/sig/[[path]].ts` — WS proxy → `cic-signaling` worker (RoomBus DO, no secrets)
+- `functions/api/ai/[[path]].ts` — proxy → `cic-ai-gateway` worker (Workers AI binding, no keys)
+- `functions/api/push/[[path]].ts` — proxy → `cic-push` worker (VAPID keypair via `wrangler secret put`)
+
+`workers/` holds the standalone Worker sources (ice, signaling DO, VAPID
+push, ai-gateway); each has its own `wrangler.toml` and takes secrets via
+`wrangler secret put`. Deployed on this account: `cic-signaling`,
+`cic-ai-gateway`, `cic-push`, `cic-ice`. Pages secrets are scoped per
+environment — production uses the `circle-engine` Calls app + `cic-turn`
+key; preview deploys use dedicated `cic-prev3` credentials.
 
 ## Security
 
