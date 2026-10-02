@@ -1,0 +1,31 @@
+# Cloudflare Pages headers — replaces coi-serviceworker's isolation shim with
+# real response headers. GitHub Pages ignores this file (the serviceworker
+# still provides COOP/COEP there).
+/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
+  Cross-Origin-Resource-Policy: same-origin
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: camera=(self), microphone=(self), display-capture=(self), geolocation=(), payment=()
+
+# static assets get CORP: cross-origin so coi-isolated embedders and CDN
+# mirrors can still pull them
+/assets/*
+  Cross-Origin-Resource-Policy: cross-origin
+/fonts/*
+  Cross-Origin-Resource-Policy: cross-origin
+/models/*
+  Cross-Origin-Resource-Policy: cross-origin
+/wllama/*
+  Cross-Origin-Resource-Policy: cross-origin
+/cic/*
+  Cross-Origin-Resource-Policy: cross-origin
+/site/*
+  Cross-Origin-Resource-Policy: cross-origin
+
+# long-cache immutable hashed bundles
+/cic/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable
