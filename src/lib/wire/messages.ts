@@ -118,8 +118,18 @@ export const realtimeMessage = z.discriminatedUnion('t', [
 		name: z.string().max(80),
 		cap: z.array(z.string()),
 		// optional: the peer's SFU session id when it publishes via a cloud
-		// SFU — lets subscribers map mesh peerId → remote track location
-		sfu: z.string().max(80).optional()
+		// SFU — lets subscribers map mesh peerId → remote track location.
+		// Extended form also carries the publication trackNames so pulls bind
+		// to real names instead of convention.
+		sfu: z
+			.union([
+				z.string().max(80),
+				z.object({
+					session: z.string().max(80),
+					tracks: z.array(z.string().max(40)).max(8)
+				})
+			])
+			.optional()
 	}),
 	z.object({ t: z.literal('welcome'), roomEpoch: epoch, yourId: participantId }),
 	z.object({ t: z.literal('snapshot'), state: z.string() }), // encrypted checkpoint blob ref

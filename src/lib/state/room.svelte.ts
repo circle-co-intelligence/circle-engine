@@ -87,7 +87,10 @@ export class RoomSession {
 	remoteStreams = $state<Record<string, MediaStream>>({});
 	/** peerId → their cloud-SFU session id (hello.sfu), when they publish via SFU */
 	peerSfuSessions = $state<Record<string, string>>({});
+	/** peerId → the SFU publication trackNames it announced (real names, not guessed) */
+	peerSfuTracks = $state<Record<string, string[]>>({});
 	private sfuSession = '';
+	private sfuTrackNames: string[] = [];
 	/** low-power media mode — auto-on for low-class devices, UI can flip it */
 	lowPower = $state(deviceClass() === 'low');
 	localMedia: LocalMedia | null = null;
@@ -236,6 +239,7 @@ export class RoomSession {
 			delete this.peerMuted[peerId];
 			delete this.remoteStreams[peerId];
 			delete this.peerSfuSessions[peerId];
+			delete this.peerSfuTracks[peerId];
 			delete this.peerLangs[peerId];
 			dropPeerKey(peerId);
 			this.syncSeats();
@@ -382,13 +386,28 @@ export class RoomSession {
 	private helloMsg(): RealtimeMessage {
 		const cap = [bytesToHex(this.identity.publicKey), this.e2ee.publicKeyHex];
 		if (this.accessHash) cap.push(this.accessHash);
-		return { t: 'hello', name: this.displayName, cap, ...(this.sfuSession ? { sfu: this.sfuSession } : {}) };
+		return {
+			t: 'hello',
+			name: this.displayName,
+			cap,
+			...(this.sfuSession
+				? {
+						sfu: this.sfuTrackNames.length
+							? { session: this.sfuSession, tracks: this.sfuTrackNames }
+							: this.sfuSession
+					}
+				: {})
+		};
 	}
 
 	/** cloud-SFU publish path got its session id — re-announce so peers can pull */
-	announceSfu(sessionId: string) {
-		if (this.sfuSession === sessionId) return;
+	announceSfu(sessionId: string, trackNames: string[] = []) {
+		const changed =
+			this.sfuSession !== sessionId ||
+			trackNames.join(',') !== this.sfuTrackNames.join(',');
+		if (!changed) return;
 		this.sfuSession = sessionId;
+		this.sfuTrackNames = trackNames;
 		this.handle.sendRealtime(this.helloMsg());
 	}
 
@@ -408,8 +427,12 @@ export class RoomSession {
 					break;
 				}
 				this.deniedPeers.delete(peerId);
-				if (msg.sfu)
-					this.peerSfuSessions = { ...this.peerSfuSessions, [peerId]: msg.sfu };
+				if (msg.sfu) {
+					const sfu = typeof msg.sfu === 'string' ? msg.sfu : msg.sfu.session;
+					this.peerSfuSessions = { ...this.peerSfuSessions, [peerId]: sfu };
+					if (typeof msg.sfu !== 'string')
+						this.peerSfuTracks = { ...this.peerSfuTracks, [peerId]: msg.sfu.tracks };
+				}
 				if (msg.cap[0]) this.memberKeys.add(msg.cap[0]);
 				this.names[peerId] = msg.name;
 				// a hello proves the joiner's data channel is live — the

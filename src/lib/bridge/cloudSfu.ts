@@ -28,23 +28,38 @@ const endpoint = (): string =>
 interface SdpSection {
 	mid: string;
 	kind: 'audio' | 'video';
+	/** direction attribute of the m-section (default sendrecv) */
+	dir: 'sendonly' | 'recvonly' | 'sendrecv' | 'inactive';
 }
 
-/** extract m-line mids + kinds from an SDP blob (prod's publish offer) */
+/** extract m-line mids + kinds + direction from an SDP blob */
 function parseMids(sdp: string): SdpSection[] {
 	const out: SdpSection[] = [];
-	let kind: SdpSection['kind'] | null = null;
+	let cur: SdpSection | null = null;
 	for (const line of sdp.split('\r\n')) {
-		if (line.startsWith('m=audio')) kind = 'audio';
-		else if (line.startsWith('m=video')) kind = 'video';
-		else if (line.startsWith('a=mid:') && kind) out.push({ mid: line.slice(6), kind });
+		if (line.startsWith('m=audio')) {
+			cur = { mid: '', kind: 'audio', dir: 'sendrecv' };
+		} else if (line.startsWith('m=video')) {
+			cur = { mid: '', kind: 'video', dir: 'sendrecv' };
+		} else if (cur) {
+			if (line.startsWith('a=mid:')) {
+				cur.mid = line.slice(6);
+				out.push(cur);
+			} else if (/^a=(sendonly|sendrecv|recvonly|inactive)$/.test(line)) {
+				cur.dir = line.slice(2) as SdpSection['dir'];
+			}
+		}
 	}
 	return out;
 }
 
-async function api<T = Record<string, unknown>>(path: string, body?: unknown): Promise<T> {
+async function api<T = Record<string, unknown>>(
+	path: string,
+	body?: unknown,
+	method?: string
+): Promise<T> {
 	const res = await fetch(`${endpoint()}${path}`, {
-		method: body === undefined ? 'GET' : 'POST',
+		method: method ?? (body === undefined ? 'GET' : 'POST'),
 		headers: { 'content-type': 'application/json' },
 		body: body === undefined ? undefined : JSON.stringify(body)
 	});
@@ -57,20 +72,21 @@ export class CloudSfu {
 	private sfuSessionId: string | null = null;
 	private connectionId = '';
 	private pendingPulls: { sessionId: string; kind: string; trackName: string }[] = [];
+	// one SFU session = one offer/answer state machine: CF rejects concurrent
+	// mutations on the same session (406), so every tracks/new + renegotiate
+	// runs through this queue
+	private queue: Promise<unknown> = Promise.resolve();
 
 	constructor(private bridge: BridgeLike) {}
 
-	bind(session: RoomSession) {
-		this.session = session;
+	private enqueue<T>(fn: () => Promise<T>): Promise<T> {
+		const p = this.queue.then(fn, fn); // run even if the prior op failed
+		this.queue = p.catch(() => {});
+		return p;
 	}
 
-	private async ensureSession(): Promise<string> {
-		if (this.sfuSessionId) return this.sfuSessionId;
-		const res = await api<{ sessionId: string }>('/sessions/new', {});
-		this.sfuSessionId = res.sessionId;
-		// tell mesh peers where to pull our tracks from
-		this.session?.announceSfu(res.sessionId);
-		return res.sessionId;
+	bind(session: RoomSession) {
+		this.session = session;
 	}
 
 	publishReady(_connectionId: string, _requestId: string) {}
@@ -78,23 +94,67 @@ export class CloudSfu {
 	async publish(sdpOffer: string, connectionId?: string, requestId?: string) {
 		if (!sdpOffer) return;
 		this.connectionId = connectionId ?? this.connectionId;
+		await this.enqueue(() => this.doPublish(sdpOffer, connectionId, requestId));
+	}
+
+	/** mid → trackName of publications the SFU has accepted */
+	private published = new Map<string, string>();
+	private nameCounts: Record<'audio' | 'video', number> = { audio: 0, video: 0 };
+
+	private trackName(kind: 'audio' | 'video'): string {
+		const n = this.nameCounts[kind]++;
+		return n === 0 ? kind : `${kind}-${n}`;
+	}
+
+	private async doPublish(sdpOffer: string, connectionId?: string, requestId?: string) {
 		try {
-			const sid = await this.ensureSession();
-			const tracks = parseMids(sdpOffer).map((s, i) => ({
+			// CF recipe: sessions/new creates the session (no body); the publish
+			// itself is tracks/new carrying the offer + local track defs.
+			// Only send-capable m-sections are ours to publish — a re-offer
+			// also describes the recvonly sections SFU pulls created, and
+			// those must not be (re)registered as local publications.
+			if (!this.sfuSessionId) {
+				const created = await api<{ sessionId: string }>('/sessions/new', undefined, 'POST');
+				this.sfuSessionId = created.sessionId;
+			}
+			const fresh = parseMids(sdpOffer).filter(
+				(s) => s.mid && s.dir !== 'recvonly' && s.dir !== 'inactive' && !this.published.has(s.mid)
+			);
+			const tracks = fresh.map((s) => ({
 				location: 'local',
 				mid: s.mid,
-				trackName: s.kind === 'audio' ? 'audio' : i === 1 ? 'video' : `video-${i}`
+				trackName: this.trackName(s.kind)
 			}));
-			const res = await api<{ sessionDescription?: { sdp: string } }>(
-				`/sessions/${sid}/tracks/new`,
-				{ sessionDescription: { type: 'offer', sdp: sdpOffer }, tracks }
+			const res = await api<{
+				sessionId?: string;
+				sessionDescription?: { sdp: string };
+				tracks?: { mid?: string; trackName?: string; errorCode?: string }[];
+			}>(`/sessions/${this.sfuSessionId}/tracks/new`, {
+				sessionDescription: { type: 'offer', sdp: sdpOffer },
+				tracks
+			});
+			// remember only the binds that succeeded
+			const okNames = new Set(
+				(res.tracks ?? []).filter((t) => !t.errorCode).map((t) => t.trackName)
 			);
+			for (const t of tracks)
+				if (!res.tracks || okNames.has(t.trackName)) this.published.set(t.mid, t.trackName);
+			if (this.sfuSessionId)
+				this.session?.announceSfu(this.sfuSessionId, [...this.published.values()]);
 			this.bridge.frame({
 				t: 'sfu-answer',
 				sdp: res.sessionDescription?.sdp ?? '',
 				connectionId,
 				requestId
 			});
+			// subscribes that predated our session can resolve now
+			if (this.pendingPulls.length) {
+				const pending = this.pendingPulls.splice(0);
+				void this.subscribe(
+					pending.map((p) => ({ sessionId: p.sessionId, kind: p.kind, trackName: p.trackName })),
+					this.connectionId
+				);
+			}
 		} catch (e) {
 			console.debug('[cloud-sfu] publish failed', e);
 		}
@@ -104,34 +164,104 @@ export class CloudSfu {
 		tracks: { sessionId: string; trackName?: string; kind?: string }[],
 		connectionId: string
 	) {
+		await this.enqueue(() => this.doSubscribe(tracks, connectionId));
+	}
+
+	private async doSubscribe(
+		tracks: { sessionId: string; trackName?: string; kind?: string }[],
+		connectionId: string
+	) {
 		try {
-			const sid = await this.ensureSession();
+			const trackNameOf = (t: { sessionId: string; trackName?: string; kind?: string }) =>
+				t.trackName ?? t.sessionId.split(':').slice(1).join(':') ?? t.kind ?? 'audio';
+			if (!this.sfuSessionId) {
+				// no Calls session until our first publish — stash the want
+				this.pendingPulls.push(...tracks.map((t) => ({
+					sessionId: t.sessionId,
+					kind: t.kind ?? trackNameOf(t).split('-')[0],
+					trackName: trackNameOf(t)
+				})));
+				return;
+			}
+			const sid = this.sfuSessionId;
 			const remote = [];
 			for (const t of tracks) {
 				const peerId = t.sessionId.split(':')[0];
-				const kind = t.kind ?? t.sessionId.split(':')[1] ?? 'audio';
+				const trackName = trackNameOf(t);
+				const kind = t.kind ?? trackName.split('-')[0];
 				const peerSfu = this.session?.peerSfuSessions[peerId];
 				if (!peerSfu) {
 					// peer hasn't announced an SFU session (mesh-only or older
 					// client) — remember the want; announced late via notifyStreams
-					this.pendingPulls.push({ sessionId: t.sessionId, kind, trackName: t.trackName ?? kind });
+					this.pendingPulls.push({ sessionId: t.sessionId, kind, trackName });
 					continue;
 				}
-				remote.push({ location: 'remote', sessionId: peerSfu, trackName: t.trackName ?? kind });
+				remote.push({ location: 'remote', sessionId: peerSfu, trackName });
 			}
 			if (!remote.length) return;
-			const res = await api<{ sessionDescription?: { type: string; sdp: string } }>(
-				`/sessions/${sid}/tracks/new`,
-				{ tracks: remote }
+			const res = await api<{
+				requiresImmediateRenegotiation?: boolean;
+				sessionDescription?: { type: string; sdp: string };
+				tracks?: { sessionId: string; trackName: string; mid?: string; errorCode?: string }[];
+			}>(`/sessions/${sid}/tracks/new`, { tracks: remote });
+			// CF requires the publication to be live before a pull binds —
+			// not_found means the publisher's session exists but its tracks
+			// aren't flowing yet; back off and retry (bounded)
+			const notFound = new Set(
+				(res.tracks ?? [])
+					.filter((t) => t.errorCode === 'not_found_track_error')
+					.map((t) => `${t.sessionId}:${t.trackName}`)
 			);
+			if (notFound.size) {
+				const retry = tracks.filter((t) => {
+					const peerId = t.sessionId.split(':')[0];
+					const peerSfu = this.session?.peerSfuSessions[peerId];
+					const tn = trackNameOf(t);
+					return peerSfu && notFound.has(`${peerSfu}:${tn}`);
+				});
+				for (const t of retry) {
+					const tries = (this.pullTries.get(t.sessionId) ?? 0) + 1;
+					this.pullTries.set(t.sessionId, tries);
+					if (tries > 12) continue; // ~20s of retries — give up, peer may have unpub'd
+					this.pendingPulls.push({
+						sessionId: t.sessionId,
+						kind: t.kind ?? trackNameOf(t).split('-')[0],
+						trackName: trackNameOf(t)
+					});
+				}
+				if (this.pendingPulls.length) this.scheduleRetry();
+			}
+			// successful binds reset the backoff for that prod sessionId —
+			// CF results carry the remote's sfu sessionId + trackName, map back
+			for (const t of res.tracks ?? [])
+				if (!t.errorCode) {
+					const peerEntry = Object.entries(this.session?.peerSfuSessions ?? {}).find(
+						([, v]) => v === t.sessionId
+					);
+					if (peerEntry) this.pullTries.delete(`${peerEntry[0]}:${t.trackName}`);
+				}
 			if (res.sessionDescription?.sdp) {
+				// CF returns the receiving mid per bound remote track — prod maps
+				// ontrack transceivers to seats by mid, exactly like the loopback's
+				// pullMidSession entries, so the mid must ride along in pulls
+				const midFor = new Map<string, string>(
+					(res.tracks ?? [])
+						.filter((t) => t.mid && !t.errorCode)
+						.map((t) => {
+							const peerEntry = Object.entries(this.session?.peerSfuSessions ?? {}).find(
+								([, v]) => v === t.sessionId
+							);
+							return [`${peerEntry?.[0] ?? ''}:${t.trackName}`, t.mid!] as const;
+						})
+				);
 				this.bridge.frame({
 					t: 'sfu-offer',
 					sdp: res.sessionDescription.sdp,
 					pulls: tracks.map((t) => ({
 						sessionId: t.sessionId,
+						mid: midFor.get(t.sessionId) ?? '',
 						ownerId: t.sessionId.split(':')[0],
-						kind: t.kind ?? t.sessionId.split(':')[1] ?? 'audio'
+						kind: t.kind ?? trackNameOf(t).split('-')[0]
 					})),
 					connectionId
 				});
@@ -141,15 +271,35 @@ export class CloudSfu {
 		}
 	}
 
+	private pullTries = new Map<string, number>(); // prod sessionId → attempts
+	private retryTimer: number | null = null;
+	private scheduleRetry() {
+		if (this.retryTimer !== null) return;
+		this.retryTimer = window.setTimeout(() => {
+			this.retryTimer = null;
+			const pending = this.pendingPulls.splice(0);
+			if (pending.length)
+				void this.subscribe(
+					pending.map((p) => ({ sessionId: p.sessionId, kind: p.kind, trackName: p.trackName })),
+					this.connectionId
+				);
+		}, 1500);
+	}
+
 	async answer(sdp: string, _connectionId: string) {
-		if (!this.sfuSessionId) return;
-		try {
-			await api(`/sessions/${this.sfuSessionId}/renegotiate`, {
-				sessionDescription: { type: 'answer', sdp }
-			});
-		} catch (e) {
-			console.debug('[cloud-sfu] renegotiate failed', e);
-		}
+		await this.enqueue(async () => {
+			if (!this.sfuSessionId) return;
+			// CF Realtime accepts the endpoint's answer via PUT /renegotiate
+			try {
+				await api(
+					`/sessions/${this.sfuSessionId}/renegotiate`,
+					{ sessionDescription: { type: 'answer', sdp } },
+					'PUT'
+				);
+			} catch (e) {
+				console.debug('[cloud-sfu] renegotiate failed', e);
+			}
+		});
 	}
 
 	/** remote SFU sessions learned from peer hellos — announce new pull tracks */
@@ -159,11 +309,14 @@ export class CloudSfu {
 		const fresh: { sessionId: string; trackName: string; kind: string; ownerId: string }[] = [];
 		for (const [peerId, sfuSession] of Object.entries(s.peerSfuSessions)) {
 			if (!sfuSession) continue;
-			for (const kind of ['audio', 'video']) {
-				const sessionId = `${peerId}:${kind}`;
+			// real publication names when the peer announced them; legacy
+			// string-only announcements fall back to the audio/video convention
+			const names = s.peerSfuTracks[peerId] ?? ['audio', 'video'];
+			for (const name of names) {
+				const sessionId = `${peerId}:${name}`;
 				if (!this.announced.has(sessionId)) {
 					this.announced.add(sessionId);
-					fresh.push({ sessionId, trackName: kind, kind, ownerId: peerId });
+					fresh.push({ sessionId, trackName: name, kind: name.split('-')[0], ownerId: peerId });
 				}
 			}
 		}
@@ -183,5 +336,13 @@ export class CloudSfu {
 	dispose() {
 		this.session = null;
 		this.pendingPulls = [];
+		this.pullTries.clear();
+		this.announced.clear();
+		this.published.clear();
+		this.nameCounts = { audio: 0, video: 0 };
+		if (this.retryTimer !== null) {
+			window.clearTimeout(this.retryTimer);
+			this.retryTimer = null;
+		}
 	}
 }

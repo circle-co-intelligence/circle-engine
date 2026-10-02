@@ -127,10 +127,11 @@ function patchFetch() {
 			return new Response(blob, { headers: { 'content-type': 'video/webm' } });
 		}
 
-		// edge endpoint — the TURN credential broker lives outside the shim
-		// (Pages Function/Worker in prod; 404 in dev → client falls back to
-		// env/STUN). Must not be swallowed by the catch-all below.
-		if (path === '/api/ice') return orig(input, init);
+		// edge endpoints — the TURN credential broker and cloud-SFU proxy live
+		// outside the shim (Pages Functions/Workers in prod; 404 in dev → the
+		// client falls back to env/STUN/mesh). Must not be swallowed by the
+		// catch-all below.
+		if (path === '/api/ice' || path.startsWith('/api/sfu/')) return orig(input, init);
 
 		if (path.startsWith('/api/')) return json({ error: 'not found' }, 404);
 		return orig(input, init);
