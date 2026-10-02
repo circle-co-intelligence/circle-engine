@@ -79,17 +79,20 @@ function patchFetch() {
 		let path = url.pathname;
 		if (base && path.startsWith(`${base}/`)) path = path.slice(base.length);
 
-		// UI persistence — real localStorage-backed store
+		// UI persistence — the app expects {signedIn:boolean} envelopes.
+		// signedIn:false drops it into its own browser-scope localStorage
+		// fallback (cic.* keys) — themes/prefs persist on-device, no account.
 		if (path === '/api/room-ui/themes' || path === '/api/room-ui/preferences' || path === '/api/room-ui/defaults') {
 			const key = LS_PREFIX + path.split('/').pop();
 			if (init?.method === 'PUT' || init?.method === 'POST') {
 				try {
 					localStorage.setItem(key!, String(init.body ?? '{}'));
 				} catch {}
-				return json({});
+				return json({ ok: true });
 			}
-			const saved = localStorage.getItem(key!);
-			return json(saved ? JSON.parse(saved) : {});
+			if (path.endsWith('/themes')) return json({ signedIn: false, themes: [] });
+			if (path.endsWith('/preferences')) return json({ signedIn: false, preferences: null });
+			return json({ signedIn: false });
 		}
 
 		// brand assets — real local files
