@@ -183,19 +183,43 @@ data channel and prod's deployed protocol is untouched:
 - `enableEdgeDenoise()` — attaches a CF Realtime Media Transport Adapter to
   cic-dsp; mic audio reaches the edge as PLAINTEXT → `edgeProcessed` badge
   ("edge-processed, not E2EE") is mandatory.
-- `enableSensory()` — PCM16 tee → cic-dsp `/speech` → Speechmatics RT
-  (diarization + audio events) or AssemblyAI (env `SPEECH_PROVIDER`).
-  Events feed Milo's transcriptWindow as `[S3] text` / `[room] laughter`.
+- `enableSensory()` — PCM16 tee → sensory lane. Two transports:
+  relay (default) — cic-dsp `/speech` owns provider auth and speaks
+  Speechmatics RT (diarization + audio events) or AssemblyAI
+  (`SPEECH_PROVIDER`), incl. on-prem Speechmatics via `SPEECH_BASE_URL`;
+  direct — `VITE_CIC_SPEECH_URL` points the client at a Speechmatics RT
+  endpoint itself (SaaS with a 60 s `?jwt=` temp key minted by
+  cic-dsp `/speech-token`, an on-prem appliance, or Speechmatics
+  On-Device's local service in a native shell — on-device is a native
+  C/C++ library, not a browser API). Events feed Milo's transcriptWindow
+  as `[S3] text` / `[room] laughter`.
 - `uploadRecording()` — segments sealed client-side (XChaCha20-Poly1305,
   HKDF(roomSecret)) → `PUT /api/rec/{room}/{recId}/{n}` → R2 ciphertext.
+
+## Metered spend (paid = seconds pool, not a flag)
+
+Paid rooms carry a D1 `accounts` row: `balance_seconds` debits while paid
+lanes run (SFU fanout, sensory, edge lanes tick per heartbeat; each AI call
+costs 5 s). At zero the room reverts to free/device-side — the pool is a
+floor at 0, never negative, so an exhausted mid-call SFU session simply
+stops accruing rather than over-billing. Top-ups are Ed25519-signed grants
+(`{seconds, nonce, sig}` over `"room.seconds.nonce"`, minted by
+`scripts/grant.mjs` with `GRANT_SECRET`, verified against `GRANT_PUBKEY`,
+nonce-replay-blocked by the `grants` table). Whatever payment rail settles
+money mints grants — checkout, crypto, invoices, or sequential small
+top-ups which ARE the streaming-payment model.
 
 ## Edge endpoints
 
 | Path | Handler | Notes |
 |---|---|---|
 | `POST /ai/chat` `/ai/stt` `/ai/tts` | ai-gateway | ZDR; optional `cf-turnstile` header gate |
-| `GET /ai/entitlement?room=` | ai-gateway | D1 grant lookup → `{paid}` |
+| `GET /ai/entitlement?room=` | ai-gateway | `{paid, balanceSeconds, spentSeconds}` |
+| `POST /ai/usage` | ai-gateway | `{room, seconds, calls}` → atomic pool debit |
+| `POST /ai/topup` | ai-gateway | signed grant → credit pool (nonce-blocked) |
+| `GET /ai/status` | ai-gateway | uptime probe surface |
 | `POST /ai/telemetry` | ai-gateway | opt-in anonymous → Analytics Engine |
+| `GET cic-dsp /speech-token` | dsp worker | 60 s Speechmatics RT temp key mint |
 | `wss cic-dsp /audio` | dsp DO | adapter PCM ↔ processed PCM |
 | `wss cic-dsp /speech` | dsp worker | PCM → diarized sensory events |
 | `PUT/GET /api/rec/...` | Pages fn | R2 ciphertext only |

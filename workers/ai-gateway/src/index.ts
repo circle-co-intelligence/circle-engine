@@ -31,9 +31,10 @@ export interface Env {
 	AI_STT_MODEL?: string;
 	AI_TTS_MODEL?: string;
 	AI_BASE_URL?: string;
-	DB?: D1Database; // entitlements table — server-verified paid rooms
+	DB?: D1Database; // metered accounts — server-verified paid rooms
 	AE?: AnalyticsEngineDataset; // opt-in anonymous quality telemetry
 	TURNSTILE_SECRET?: string; // siteverify on paid lanes when set
+	GRANT_PUBKEY?: string; // Ed25519 hex — verifies top-up grants
 }
 
 const PROVIDER_URLS: Record<string, string> = {
@@ -61,6 +62,10 @@ export default {
 				return await tts(req, env);
 			if (url.pathname === '/ai/entitlement' && req.method === 'GET')
 				return await entitlement(url, env);
+			if (url.pathname === '/ai/usage' && req.method === 'POST')
+				return await usage(req, env);
+			if (url.pathname === '/ai/topup' && req.method === 'POST')
+				return await topup(req, env);
 			if (url.pathname === '/ai/telemetry' && req.method === 'POST')
 				return await telemetry(req, env);
 			if (url.pathname === '/ai/status' && req.method === 'GET')
@@ -161,17 +166,94 @@ async function tts(req: Request, env: Env): Promise<Response> {
 
 // ------------------------------------------------------------- entitlement + telemetry
 
-/** GET /ai/entitlement?room= → {paid} — D1-backed grant lookup */
+/** GET /ai/entitlement?room= → {paid, balanceSeconds, spentSeconds}
+ *  metered account: paid while balance_seconds > 0 (streaming spend) */
 async function entitlement(url: URL, env: Env): Promise<Response> {
 	if (!env.DB) return json({ paid: false });
 	const room = url.searchParams.get('room');
 	if (!room) return json({ error: 'room required' }, 400);
 	const row = await env.DB.prepare(
-		'SELECT room FROM entitlements WHERE room = ? AND expires_at > unixepoch()'
+		'SELECT balance_seconds, spent_seconds FROM accounts WHERE room = ?'
 	)
 		.bind(room)
-		.first();
-	return json({ paid: !!row });
+		.first<{ balance_seconds: number; spent_seconds: number }>();
+	return json({
+		paid: (row?.balance_seconds ?? 0) > 0,
+		balanceSeconds: row?.balance_seconds ?? 0,
+		spentSeconds: row?.spent_seconds ?? 0
+	});
+}
+
+/**
+ * POST /ai/usage {room, seconds, calls?} — the streaming-spend lane.
+ * Clients heartbeat paid-resource seconds (SFU fanout, sensory, edge DSP)
+ * and AI call counts; the worker debits the room's pool atomically and
+ * returns the remaining balance — at zero, paid lanes drop back to
+ * on-device. Each call costs CALL_COST seconds against the pool.
+ */
+const CALL_COST = 5;
+async function usage(req: Request, env: Env): Promise<Response> {
+	if (!env.DB) return json({ balanceSeconds: 0 });
+	const { room, seconds, calls } = (await req.json()) as {
+		room?: string;
+		seconds?: number;
+		calls?: number;
+	};
+	if (!room) return json({ error: 'room required' }, 400);
+	const debit = Math.max(0, Math.min(3600, Math.round(seconds ?? 0))) +
+		Math.max(0, Math.min(1000, Math.round(calls ?? 0))) * CALL_COST;
+	if (debit === 0) return entitlement(new URL(`${req.url.split('?')[0]}?room=${room}`), env);
+	const row = await env.DB.prepare(
+		`UPDATE accounts SET balance_seconds = MAX(0, balance_seconds - ?),
+		 spent_seconds = spent_seconds + ?, updated_at = unixepoch()
+		 WHERE room = ? RETURNING balance_seconds`
+	)
+		.bind(debit, debit, room)
+		.first<{ balance_seconds: number }>();
+	return json({ paid: (row?.balance_seconds ?? 0) > 0, balanceSeconds: row?.balance_seconds ?? 0 });
+}
+
+/**
+ * POST /ai/topup {room, grant} — credit the pool. Grant = base64url JSON
+ * {seconds, nonce, sig}; sig = Ed25519("room.seconds.nonce") by the
+ * operator key (GRANT_PUBKEY env, hex). Whatever payment rail the operator
+ * wires (checkout, crypto, invoice) mints grants after settlement —
+ * streaming payments land as sequential top-ups. Nonce table blocks replay.
+ */
+async function topup(req: Request, env: Env): Promise<Response> {
+	if (!env.DB || !env.GRANT_PUBKEY) return json({ error: 'topup unconfigured' }, 503);
+	const { room, grant } = (await req.json()) as { room?: string; grant?: string };
+	if (!room || !grant) return json({ error: 'room + grant required' }, 400);
+	try {
+		const g = JSON.parse(atob(grant)) as { seconds?: number; nonce?: string; sig?: string };
+		if (!g.seconds || !g.nonce || !g.sig) throw new Error('bad grant');
+		const key = await crypto.subtle.importKey(
+			'raw', hexToBytes(env.GRANT_PUBKEY), 'Ed25519', false, ['verify']
+		);
+		const ok = await crypto.subtle.verify(
+			'Ed25519', key, hexToBytes(g.sig),
+			new TextEncoder().encode(`${room}.${g.seconds}.${g.nonce}`)
+		);
+		if (!ok) throw new Error('bad signature');
+		await env.DB.prepare('INSERT INTO grants(nonce) VALUES (?)').bind(g.nonce).run();
+	} catch (e) {
+		return json({ error: `invalid grant: ${e instanceof Error ? e.message : 'x'}` }, 403);
+	}
+	const { seconds } = JSON.parse(atob(grant)) as { seconds: number };
+	await env.DB.prepare(
+		`INSERT INTO accounts(room, balance_seconds, spent_seconds, updated_at)
+		 VALUES (?, ?, 0, unixepoch())
+		 ON CONFLICT(room) DO UPDATE SET balance_seconds = balance_seconds + ?, updated_at = unixepoch()`
+	)
+		.bind(room, seconds, seconds)
+		.run();
+	return json({ ok: true, creditedSeconds: seconds });
+}
+
+function hexToBytes(hex: string): Uint8Array {
+	const out = new Uint8Array(hex.length / 2);
+	for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+	return out;
 }
 
 /** POST /ai/telemetry — opt-in anonymous quality points → Analytics Engine */

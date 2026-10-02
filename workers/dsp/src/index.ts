@@ -23,16 +23,38 @@ export interface Env {
 	/** paid sensory lane: 'speechmatics' | 'assemblyai' — unset = lane off */
 	SPEECH_PROVIDER?: string;
 	SPEECH_API_KEY?: string;
+	/** self-hosted Speechmatics RT endpoint (on-prem appliance, container —
+	 *  same protocol as SaaS); default eu2 SaaS */
+	SPEECH_BASE_URL?: string;
 }
 
 export default {
 	async fetch(req: Request, env: Env): Promise<Response> {
 		const url = new URL(req.url);
+		// temp-RT-token mint: browsers can't set headers on WebSocket, so
+		// direct SaaS connections need a ?jwt= temp key — mint one server-side
+		// (60s TTL, keeps the long-lived key out of clients)
+		if (url.pathname === '/speech-token' && req.method === 'GET') {
+			if (!env.SPEECH_API_KEY) return new Response('lane off', { status: 503 });
+			const res = await fetch('https://mp.speechmatics.com/v1/api_keys?type=rt', {
+				method: 'POST',
+				headers: {
+					'content-type': 'application/json',
+					authorization: `Bearer ${env.SPEECH_API_KEY}`
+				},
+				body: JSON.stringify({ ttl: 60 })
+			});
+			if (!res.ok) return new Response('token mint failed', { status: 502 });
+			return new Response(await res.text(), {
+				headers: { 'content-type': 'application/json', 'cache-control': 'no-store' }
+			});
+		}
 		if (req.headers.get('upgrade') !== 'websocket')
 			return new Response('expected websocket', { status: 426 });
 		if (url.pathname === '/speech') {
 			// sensory lane: PCM16 in → diarized transcript + audio events out
-			if (!env.SPEECH_API_KEY) return new Response('speech lane off', { status: 503 });
+			if (!env.SPEECH_API_KEY && !env.SPEECH_BASE_URL)
+				return new Response('speech lane off', { status: 503 });
 			return relaySpeech(req, env);
 		}
 		if (url.pathname !== '/audio')
@@ -53,11 +75,18 @@ export default {
  */
 async function relaySpeech(req: Request, env: Env): Promise<Response> {
 	const provider = env.SPEECH_PROVIDER ?? 'speechmatics';
-	const upstream =
-		provider === 'assemblyai'
-			? `wss://streaming.assemblyai.com/v3/ws?sample_rate=16000&token=${env.SPEECH_API_KEY}&speaker_labels=true`
-			: `wss://eu2.rt.speechmatics.com/v2?jwt=${env.SPEECH_API_KEY}`;
-	const up = await fetch(upstream, { headers: { upgrade: 'websocket' } });
+	let upstream: string;
+	const headers: Record<string, string> = { upgrade: 'websocket' };
+	if (provider === 'assemblyai') {
+		upstream = `wss://streaming.assemblyai.com/v3/ws?sample_rate=16000&token=${env.SPEECH_API_KEY}&speaker_labels=true`;
+	} else {
+		// Speechmatics RT — SaaS or self-hosted/on-prem (same protocol);
+		// the API key authenticates via the upgrade Authorization header
+		// (?jwt= is only for short-lived client-side temp keys)
+		upstream = env.SPEECH_BASE_URL ?? 'wss://eu2.rt.speechmatics.com/v2';
+		if (env.SPEECH_API_KEY) headers.authorization = `Bearer ${env.SPEECH_API_KEY}`;
+	}
+	const up = await fetch(upstream, { headers });
 	const upWs = up.webSocket;
 	if (!upWs) return new Response('provider connect failed', { status: 502 });
 	upWs.accept();

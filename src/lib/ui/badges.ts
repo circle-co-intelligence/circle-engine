@@ -100,6 +100,15 @@ export function mountBadges(session: RoomSession): () => void {
 			void session.enableSensory();
 		});
 	}
+	if (env.VITE_CIC_AI_ENDPOINT) {
+		const b = chip('top up', 'Credit this room\'s paid-seconds pool with a grant from your payment', async () => {
+			const grant = prompt('Paste top-up grant');
+			if (!grant) return;
+			const { topUp } = await import('../tier');
+			b.textContent = (await topUp(session.roomCode, grant.trim())) ? 'topped up' : 'invalid grant';
+			setTimeout(() => (b.textContent = 'top up'), 4000);
+		});
+	}
 	chip('invite', 'Download a calendar invite for this circle', () => {
 		void import('../notes/invite').then(({ icsInvite, downloadIcs }) => {
 			downloadIcs(

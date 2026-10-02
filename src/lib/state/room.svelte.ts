@@ -16,7 +16,7 @@ import { llmModelUrl } from '../ai/translate';
 import { Milo } from '../ai/milo';
 import { CloudMilo, aiEndpoint, cloudTts } from '../ai/cloud';
 import { adaptSenders, deviceClass, pressureLevel } from '../media/adapt';
-import { paidEntitled } from '../tier';
+import { paidEntitled, invalidateTier, UsageMeter } from '../tier';
 import { BwBroker } from '../media/broker';
 import { SensoryPipe, type SensoryEvent } from '../ai/sensory';
 import { uploadRecording } from '../rec/cloud';
@@ -173,6 +173,7 @@ export class RoomSession {
 	onTranscript: ((entry: { id: string; at: number; name: string; text: string }) => void) | null = null;
 
 	private heartbeat = 0;
+	private meter: UsageMeter | null = null;
 	private stickAlive = true; // leave() stops the actor — late sends on a stopped actor warn
 	private sendStick(ev: Parameters<typeof this.stick.send>[0]) {
 		if (this.stickAlive) this.stick.send(ev);
@@ -315,8 +316,16 @@ export class RoomSession {
 			if (this.authorityId === this.selfId) {
 				this.handle.sendRealtime({ t: 'authority-heartbeat', leaseUntil: Date.now() + LEASE_MS });
 			}
+			// metered spend: active paid lanes accrue pool-seconds each tick —
+			// at zero the entitlement flips and lanes fall back to device
+			const laneSecs = (this.sfuSession ? LEASE_MS / 2000 : 0) +
+				(this.sensory ? LEASE_MS / 2000 : 0) +
+				(this.edgeProcessed ? LEASE_MS / 2000 : 0);
+			if (laneSecs) this.meter?.tickSeconds(laneSecs);
 			this.adaptMedia();
 		}, LEASE_MS / 2);
+		this.meter = new UsageMeter(roomCode, () => this.onPoolEmpty());
+		this.meter.start();
 	}
 
 	get selfId() {
@@ -1005,13 +1014,41 @@ export class RoomSession {
 
 	async enableSensory(): Promise<boolean> {
 		if (this.sensory) return true;
-		if (!(await paidEntitled(this.roomCode))) return false;
-		const base = (import.meta.env as Record<string, string | undefined>).VITE_CIC_DSP_ENDPOINT;
-		if (!base) return false;
-		this.sensory = new SensoryPipe(`${base}/speech`, this);
+		const env = import.meta.env as Record<string, string | undefined>;
+		// direct mode: Speechmatics RT endpoint reachable by the client —
+		// SaaS (temp JWT from cic-dsp/speech-token), on-prem appliance, or
+		// On-Device's local service in a native shell
+		if (env.VITE_CIC_SPEECH_URL) {
+			let url = env.VITE_CIC_SPEECH_URL;
+			if (!url.includes('jwt=') && env.VITE_CIC_DSP_ENDPOINT) {
+				const tok = await fetch(`${env.VITE_CIC_DSP_ENDPOINT}/speech-token`)
+					.then((r) => r.json() as Promise<{ key_value?: string }>)
+					.catch(() => null);
+				if (tok?.key_value) url += `${url.includes('?') ? '&' : '?'}jwt=${tok.key_value}`;
+			}
+			this.sensory = new SensoryPipe(url, this, true);
+		} else if (env.VITE_CIC_DSP_ENDPOINT) {
+			// relay mode: cic-dsp owns provider auth, we ship raw PCM16
+			this.sensory = new SensoryPipe(`${env.VITE_CIC_DSP_ENDPOINT}/speech`, this);
+		} else {
+			return false;
+		}
+		if (!(await paidEntitled(this.roomCode))) {
+			this.sensory = null;
+			return false;
+		}
 		this.sensory.start();
 		this.edgeProcessed = true; // plaintext audio leaves the device — badge it
 		return true;
+	}
+
+	/** pool hit zero mid-session: lanes we own stop now; the SFU session runs
+	 *  to call-end but can't debit below the pool floor — next room joins free */
+	private onPoolEmpty() {
+		this.sensory?.stop();
+		this.sensory = null;
+		this.edgeProcessed = false;
+		invalidateTier(this.roomCode);
 	}
 
 	/** sensory events from the /speech relay: diarized transcript + audio events */
@@ -1079,6 +1116,7 @@ export class RoomSession {
 		this.miloState = 'listening';
 		await this.ensureMilo();
 		await this.milo.ask(match[1], this.transcriptWindow);
+		if (this.milo instanceof CloudMilo) this.meter?.tickCall();
 		this.miloState = this.milo.state;
 	}
 
@@ -1089,7 +1127,10 @@ export class RoomSession {
 	private async speakMilo(text: string) {
 		if (this.roles?.['milo-voice'] !== this.selfId) return;
 		let audio: { samples: Float32Array; sampleRate: number } | null = null;
-		if (aiEndpoint() && (await this.paid())) audio = await cloudTts(text, this.ai.voice).catch(() => null);
+		if (aiEndpoint() && (await this.paid())) {
+			audio = await cloudTts(text, this.ai.voice).catch(() => null);
+			if (audio) this.meter?.tickCall();
+		}
 		if (!audio) {
 			if (this.ttsReady === null) this.ttsReady = await this.tts.init();
 			if (!this.ttsReady) return;
@@ -1411,6 +1452,7 @@ export class RoomSession {
 	async leave() {
 		clearInterval(this.heartbeat);
 		this.broker.dispose();
+		this.meter?.stop();
 		this.sensory?.stop();
 		void this.sipLeg?.stop();
 		await this.finishRecording();

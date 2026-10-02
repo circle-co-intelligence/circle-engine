@@ -11,15 +11,19 @@ binding = "AI"
 # AI_CHAT_MODEL / AI_STT_MODEL / AI_TTS_MODEL — optional model overrides
 # AI_BASE_URL — optional upstream base override (OpenAI-compatible)
 
-# D1 entitlements — server-verified paid rooms:
+# D1 metered accounts — paid rooms stream-spend a seconds pool:
 #   wrangler d1 create cic-entitlements
 #   wrangler d1 execute cic-entitlements --command \
-#     "CREATE TABLE entitlements(room TEXT PRIMARY KEY, expires_at INTEGER)"
+#     "CREATE TABLE accounts(room TEXT PRIMARY KEY, balance_seconds INTEGER NOT NULL, spent_seconds INTEGER NOT NULL DEFAULT 0, updated_at INTEGER);
+#      CREATE TABLE grants(nonce TEXT PRIMARY KEY)"
 #   then uncomment and fill database_id:
 # [[d1_databases]]
 # binding = "DB"
 # database_name = "cic-entitlements"
 # database_id = "<id>"
+#
+# Top-ups: GRANT_PUBKEY (Ed25519 hex, wrangler secret put) verifies grants
+# minted by scripts/grant.mjs after a payment settles — any rail works.
 
 # Analytics Engine — opt-in anonymous quality telemetry (/ai/telemetry):
 # [[analytics_engine_datasets]]

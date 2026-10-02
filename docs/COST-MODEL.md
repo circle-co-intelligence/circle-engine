@@ -60,6 +60,20 @@ quota ≈ ~3.5 hrs captions OR ~1,200 Milo turns/day.
    alone. Casual hosts are profitable at $8/mo; heavy ones aren't — which is
    why the levers below matter.
 
+## Customer-facing metering (room seconds pool)
+
+Paid rooms aren't a flag — they're a metered `accounts` row in D1
+(`balance_seconds` / `spent_seconds`). Clients heartbeat usage to
+`/ai/usage` (~every 30 s while lanes run): each active lane-second debits
+1 s from the pool; each `/ai/chat|stt|tts` call debits 5 s
+(`CALL_COST`). At zero the room reverts to free/device-side; the pool
+floors at 0 so nothing can over-bill. Top-ups are Ed25519-signed grants
+(`/ai/topup`) minted post-settlement by `scripts/grant.mjs` — rail-
+agnostic, and small sequential top-ups are the streaming-payment model.
+Suggested pricing: pool seconds ≈ blended paid-lane cost + margin —
+a 6-seat SFU room-hour costs ~$0.74 egress, so $0.001/s pool ≈ $3.60/hr
+covers egress + AI with margin.
+
 ## Cost levers
 
 | Lever | Effect |
