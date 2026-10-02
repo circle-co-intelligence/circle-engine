@@ -1,0 +1,16 @@
+name = "cic-push"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+# Secrets:
+#   wrangler secret put VAPID_PRIVATE   (JWK JSON of the P-256 private key)
+#   wrangler secret put VAPID_PUBLIC
+#   wrangler secret put VAPID_SUB       (mailto:…)
+
+[[durable_objects.bindings]]
+name = "PUSH"
+class_name = "PushSubs"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["PushSubs"]

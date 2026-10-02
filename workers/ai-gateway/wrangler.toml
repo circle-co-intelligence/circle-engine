@@ -1,0 +1,12 @@
+name = "cic-ai-gateway"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+# Workers AI binding — the default provider; other providers set AI_PROVIDER
+# + AI_API_KEY (wrangler secret put). ZDR: pick upstreams with zero-retention
+# terms; this worker itself persists nothing.
+[ai]
+binding = "AI"
+
+# AI_CHAT_MODEL / AI_STT_MODEL / AI_TTS_MODEL — optional model overrides
+# AI_BASE_URL — optional upstream base override (OpenAI-compatible)

@@ -36,6 +36,8 @@ export interface RoomHandle {
 	restartAll: () => void;
 	/** resolves when the first lane is connected */
 	ready: Promise<void>;
+	/** resolved ICE server list (STUN + any TURN from env/broker) */
+	iceServers: () => Promise<RTCIceServer[]>;
 }
 
 /** trystero's onPeer* setters are last-write-wins — wrap them as additive sets */
@@ -99,6 +101,18 @@ async function joinLane(lane: LaneName, secret: string, rtcConfig: RTCConfigurat
 		console.warn(`[net] lane ${lane} unavailable:`, e);
 		return null;
 	}
+}
+
+// ICE credentials are app-scoped (not room-scoped) — resolve once, share
+// across rooms/breakouts, refresh on expiry via /api/ice re-fetch
+let iceServersP: Promise<RTCConfiguration> | null = null;
+export function iceServers(): Promise<RTCConfiguration> {
+	return (iceServersP ??= fetchIceServers());
+}
+/** force re-resolve (credential expiry, broker change) */
+export function refreshIceServers(): Promise<RTCConfiguration> {
+	iceServersP = null;
+	return iceServers();
 }
 
 /** fetch short-lived ICE servers from the edge broker; STUN fallback always present */
@@ -269,7 +283,7 @@ export function openRoom(roomSecret: string): RoomHandle {
 	}
 
 	const ready = (async () => {
-		const rtcConfig = await fetchIceServers();
+		const rtcConfig = await iceServers();
 		for (const name of laneList()) {
 			const room = await joinLane(name, roomSecret, rtcConfig).catch(() => null);
 			if (!room) continue;
@@ -386,7 +400,8 @@ export function openRoom(roomSecret: string): RoomHandle {
 			return 'new';
 		},
 		restartAll,
-		ready
+		ready,
+		iceServers: async () => (await iceServers()).iceServers ?? []
 	};
 	return handle;
 }

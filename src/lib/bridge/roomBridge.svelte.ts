@@ -13,6 +13,7 @@ import { LocalSocket } from './localSocket';
 import { RoomSession } from '../state/room.svelte';
 import { roomSecretFromCode } from '../net/room';
 import { SfuLoopback } from './sfu';
+import { CloudSfu } from './cloudSfu';
 import { SpeechStreamPipe, TranslationFanout, TranslationSpeechPipe } from './stt';
 import { SpeakingMonitor } from './speaking';
 import { translateText } from '../ai/translate';
@@ -125,7 +126,14 @@ class RoomBridge {
 	private selfProdId = '';
 	private name = '';
 	private code: string;
-	private sfu = new SfuLoopback(this);
+	// media plane: cloud SFU when an endpoint is configured (anycast relay +
+	// selective forwarding for larger circles), else the in-browser loopback
+	// that fronts the Trystero mesh — both speak prod's publish/subscribe frames
+	private sfu: SfuLoopback | CloudSfu = (
+		import.meta.env as Record<string, string | undefined>
+	).VITE_CIC_SFU_ENDPOINT
+		? new CloudSfu(this)
+		: new SfuLoopback(this);
 	private sessionStartedAt = Date.now();
 	private lastChatLen = 0;
 	private lastCapLen = 0;
@@ -455,12 +463,16 @@ class RoomBridge {
 				let tok = issuedTokens.get(this.code);
 				if (!tok) issuedTokens.set(this.code, (tok = new Set()));
 				tok.add(token);
+				// prod's own pc gets the same ICE set the mesh lanes resolved —
+				// loopback SFU works with host candidates, but a configured TURN
+				// broker (or env TURN) gives the cloud-SFU path a routable pc
+				const iceServers = (await this.session?.handle.iceServers().catch(() => null)) ?? [];
 				this.frame({
 					t: 'welcome',
 					sessionToken: token,
 					you: this.selfProdId,
 					seq: this.seq,
-					iceServers: [],
+					iceServers,
 					media: true,
 					snapshot: this.snapshot()
 				});
@@ -477,11 +489,15 @@ class RoomBridge {
 				break;
 			}
 			case 'leave': this.explicitLeave = true; this.sock.close(); break;
-			// no TURN needed (local mesh) — but iceExpiresAt: 0 would leave prod's
-			// refresh timer permanently overdue; answer with a real future expiry
-			case 'refresh-ice':
-				this.frame({ t: 'ice-servers', iceServers: [], iceExpiresAt: Date.now() + 3_600_000 });
+			// re-resolve (TURN creds are short-lived; the broker mints fresh
+			// ones per call) — a broker-less deploy still returns STUN so
+			// prod's refresh timer sees a real expiry, not 0
+			case 'refresh-ice': {
+				const { refreshIceServers } = await import('../net/room');
+				const iceServers = (await refreshIceServers().catch(() => null))?.iceServers ?? [];
+				this.frame({ t: 'ice-servers', iceServers, iceExpiresAt: Date.now() + 3_600_000 });
 				break;
+			}
 
 			// stick
 			case 'pass': s?.passStick(); break;
@@ -1063,9 +1079,11 @@ class RoomBridge {
 				void JSON.stringify(s.breakoutChannels);
 				untrack(() => this.frame({ t: 'snapshot', room: this.snapshot(), seq: ++this.seq }));
 			});
-			// mesh streams → SFU pull announcements + speaking detection feeds
+			// mesh streams (or cloud-SFU peer sessions) → SFU pull announcements
+			// + speaking detection feeds
 			$effect(() => {
 				void s.remoteStreams;
+				void JSON.stringify(s.peerSfuSessions);
 				this.sfu.notifyStreams();
 				this.speaking.setStreams(s.localMedia?.stream ?? null, s.remoteStreams, s.selfId);
 			});

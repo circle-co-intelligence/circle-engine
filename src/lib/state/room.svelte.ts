@@ -14,6 +14,8 @@ import { BreakoutSession } from '../net/breakout.svelte';
 import { LocalTts } from '../ai/speech';
 import { llmModelUrl } from '../ai/translate';
 import { Milo } from '../ai/milo';
+import { CloudMilo, aiEndpoint, cloudTts } from '../ai/cloud';
+import { adaptSenders, deviceClass, pressureLevel } from '../media/adapt';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import { noteArtifact } from '../bridge/artifacts';
 import {
@@ -83,6 +85,11 @@ export class RoomSession {
 	breakoutNames = $state<string[]>([]);
 	breakoutBroadcast = $state<{ message: string; from: string } | null>(null);
 	remoteStreams = $state<Record<string, MediaStream>>({});
+	/** peerId → their cloud-SFU session id (hello.sfu), when they publish via SFU */
+	peerSfuSessions = $state<Record<string, string>>({});
+	private sfuSession = '';
+	/** low-power media mode — auto-on for low-class devices, UI can flip it */
+	lowPower = $state(deviceClass() === 'low');
 	localMedia: LocalMedia | null = null;
 	captionsAvailable = $state(false);
 	/** latest personal-caption update per mesh peer (prod caption-update shape) */
@@ -161,7 +168,9 @@ export class RoomSession {
 	private sendStick(ev: Parameters<typeof this.stick.send>[0]) {
 		if (this.stickAlive) this.stick.send(ev);
 	}
-	private milo = new Milo();
+	// cloud gateway (zero-retention) when an endpoint is configured, else the
+	// on-device wllama Milo — same state machine + onSay contract either way
+	private milo: Milo | CloudMilo = aiEndpoint() ? new CloudMilo() : new Milo();
 	private tts = new LocalTts();
 	private ttsReady: boolean | null = null;
 	private transcriptWindow: string[] = [];
@@ -226,6 +235,7 @@ export class RoomSession {
 			this.peerMuted = { ...this.peerMuted, [peerId]: undefined as never };
 			delete this.peerMuted[peerId];
 			delete this.remoteStreams[peerId];
+			delete this.peerSfuSessions[peerId];
 			delete this.peerLangs[peerId];
 			dropPeerKey(peerId);
 			this.syncSeats();
@@ -256,6 +266,7 @@ export class RoomSession {
 			if (this.authorityId === this.selfId) {
 				this.handle.sendRealtime({ t: 'authority-heartbeat', leaseUntil: Date.now() + LEASE_MS });
 			}
+			this.adaptMedia();
 		}, LEASE_MS / 2);
 	}
 
@@ -371,7 +382,14 @@ export class RoomSession {
 	private helloMsg(): RealtimeMessage {
 		const cap = [bytesToHex(this.identity.publicKey), this.e2ee.publicKeyHex];
 		if (this.accessHash) cap.push(this.accessHash);
-		return { t: 'hello', name: this.displayName, cap };
+		return { t: 'hello', name: this.displayName, cap, ...(this.sfuSession ? { sfu: this.sfuSession } : {}) };
+	}
+
+	/** cloud-SFU publish path got its session id — re-announce so peers can pull */
+	announceSfu(sessionId: string) {
+		if (this.sfuSession === sessionId) return;
+		this.sfuSession = sessionId;
+		this.handle.sendRealtime(this.helloMsg());
 	}
 
 	private onRealtime(msg: RealtimeMessage, peerId: string) {
@@ -390,6 +408,8 @@ export class RoomSession {
 					break;
 				}
 				this.deniedPeers.delete(peerId);
+				if (msg.sfu)
+					this.peerSfuSessions = { ...this.peerSfuSessions, [peerId]: msg.sfu };
 				if (msg.cap[0]) this.memberKeys.add(msg.cap[0]);
 				this.names[peerId] = msg.name;
 				// a hello proves the joiner's data channel is live — the
@@ -787,6 +807,18 @@ export class RoomSession {
 		this.syncSeats();
 	}
 
+	/** adaptive media pressure → per-sender bitrate/resolution clamps */
+	private adaptMedia() {
+		if (!this.publishedStreams.size) return;
+		let worst = 'connected';
+		for (const p of this.peers) {
+			const st = this.handle.peerConnState(p);
+			if (st === 'failed' || st === 'disconnected') worst = st;
+			else if (st !== 'connected' && st !== 'completed' && worst === 'connected') worst = st;
+		}
+		adaptSenders(this.handle, pressureLevel({ peerCount: this.peers.length, worstConn: worst, batterySaver: this.lowPower }));
+	}
+
 	/** production-frontend path: media arrives over the loopback SFU — publish it to the mesh */
 	publishLocal(stream: MediaStream) {
 		this.publishedStreams.add(stream);
@@ -849,12 +881,17 @@ export class RoomSession {
 
 	private speakCtx: AudioContext | null = null;
 
-	/** milo-voice role synthesizes Milo replies locally via sherpa VITS */
+	/** milo-voice role synthesizes replies — cloud TTS when configured, sherpa
+	 *  VITS locally otherwise (and as the fallback when the gateway fails) */
 	private async speakMilo(text: string) {
 		if (this.roles?.['milo-voice'] !== this.selfId) return;
-		if (this.ttsReady === null) this.ttsReady = await this.tts.init();
-		if (!this.ttsReady) return;
-		const audio = await this.tts.speak(text);
+		let audio: { samples: Float32Array; sampleRate: number } | null = null;
+		if (aiEndpoint()) audio = await cloudTts(text, this.ai.voice).catch(() => null);
+		if (!audio) {
+			if (this.ttsReady === null) this.ttsReady = await this.tts.init();
+			if (!this.ttsReady) return;
+			audio = await this.tts.speak(text);
+		}
 		if (!audio) return;
 		const ctx = new AudioContext({ sampleRate: audio.sampleRate });
 		this.speakCtx = ctx;

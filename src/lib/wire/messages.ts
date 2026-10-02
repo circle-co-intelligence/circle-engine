@@ -113,7 +113,14 @@ export type OpEnvelope = z.infer<typeof opEnvelope>;
 
 /** non-authoritative realtime messages (presence/ephemeral channels) */
 export const realtimeMessage = z.discriminatedUnion('t', [
-	z.object({ t: z.literal('hello'), name: z.string().max(80), cap: z.array(z.string()) }),
+	z.object({
+		t: z.literal('hello'),
+		name: z.string().max(80),
+		cap: z.array(z.string()),
+		// optional: the peer's SFU session id when it publishes via a cloud
+		// SFU — lets subscribers map mesh peerId → remote track location
+		sfu: z.string().max(80).optional()
+	}),
 	z.object({ t: z.literal('welcome'), roomEpoch: epoch, yourId: participantId }),
 	z.object({ t: z.literal('snapshot'), state: z.string() }), // encrypted checkpoint blob ref
 	z.object({ t: z.literal('delta') }),

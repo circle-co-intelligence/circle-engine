@@ -1,5 +1,6 @@
 import type { RoomHandle } from '../net/room';
 import type { E2EESession } from '../crypto/e2ee';
+import { deviceClass, videoConstraints } from './adapt';
 
 /**
  * Media capture + publish — getUserMedia, stream publish over trystero,
@@ -14,7 +15,7 @@ export interface LocalMedia {
 
 export async function capture(opts: { video?: boolean; audio?: boolean } = { video: true, audio: true }): Promise<LocalMedia> {
 	const stream = await navigator.mediaDevices.getUserMedia({
-		video: opts.video ? { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' } : false,
+		video: opts.video ? videoConstraints(deviceClass()) : false,
 		audio: opts.audio
 			? { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
 			: false
