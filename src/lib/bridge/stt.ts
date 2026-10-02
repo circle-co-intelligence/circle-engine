@@ -192,8 +192,16 @@ export class SpeechStreamPipe {
 		const pcm16 = new Int16Array(bin.buffer, bin.byteOffset, bin.byteLength >> 1);
 		const f32 = new Float32Array(pcm16.length);
 		for (let i = 0; i < pcm16.length; i++) f32[i] = pcm16[i] / 32768;
+		const mono16k = this.sampleRate === 16000 ? f32 : resample(f32, this.sampleRate);
+		// sensory tee (paid lane): 16k PCM16 → cic-dsp /speech → diarized events
+		if (this.session?.sensory) {
+			const i16 = new Int16Array(mono16k.length);
+			for (let i = 0; i < mono16k.length; i++)
+				i16[i] = Math.max(-32768, Math.min(32767, Math.round(mono16k[i] * 32767)));
+			this.session.sensory.feed(i16);
+		}
 		try {
-			this.pipeline.push(this.sampleRate === 16000 ? f32 : resample(f32, this.sampleRate));
+			this.pipeline.push(mono16k);
 		} catch (e) {
 			console.warn('[stt] sherpa push failed', e);
 			this.dispose();

@@ -10,3 +10,21 @@ binding = "AI"
 
 # AI_CHAT_MODEL / AI_STT_MODEL / AI_TTS_MODEL — optional model overrides
 # AI_BASE_URL — optional upstream base override (OpenAI-compatible)
+
+# D1 entitlements — server-verified paid rooms:
+#   wrangler d1 create cic-entitlements
+#   wrangler d1 execute cic-entitlements --command \
+#     "CREATE TABLE entitlements(room TEXT PRIMARY KEY, expires_at INTEGER)"
+#   then uncomment and fill database_id:
+# [[d1_databases]]
+# binding = "DB"
+# database_name = "cic-entitlements"
+# database_id = "<id>"
+
+# Analytics Engine — opt-in anonymous quality telemetry (/ai/telemetry):
+# [[analytics_engine_datasets]]
+# binding = "AE"
+# dataset = "cic_quality"
+
+# Turnstile — abuse protection on paid lanes (secret via wrangler secret put):
+#   TURNSTILE_SECRET — unset = gate off

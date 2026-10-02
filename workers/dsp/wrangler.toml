@@ -1,0 +1,20 @@
+name = "cic-dsp"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+# Edge-side audio enhancement for paid, opted-in rooms.
+# Cloudflare Realtime Media Transport Adapters POST adapters/new against the
+# Calls API pointing at this worker's wss endpoint; the adapter pushes PCM
+# audio and ingests our processed PCM back as a republished track.
+#
+# PRIVACY: this lane carries PLAINTEXT audio — it is only ever attached when
+# the participant explicitly opted in (client shows a visible
+# "edge-processed, not E2EE" badge). Nothing is persisted.
+
+[[durable_objects.bindings]]
+name = "DSP"
+class_name = "DspBus"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["DspBus"]

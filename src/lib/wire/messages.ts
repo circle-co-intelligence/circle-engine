@@ -191,7 +191,12 @@ export const realtimeMessage = z.discriminatedUnion('t', [
 		original: z.string().max(2000).optional()
 	}),
 	z.object({ t: z.literal('e2ee-key'), epoch, data: z.string() }), // wrapped EpochAnnouncement (JSON)
-	z.object({ t: z.literal('sas'), emoji: z.string().max(16) }) // emoji fingerprint verify
+	z.object({ t: z.literal('sas'), emoji: z.string().max(16) }), // emoji fingerprint verify
+	// beyond-GCC bandwidth broker: peers report link stats to the elected
+	// bw-allocator; it broadcasts a per-peer sender budget — cross-flow
+	// coordination libwebrtc's per-flow congestion control can't do
+	z.object({ t: z.literal('bw-stats'), rttMs: z.number(), estKbps: z.number() }),
+	z.object({ t: z.literal('bw-budget'), limit: z.number().int() })
 ]);
 export type RealtimeMessage = z.infer<typeof realtimeMessage>;
 

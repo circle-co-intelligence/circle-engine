@@ -16,6 +16,11 @@ import { llmModelUrl } from '../ai/translate';
 import { Milo } from '../ai/milo';
 import { CloudMilo, aiEndpoint, cloudTts } from '../ai/cloud';
 import { adaptSenders, deviceClass, pressureLevel } from '../media/adapt';
+import { paidEntitled } from '../tier';
+import { BwBroker } from '../media/broker';
+import { SensoryPipe, type SensoryEvent } from '../ai/sensory';
+import { uploadRecording } from '../rec/cloud';
+import type { SipLeg } from '../media/sip';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import { noteArtifact } from '../bridge/artifacts';
 import {
@@ -171,13 +176,21 @@ export class RoomSession {
 	private sendStick(ev: Parameters<typeof this.stick.send>[0]) {
 		if (this.stickAlive) this.stick.send(ev);
 	}
-	// cloud gateway (zero-retention) when an endpoint is configured, else the
-	// on-device wllama Milo — same state machine + onSay contract either way
-	private milo: Milo | CloudMilo = aiEndpoint() ? new CloudMilo() : new Milo();
+	// on-device wllama Milo by default; ensureMilo upgrades to the zero-retention
+	// cloud gateway when the room carries a paid entitlement (tier.ts)
+	private milo: Milo | CloudMilo = new Milo();
+	private paidP: Promise<boolean> | null = null;
+	private paid(): Promise<boolean> {
+		return (this.paidP ??= paidEntitled(this.roomCode));
+	}
 	private tts = new LocalTts();
 	private ttsReady: boolean | null = null;
 	private transcriptWindow: string[] = [];
 	private publishedStreams = new Set<MediaStream>();
+	/** beyond-GCC: RTT-gradient pre-emption bumps this before adaptMedia reads it */
+	private preemptBoost = 0;
+	private sipLeg: SipLeg | null = null;
+	private broker!: BwBroker;
 
 	constructor(
 		public roomSecret: string,
@@ -193,6 +206,25 @@ export class RoomSession {
 			denyReasons(env.op, this.actorFor(env.senderId), this.stateSnapshot())
 		);
 		this.stick.start();
+		this.broker = new BwBroker(
+			this.handle,
+			this.selfId,
+			() => this.roles?.['bw-allocator'] === this.selfId,
+			() => {
+				this.preemptBoost++;
+				this.adaptMedia();
+			}
+		);
+		this.broker.start();
+		// PSTN leg — env-gated, lazy-loaded (sip.js stays out of the bundle
+		// unless a trunk is configured); a call lands as a publish stream
+		const env = import.meta.env as Record<string, string | undefined>;
+		if (env.VITE_CIC_SIP_URI && env.VITE_CIC_SIP_WS) {
+			void import('../media/sip').then(({ SipLeg }) => {
+				this.sipLeg = new SipLeg((s) => this.publishLocal(s));
+				void this.sipLeg!.start().catch(() => (this.sipLeg = null));
+			});
+		}
 		this.policyReady = initPolicy();
 		(globalThis as { __room?: RoomHandle }).__room = this.handle; // e2e/debug handle
 
@@ -369,6 +401,7 @@ export class RoomSession {
 		for (const p of seats) this.seatedPeers.add(p); // self too — seated self can't be re-waitlisted by a stale lobby-waiting list
 		this.sendStick({ type: 'SEATS_SET', seats });
 		this.roles = electAll(Object.values(this.caps));
+		this.broker.setRoleHolder(this.roles['bw-allocator'] ?? null);
 		this.retryAuthOps();
 		// milo brain is elected now, but the ~100MB GGUF loads lazily on first address
 		if (this.roles?.['milo-brain'] === this.selfId && this.miloState === 'off') this.miloState = 'standby';
@@ -528,6 +561,7 @@ export class RoomSession {
 			case 'away':
 				if (msg.on) this.peerAway = new Set([...this.peerAway, peerId]);
 				else { this.peerAway.delete(peerId); this.peerAway = new Set(this.peerAway); }
+				this.onPeerAway?.(peerId, !!msg.on);
 				break;
 			case 'sharing':
 				if (msg.on) this.peerSharing = new Set([...this.peerSharing, peerId]);
@@ -548,6 +582,10 @@ export class RoomSession {
 				break;
 			case 'reaction-kind':
 				this.onReaction?.(msg.kind, peerId, this.names[peerId] ?? 'Peer');
+				break;
+			case 'bw-stats':
+			case 'bw-budget':
+				this.broker.handle(msg, peerId);
 				break;
 			case 'lobby-join':
 				// a joiner's announce holds them here even if our onPeerJoin ran
@@ -830,23 +868,150 @@ export class RoomSession {
 		this.syncSeats();
 	}
 
+	/** hook for the bridge: SFU pull-side clamp under pressure (tracks/update) */
+	onPressureLevel: ((level: number) => void) | null = null;
+
+	/** hook for the bridge: away peers → video pull drops to a trickle */
+	onPeerAway: ((peerId: string, away: boolean) => void) | null = null;
+
+	/** last computed pressure level 0–3 — drives the quality badge */
+	pressure = $state(0);
+
 	/** adaptive media pressure → per-sender bitrate/resolution clamps */
 	private adaptMedia() {
-		if (!this.publishedStreams.size) return;
 		let worst = 'connected';
 		for (const p of this.peers) {
 			const st = this.handle.peerConnState(p);
 			if (st === 'failed' || st === 'disconnected') worst = st;
 			else if (st !== 'connected' && st !== 'completed' && worst === 'connected') worst = st;
 		}
-		adaptSenders(this.handle, pressureLevel({ peerCount: this.peers.length, worstConn: worst, batterySaver: this.lowPower }));
+		const level = Math.min(3,
+			pressureLevel({ peerCount: this.peers.length, worstConn: worst, batterySaver: this.lowPower }) +
+				this.preemptBoost // beyond-GCC: RTT-gradient pre-emption bumps before loss
+		);
+		this.pressure = level;
+		this.onPressureLevel?.(level);
+		if (!this.publishedStreams.size) return;
+		adaptSenders(this.handle, level);
 	}
+
+	/** witness/audience mode — receive-only: we pull, never publish */
+	witnessOnly = $state(false);
+
+	/** opt-in media enhancements (enhance.ts): all default-off, fail-open */
+	mediaFx = $state({
+		denoise: false,
+		videoFx: 'off' as 'off' | 'blur' | 'image' | 'crop',
+		spatial: false,
+		music: false
+	});
+
+	/** edge-processed audio lane: plaintext audio to cic-dsp — NOT E2EE */
+	edgeProcessed = $state(false);
+	private fxApplied = new WeakSet<MediaStreamTrack>();
+
+	/** swap each new track for its processed twin when an enhancement is on */
+	private async enhanceStream(stream: MediaStream): Promise<MediaStream> {
+		const { denoise, videoFx } = this.mediaFx;
+		if (!denoise && videoFx === 'off') return stream;
+		const { denoiseAudioTrack, videoFxTrack, smartCropTrack } = await import('../media/enhance');
+		const out = new MediaStream();
+		for (const track of stream.getTracks()) {
+			if (this.fxApplied.has(track)) continue;
+			this.fxApplied.add(track);
+			let next = track;
+			if (track.kind === 'audio' && denoise) next = (await denoiseAudioTrack(track))?.track ?? track;
+			if (track.kind === 'video' && videoFx === 'crop')
+				next = (await smartCropTrack(track))?.track ?? track;
+			else if (track.kind === 'video' && videoFx !== 'off' && videoFx !== 'crop')
+				next = (await videoFxTrack(track, videoFx))?.track ?? track;
+			out.addTrack(next);
+		}
+		return out.getTracks().length ? out : stream;
+	}
+
+	/** track-level dedupe — republishing a track under a new stream wrapper
+	 *  (e.g. `new MediaStream([track])` from the SFU ontrack path) must not
+	 *  double-add: trystero would throw "sender already exists" */
+	private publishedTracks = new Set<MediaStreamTrack>();
 
 	/** production-frontend path: media arrives over the loopback SFU — publish it to the mesh */
 	publishLocal(stream: MediaStream) {
-		this.publishedStreams.add(stream);
-		this.handle.addStream(stream);
-		this.breakout?.publish(stream);
+		if (this.witnessOnly) return; // audience lane publishes nothing
+		void this.enhanceStream(stream).then((s) => {
+			const fresh = s.getTracks().filter((t) => !this.publishedTracks.has(t));
+			if (!fresh.length) return;
+			for (const t of fresh) this.publishedTracks.add(t);
+			const out = fresh.length === s.getTracks().length ? s : new MediaStream(fresh);
+			this.publishedStreams.add(out);
+			this.handle.addStream(out);
+			this.breakout?.publish(out);
+		});
+	}
+
+	/**
+	 * Edge denoise lane (paid, explicit opt-in): attach a Cloudflare Realtime
+	 * audio Media Transport Adapter pointing at cic-dsp. The mic track reaches
+	 * the SFU as PLAINTEXT, gets cleaned at the edge, and republishes — so we
+	 * raise edgeProcessed and the UI must show "edge-processed, not E2EE".
+	 */
+	async enableEdgeDenoise(): Promise<boolean> {
+		if (!this.sfuSession || this.edgeProcessed) return this.edgeProcessed;
+		if (!(await paidEntitled(this.roomCode))) return false; // paid lane only
+		const base =
+			(import.meta.env as Record<string, string | undefined>).VITE_CIC_DSP_ENDPOINT ??
+			'wss://cic-dsp.example.workers.dev';
+		const res = await fetch(
+			`${(import.meta.env as Record<string, string | undefined>).VITE_CIC_SFU_ENDPOINT ?? '/api/sfu'}/sessions/${this.sfuSession}/adapters/new`,
+			{
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({
+					tracks: [
+						{
+							location: 'local',
+							trackName: this.sfuTrackNames.find((n) => n.startsWith('audio')) ?? 'audio',
+							adapter: { type: 'audio', url: `${base}/audio?session=${this.sfuSession}` }
+						}
+					]
+				})
+			}
+		).catch(() => null);
+		if (!res?.ok) return false;
+		this.edgeProcessed = true; // badge: edge-processed, not E2EE
+		return true;
+	}
+
+	/**
+	 * Sensory lane (paid, opt-in): SpeechStreamPipe tees 16k PCM16 here →
+	 * cic-dsp /speech → Speechmatics/AssemblyAI relay → ingestSensory events.
+	 * Diarized segments + audio events enrich Milo's context — who spoke and
+	 * what the room sounded like, not just words.
+	 */
+	sensory: SensoryPipe | null = null;
+
+	async enableSensory(): Promise<boolean> {
+		if (this.sensory) return true;
+		if (!(await paidEntitled(this.roomCode))) return false;
+		const base = (import.meta.env as Record<string, string | undefined>).VITE_CIC_DSP_ENDPOINT;
+		if (!base) return false;
+		this.sensory = new SensoryPipe(`${base}/speech`, this);
+		this.sensory.start();
+		this.edgeProcessed = true; // plaintext audio leaves the device — badge it
+		return true;
+	}
+
+	/** sensory events from the /speech relay: diarized transcript + audio events */
+	ingestSensory(ev: SensoryEvent) {
+		if (ev.t === 'transcript' && ev.text) {
+			const label = ev.speaker ? `[${ev.speaker}] ${ev.text}` : ev.text;
+			this.transcriptWindow = [...this.transcriptWindow.slice(-39), label];
+			if (ev.final) void this.maybeMilo(label);
+		} else if (ev.t === 'event' && ev.event && !ev.end) {
+			// audio events → room mood signal: transcript context + a reaction op
+			this.transcriptWindow = [...this.transcriptWindow.slice(-39), `[room] ${ev.event}`];
+			this.handle.sendRealtime({ t: 'reaction-kind', kind: `audio:${ev.event}` });
+		}
 	}
 
 	/** a caption segment from the speech stream (prod frontend streams PCM via speech-frame) */
@@ -875,6 +1040,8 @@ export class RoomSession {
 	private async ensureMilo() {
 		if (this.miloInitStarted || this.roles?.['milo-brain'] !== this.selfId) return;
 		this.miloInitStarted = true;
+		// paid rooms get the zero-retention cloud brain; free rooms stay on-device
+		this.milo = aiEndpoint() && (await this.paid()) ? new CloudMilo() : new Milo();
 		const ok = await this.milo.init({
 			modelUrl: await llmModelUrl(),
 			maxContextTokens: 2048
@@ -909,7 +1076,7 @@ export class RoomSession {
 	private async speakMilo(text: string) {
 		if (this.roles?.['milo-voice'] !== this.selfId) return;
 		let audio: { samples: Float32Array; sampleRate: number } | null = null;
-		if (aiEndpoint()) audio = await cloudTts(text, this.ai.voice).catch(() => null);
+		if (aiEndpoint() && (await this.paid())) audio = await cloudTts(text, this.ai.voice).catch(() => null);
 		if (!audio) {
 			if (this.ttsReady === null) this.ttsReady = await this.tts.init();
 			if (!this.ttsReady) return;
@@ -952,6 +1119,12 @@ export class RoomSession {
 	/** stop the recorder and publish real segment blobs into the local artifact store */
 	private async finishRecording() {
 		const blobs = await this.recorder.stop();
+		// paid rooms: ciphertext upload to R2 (rec/cloud seals before PUT —
+		// plaintext never leaves the device)
+		if (blobs.length && this.roomSecret) {
+			const recId = await uploadRecording(this.roomSecret, this.roomCode, blobs);
+			if (recId) noteArtifact(this.roomCode, `r2-${recId}`, 0);
+		}
 		for (const blob of blobs) {
 			const key = `local-${crypto.randomUUID()}.webm`;
 			try {
@@ -1196,6 +1369,9 @@ export class RoomSession {
 
 	async leave() {
 		clearInterval(this.heartbeat);
+		this.broker.dispose();
+		this.sensory?.stop();
+		void this.sipLeg?.stop();
 		await this.finishRecording();
 		this.notes.destroy();
 		this.localMedia?.stop();

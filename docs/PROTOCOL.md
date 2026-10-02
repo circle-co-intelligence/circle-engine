@@ -164,3 +164,38 @@ entries drop on socket close.
 (reads prod's `?code`/`?name`, seeds `cic.name`); `/room/{code}` +
 `[...rest]` → prod bundle mount; `/account/link` → link-challenge resolver;
 `/site/*.html` → static mirrors (privacy/terms/imprint/login).
+
+## Local realtime extensions (mesh-only, invisible to prod wire)
+
+These ride `sendRealtime` on the Trystero mesh — they never leave the room
+data channel and prod's deployed protocol is untouched:
+
+- `bw-stats` `{rtt, jitter?, loss?, est?}` — peer → elected `bw-allocator`
+  quality report (media/broker.ts).
+- `bw-budget` `{max, sid?}` — allocator → peer clamp; applied via
+  `sender.setParameters.maxBitrate`, per-track when `sid` present.
+- `reaction-kind` `{kind}` — already carries prod reaction kinds; the sensory
+  lane also emits `audio:<event>` (laughter/applause/music) from Speechmatics
+  audio events.
+
+## Paid lanes (all opt-in, all badged)
+
+- `enableEdgeDenoise()` — attaches a CF Realtime Media Transport Adapter to
+  cic-dsp; mic audio reaches the edge as PLAINTEXT → `edgeProcessed` badge
+  ("edge-processed, not E2EE") is mandatory.
+- `enableSensory()` — PCM16 tee → cic-dsp `/speech` → Speechmatics RT
+  (diarization + audio events) or AssemblyAI (env `SPEECH_PROVIDER`).
+  Events feed Milo's transcriptWindow as `[S3] text` / `[room] laughter`.
+- `uploadRecording()` — segments sealed client-side (XChaCha20-Poly1305,
+  HKDF(roomSecret)) → `PUT /api/rec/{room}/{recId}/{n}` → R2 ciphertext.
+
+## Edge endpoints
+
+| Path | Handler | Notes |
+|---|---|---|
+| `POST /ai/chat` `/ai/stt` `/ai/tts` | ai-gateway | ZDR; optional `cf-turnstile` header gate |
+| `GET /ai/entitlement?room=` | ai-gateway | D1 grant lookup → `{paid}` |
+| `POST /ai/telemetry` | ai-gateway | opt-in anonymous → Analytics Engine |
+| `wss cic-dsp /audio` | dsp DO | adapter PCM ↔ processed PCM |
+| `wss cic-dsp /speech` | dsp worker | PCM → diarized sensory events |
+| `PUT/GET /api/rec/...` | Pages fn | R2 ciphertext only |

@@ -3,6 +3,8 @@
 	import { Editor } from '@tiptap/core';
 	import StarterKit from '@tiptap/starter-kit';
 	import Collaboration from '@tiptap/extension-collaboration';
+	import TaskList from '@tiptap/extension-task-list';
+	import TaskItem from '@tiptap/extension-task-item';
 	import type { NotesDoc } from './notes';
 
 	let { notes }: { notes: NotesDoc } = $props();
@@ -14,6 +16,8 @@
 			element: el,
 			extensions: [
 				StarterKit.configure({}),
+				TaskList,
+				TaskItem.configure({ nested: true }),
 				Collaboration.configure({ fragment: notes.text })
 			]
 		});

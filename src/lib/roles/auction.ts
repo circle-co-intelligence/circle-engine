@@ -16,7 +16,13 @@ export interface Capability {
 	isRecorderDevice: boolean; // dedicated recorder tab opt-in
 }
 
-export type Role = 'milo-brain' | 'milo-voice' | 'recorder-primary' | 'recorder-standby' | 'forwarder';
+export type Role =
+	| 'milo-brain'
+	| 'milo-voice'
+	| 'recorder-primary'
+	| 'recorder-standby'
+	| 'forwarder'
+	| 'bw-allocator';
 
 export function scoreFor(cap: Capability, role: Role): number {
 	switch (role) {
@@ -42,6 +48,10 @@ export function scoreFor(cap: Capability, role: Role): number {
 			return (cap.isRecorderDevice ? 60 : 0) + cap.memoryGB * 4 + cap.uplinkKbps / 2000;
 		case 'forwarder':
 			return cap.uplinkKbps / 500 + cap.cpuScore * 2 - (cap.batterySaver ? 100 : 0);
+		case 'bw-allocator':
+			// the room's bandwidth broker should sit on the healthiest link —
+			// it reads everyone's stats and must stay reachable itself
+			return cap.uplinkKbps / 200 + cap.cpuScore * 3 + cap.memoryGB * 2 - (cap.batterySaver ? 80 : 0);
 	}
 }
 
@@ -68,6 +78,7 @@ export function electAll(caps: Capability[]): Record<Role, string | null> {
 		'recorder-standby': standby,
 		'milo-brain': brain,
 		'milo-voice': elect(caps, 'milo-voice'),
-		forwarder: elect(caps, 'forwarder')
+		forwarder: elect(caps, 'forwarder'),
+		'bw-allocator': elect(caps, 'bw-allocator')
 	};
 }

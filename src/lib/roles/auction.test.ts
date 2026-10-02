@@ -31,4 +31,12 @@ describe('role auction', () => {
 		const r2 = electAll([cap('a'), cap('b')]);
 		expect(r1).toEqual(r2); // order-independent — every client agrees
 	});
+
+	it('bw-allocator prefers the healthiest uplink, avoids battery saver', () => {
+		const mobile = cap('mobile', { uplinkKbps: 800, batterySaver: true });
+		const desktop = cap('desktop', { uplinkKbps: 9000 });
+		expect(elect([mobile, desktop], 'bw-allocator')).toBe('desktop');
+		const roles = electAll([mobile, desktop]);
+		expect(roles['bw-allocator']).toBe('desktop');
+	});
 });

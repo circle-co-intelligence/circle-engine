@@ -72,6 +72,8 @@ export class CloudSfu {
 	private sfuSessionId: string | null = null;
 	private connectionId = '';
 	private pendingPulls: { sessionId: string; kind: string; trackName: string }[] = [];
+	/** prod sessionId → last applied bandwidth clamp (tracks/update dedupe) */
+	private pullClamps = new Map<string, number>();
 	// one SFU session = one offer/answer state machine: CF rejects concurrent
 	// mutations on the same session (406), so every tracks/new + renegotiate
 	// runs through this queue
@@ -175,13 +177,20 @@ export class CloudSfu {
 			const trackNameOf = (t: { sessionId: string; trackName?: string; kind?: string }) =>
 				t.trackName ?? t.sessionId.split(':').slice(1).join(':') ?? t.kind ?? 'audio';
 			if (!this.sfuSessionId) {
-				// no Calls session until our first publish — stash the want
-				this.pendingPulls.push(...tracks.map((t) => ({
-					sessionId: t.sessionId,
-					kind: t.kind ?? trackNameOf(t).split('-')[0],
-					trackName: trackNameOf(t)
-				})));
-				return;
+				if (this.session?.witnessOnly) {
+					// audience lane: receive-only — create the session for pulls
+					// without ever publishing (quadratic→linear egress at scale)
+					const created = await api<{ sessionId: string }>('/sessions/new', undefined, 'POST');
+					this.sfuSessionId = created.sessionId;
+				} else {
+					// no Calls session until our first publish — stash the want
+					this.pendingPulls.push(...tracks.map((t) => ({
+						sessionId: t.sessionId,
+						kind: t.kind ?? trackNameOf(t).split('-')[0],
+						trackName: trackNameOf(t)
+					})));
+					return;
+				}
 			}
 			const sid = this.sfuSessionId;
 			const remote = [];
@@ -196,7 +205,15 @@ export class CloudSfu {
 					this.pendingPulls.push({ sessionId: t.sessionId, kind, trackName });
 					continue;
 				}
-				remote.push({ location: 'remote', sessionId: peerSfu, trackName });
+				// rid forward-compat: if a future prod build requests a specific
+				// simulcast layer, honor it via CF's preferredRid; today prod
+				// sends none and SFU forwards the publisher's single encoding
+				const def: Record<string, unknown> = { location: 'remote', sessionId: peerSfu, trackName };
+				const rid = (t as { rid?: string }).rid ?? (t as { preferredRid?: string }).preferredRid;
+				if (rid) def.preferredRid = rid;
+				const clamp = this.pullClamps.get(t.sessionId);
+				if (clamp) def.bandwidthLimiter = { maxBitrate: clamp };
+				remote.push(def);
 			}
 			if (!remote.length) return;
 			const res = await api<{
@@ -284,6 +301,64 @@ export class CloudSfu {
 					this.connectionId
 				);
 		}, 1500);
+	}
+
+	/**
+	 * Pull-side bandwidth clamp — CF's `tracks/update` applies a
+	 * bandwidthLimiter to bound remote pulls without renegotiation. Called by
+	 * the session's adaptive-media path: under pressure we clamp remote pulls
+	 * instead of the (prod-owned, untouchable) send encodings.
+	 */
+	async clampPulls(maxBitrate: number | null) {
+		const sid = this.sfuSessionId;
+		if (!sid) return;
+		const targets: Record<string, unknown>[] = [];
+		for (const [peerId, peerSfu] of Object.entries(this.session?.peerSfuSessions ?? {})) {
+			if (!peerSfu) continue;
+			const names = this.session?.peerSfuTracks[peerId] ?? ['audio', 'video'];
+			for (const trackName of names.filter((n) => n.split('-')[0] === 'video')) {
+				const key = `${peerId}:${trackName}`;
+				if (this.pullClamps.get(key) === (maxBitrate ?? -1)) continue;
+				if (maxBitrate === null) this.pullClamps.delete(key);
+				else this.pullClamps.set(key, maxBitrate);
+				targets.push({
+					location: 'remote',
+					sessionId: peerSfu,
+					trackName,
+					...(maxBitrate === null ? {} : { bandwidthLimiter: { maxBitrate } })
+				});
+			}
+		}
+		if (!targets.length) return;
+		await this.enqueue(async () => {
+			try {
+				await api(`/sessions/${sid}/tracks/update`, { tracks: targets }, 'PUT');
+			} catch (e) {
+				console.debug('[cloud-sfu] tracks/update failed', e);
+			}
+		});
+	}
+
+	/** per-peer pull clamp — e.g. away peers drop video to a trickle */
+	async clampPeerPulls(peerId: string, maxBitrate: number | null) {
+		const sid = this.sfuSessionId;
+		const peerSfu = this.session?.peerSfuSessions?.[peerId];
+		if (!sid || !peerSfu) return;
+		const names = this.session?.peerSfuTracks[peerId] ?? ['audio', 'video'];
+		const targets = names
+			.filter((n) => n.split('-')[0] === 'video')
+			.map((trackName) => ({
+				location: 'remote',
+				sessionId: peerSfu,
+				trackName,
+				...(maxBitrate === null ? {} : { bandwidthLimiter: { maxBitrate } })
+			}));
+		if (!targets.length) return;
+		await this.enqueue(async () => {
+			try {
+				await api(`/sessions/${sid}/tracks/update`, { tracks: targets }, 'PUT');
+			} catch {}
+		});
 	}
 
 	async answer(sdp: string, _connectionId: string) {

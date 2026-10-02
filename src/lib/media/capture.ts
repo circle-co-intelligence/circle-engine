@@ -1,6 +1,7 @@
 import type { RoomHandle } from '../net/room';
 import type { E2EESession } from '../crypto/e2ee';
 import { deviceClass, videoConstraints } from './adapt';
+import { hintTrack } from './tune';
 
 /**
  * Media capture + publish — getUserMedia, stream publish over trystero,
@@ -20,6 +21,7 @@ export async function capture(opts: { video?: boolean; audio?: boolean } = { vid
 			? { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
 			: false
 	});
+	for (const t of stream.getVideoTracks()) hintTrack(t, 'talker');
 	return {
 		stream,
 		setMuted(muted) {

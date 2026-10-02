@@ -12,6 +12,7 @@
  *   3. audio-only (video track disabled, not removed — instant recovery)
  */
 import type { RoomHandle } from '../net/room';
+import { preferCodecs, tunePeerConnection, tuneReceivers } from './tune';
 
 export type DeviceClass = 'low' | 'mid' | 'high';
 
@@ -59,17 +60,28 @@ const LEVEL_PARAMS: Record<number, { maxBitrate: number; scaleDownBy?: number; m
 };
 
 let appliedLevel = -1;
+const tunedPcs = new WeakSet<RTCPeerConnection>();
 
 /**
  * Clamp every video sender across all lane connections. Called when peer
  * count or connectivity changes — setParameters is renegotiation-free, so
  * this is cheap enough to run on every state transition.
+ *
+ * First pass per pc also applies the tune.ts table: codec prefs (AV1→VP9→
+ * H264, audio/red under loss), scalabilityMode + role params, and the
+ * adaptive jitter buffer on receivers.
  */
 export function adaptSenders(room: RoomHandle, level: number): void {
 	if (level === appliedLevel) return;
 	appliedLevel = level;
 	const params = LEVEL_PARAMS[level] ?? LEVEL_PARAMS[0];
 	for (const pc of Object.values(room.raw.getPeers())) {
+		if (!tunedPcs.has(pc)) {
+			tunedPcs.add(pc);
+			preferCodecs(pc, { lossy: level >= 2 });
+			tunePeerConnection(pc, level >= 2 ? 'listener' : 'talker');
+			tuneReceivers(pc, level === 0); // tight jitter buffer only at full quality
+		}
 		for (const sender of pc.getSenders()) {
 			if (sender.track?.kind !== 'video') continue;
 			const p = sender.getParameters();

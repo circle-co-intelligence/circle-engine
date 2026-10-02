@@ -13,6 +13,8 @@ import { LocalSocket } from './localSocket';
 import { RoomSession } from '../state/room.svelte';
 import { roomSecretFromCode } from '../net/room';
 import { SfuLoopback } from './sfu';
+import { shapeRemoteAudio, seatAngle } from '../media/spatial';
+import { mountBadges } from '../ui/badges';
 import { CloudSfu } from './cloudSfu';
 import { SpeechStreamPipe, TranslationFanout, TranslationSpeechPipe } from './stt';
 import { SpeakingMonitor } from './speaking';
@@ -21,6 +23,7 @@ import { budget as creditsBudget, quote as creditsQuote, confirm as creditsConfi
 import { startLink, pollLink, sessionToken } from './account';
 import { artifactsFor, noteArtifact, type Artifact } from './artifacts';
 import { initRoomPush, ringRoom } from './push';
+import { paidEntitled } from '../tier';
 import type { Op } from '../wire/messages';
 
 type Frame = Record<string, unknown>;
@@ -127,14 +130,51 @@ class RoomBridge {
 	private selfProdId = '';
 	private name = '';
 	private code: string;
-	// media plane: cloud SFU when an endpoint is configured (anycast relay +
-	// selective forwarding for larger circles), else the in-browser loopback
-	// that fronts the Trystero mesh — both speak prod's publish/subscribe frames
-	private sfu: SfuLoopback | CloudSfu = (
-		import.meta.env as Record<string, string | undefined>
-	).VITE_CIC_SFU_ENDPOINT
-		? new CloudSfu(this)
-		: new SfuLoopback(this);
+	// media plane: starts as the in-browser loopback fronting the Trystero mesh;
+	// hello upgrades to the cloud SFU when the endpoint is configured AND the
+	// room carries a paid entitlement (tier.ts) — one encode+one uplink vs the
+	// mesh's N−1 copies is the paid tier's biggest device offload
+	private sfu: SfuLoopback | CloudSfu = new SfuLoopback(this);
+	private sfuUpgraded = false;
+	private async upgradeSfu() {
+		if (this.sfuUpgraded) return;
+		this.sfuUpgraded = true;
+		const useCloud =
+			!!(import.meta.env as Record<string, string | undefined>).VITE_CIC_SFU_ENDPOINT &&
+			(await paidEntitled(this.code));
+		if (useCloud) {
+			this.sfu.dispose();
+			this.sfu = new CloudSfu(this);
+		}
+	}
+
+	private unmountBadges: (() => void) | null = null;
+	private bindSfu(session: RoomSession) {
+		this.sfu.bind(session);
+		this.unmountBadges?.();
+		this.unmountBadges = mountBadges(session); // quality dots + edge-processed disclosure
+		// pressure → pull-side clamps: level 1+ clamps remote video pulls via
+		// CF tracks/update (no renegotiation); mesh path no-ops it
+		session.onPressureLevel = (level) =>
+			void this.sfu.clampPulls(level >= 3 ? 400_000 : level === 2 ? 800_000 : level === 1 ? 1_600_000 : null);
+		// away peers: pull their video at a trickle, audio stays live
+		session.onPeerAway = (peerId, away) =>
+			void (this.sfu as CloudSfu).clampPeerPulls?.(peerId, away ? 48_000 : null);
+		// receive-side shaping on the mesh pull leg: loudness normalization is
+		// always-on (every voice lands at the same level); stereo placement is
+		// opt-in via mediaFx.spatial. Cloud-SFU pulls decode at the edge so they
+		// bypass this chain — documented limitation of that lane.
+		if (this.sfu instanceof SfuLoopback) {
+			this.sfu.shape = (sessionId, track) => {
+				const peerId = sessionId.split(':')[0];
+				const idx = Math.max(0, session.peers.indexOf(peerId));
+				return shapeRemoteAudio(sessionId, track, {
+					loudness: true,
+					angle: session.mediaFx.spatial ? seatAngle(idx, Math.max(2, session.peers.length)) : undefined
+				});
+			};
+		}
+	}
 	private sessionStartedAt = Date.now();
 	private lastChatLen = 0;
 	private lastCapLen = 0;
@@ -400,6 +440,7 @@ class RoomBridge {
 				this.selfProdId = String(m.participantId ?? crypto.randomUUID());
 				this.name = String(m.name ?? 'Guest');
 				const entry = sessionByCode.get(this.code);
+				await this.upgradeSfu();
 				let created = false;
 				if (!this.session && entry) {
 					// prod reopened the socket (resync / breakout move / media
@@ -410,13 +451,16 @@ class RoomBridge {
 					this.session = entry.session;
 					if (!this.retired) {
 						clearTimeout(entry.leaveTimer);
-						this.sfu.bind(this.session);
+						this.bindSfu(this.session);
 						this.watch();
 					}
 				} else if (!this.session) {
 					this.session = new RoomSession(roomSecretFromCode(this.code, this.roomKey), this.name, this.code);
+					// witness link (?witness=1 or hello flag) → receive-only audience seat
+					if (m.witness === true || new URLSearchParams(location.search).get('witness') === '1')
+						this.session.witnessOnly = true;
 					sessionByCode.set(this.code, { session: this.session, leaveTimer: 0 });
-					this.sfu.bind(this.session);
+					this.bindSfu(this.session);
 					created = true;
 					// proof hash travels in hello.cap[2] — members verify it against
 					// the op-log passwordHash (we can't know it pre-sync ourselves)

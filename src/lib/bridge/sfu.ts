@@ -21,6 +21,8 @@ interface BridgeLike {
 const RTC_CFG: RTCConfiguration = { iceServers: [] }; // loopback — host candidates only
 
 export class SfuLoopback {
+	/** optional receive-side shaping (spatial pan + loudness norm) — set by RoomSession */
+	shape?: (sessionId: string, track: MediaStreamTrack) => MediaStreamTrack;
 	private pc: RTCPeerConnection | null = null;
 	private wanted = new Map<string, { kind: string; trackName: string }>(); // sessionId -> pull request
 	private negotiating = false;
@@ -92,6 +94,9 @@ export class SfuLoopback {
 		}, 400);
 	}
 
+	/** interface parity with CloudSfu — mesh senders clamp via setParameters instead */
+	async clampPulls(_maxBitrate: number | null) {}
+
 	// ---- pull leg: we offer mesh tracks to the frontend ----
 	subscribe(tracks: { sessionId: string; trackName?: string; kind?: string; ownerId?: string }[], connectionId: string) {
 		for (const t of tracks) {
@@ -150,7 +155,8 @@ export class SfuLoopback {
 		if (!s) return null;
 		const [peerId, kind] = sessionId.split(':');
 		const stream = s.remoteStreams[peerId];
-		return stream?.getTracks().find((t) => t.kind === kind) ?? null;
+		const track = stream?.getTracks().find((t) => t.kind === kind) ?? null;
+		return track && kind === 'audio' ? (this.shape?.(sessionId, track) ?? track) : track;
 	}
 
 	private availableTracks(): { sessionId: string; trackName: string; kind: string; ownerId: string }[] {

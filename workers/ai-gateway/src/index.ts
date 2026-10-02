@@ -31,6 +31,9 @@ export interface Env {
 	AI_STT_MODEL?: string;
 	AI_TTS_MODEL?: string;
 	AI_BASE_URL?: string;
+	DB?: D1Database; // entitlements table — server-verified paid rooms
+	AE?: AnalyticsEngineDataset; // opt-in anonymous quality telemetry
+	TURNSTILE_SECRET?: string; // siteverify on paid lanes when set
 }
 
 const PROVIDER_URLS: Record<string, string> = {
@@ -56,6 +59,17 @@ export default {
 				return await stt(req, env);
 			if (url.pathname === '/ai/tts' && req.method === 'POST')
 				return await tts(req, env);
+			if (url.pathname === '/ai/entitlement' && req.method === 'GET')
+				return await entitlement(url, env);
+			if (url.pathname === '/ai/telemetry' && req.method === 'POST')
+				return await telemetry(req, env);
+			if (url.pathname === '/ai/status' && req.method === 'GET')
+				return json({
+					ok: true,
+					provider: env.AI_PROVIDER ?? 'workers-ai',
+					models: { chat: env.AI_CHAT_MODEL, stt: env.AI_STT_MODEL, tts: env.AI_TTS_MODEL },
+					entitlements: !!env.DB
+				});
 			return json({ error: 'not found' }, 404);
 		} catch (e) {
 			return json({ error: e instanceof Error ? e.message : 'upstream' }, 502);
@@ -66,6 +80,8 @@ export default {
 // ------------------------------------------------------------- chat (Milo)
 
 async function chat(req: Request, env: Env): Promise<Response> {
+	if (!(await humanOk(env, req.headers.get('cf-turnstile'), req.headers.get('cf-connecting-ip'))))
+		return json({ error: 'turnstile' }, 403);
 	const { system, context, prompt } = (await req.json()) as {
 		system: string;
 		context?: string[];
@@ -141,6 +157,46 @@ async function tts(req: Request, env: Env): Promise<Response> {
 		}
 	}
 	return json({ error: 'tts provider unconfigured' }, 503);
+}
+
+// ------------------------------------------------------------- entitlement + telemetry
+
+/** GET /ai/entitlement?room= → {paid} — D1-backed grant lookup */
+async function entitlement(url: URL, env: Env): Promise<Response> {
+	if (!env.DB) return json({ paid: false });
+	const room = url.searchParams.get('room');
+	if (!room) return json({ error: 'room required' }, 400);
+	const row = await env.DB.prepare(
+		'SELECT room FROM entitlements WHERE room = ? AND expires_at > unixepoch()'
+	)
+		.bind(room)
+		.first();
+	return json({ paid: !!row });
+}
+
+/** POST /ai/telemetry — opt-in anonymous quality points → Analytics Engine */
+async function telemetry(req: Request, env: Env): Promise<Response> {
+	if (!env.AE) return json({ ok: true }); // dataset unbound → accept+drop
+	const { level, room } = (await req.json()) as { level?: number; room?: string };
+	env.AE.writeDataPoint({
+		blobs: [room ? room.slice(0, 8) : 'anon'], // room hash prefix only
+		doubles: [level ?? 0],
+		indexes: ['quality']
+	});
+	return json({ ok: true });
+}
+
+/** Turnstile siteverify — call on paid lanes when TURNSTILE_SECRET is set */
+async function humanOk(env: Env, token: string | null, ip: string | null): Promise<boolean> {
+	if (!env.TURNSTILE_SECRET) return true; // unset = gate off (self-host default)
+	if (!token) return false;
+	const res = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: `secret=${env.TURNSTILE_SECRET}&response=${token}${ip ? `&remoteip=${ip}` : ''}`
+	});
+	const body = (await res.json()) as { success?: boolean };
+	return body.success === true;
 }
 
 // ------------------------------------------------------------- helpers
