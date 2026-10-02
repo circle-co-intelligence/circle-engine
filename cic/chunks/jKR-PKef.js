@@ -1,0 +1,1 @@
+import{aj as s}from"./CnPDbKfE.js";const r=["classic","carved","ring","ember","feather","sprout","hearth"],t=[{id:"classic",label:"Classic"},{id:"feather",label:"Feather"},{id:"sprout",label:"Sprout"},{id:"hearth",label:"Hearth"}],i=s({variant:"classic"});function c(a){return r.includes(a)?a:"classic"}export{t as R,c as p,i as s};

@@ -1,0 +1,1 @@
+.stick.svelte-1ba14pi{display:grid;place-items:center;color:var(--chalk-white);rotate:var(--rot);transition:rotate .3s cubic-bezier(.22,1,.36,1)}.stick.svelte-1ba14pi svg:where(.svelte-1ba14pi){display:block;width:calc(var(--h) * .35);height:var(--h)}

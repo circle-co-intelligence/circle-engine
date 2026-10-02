@@ -1,0 +1,1 @@
+import"../chunks/Bzak7iHL.js";import{d as t,c as m,f as i,a as c,e as f,$ as n}from"../chunks/CnPDbKfE.js";import{i as p}from"../chunks/BRvOUStf.js";import{h as s}from"../chunks/eoxXCTau.js";import"../chunks/C-0NFZQL.js";function u(o){var e=m();s("65ef24",r=>{f(()=>{n.title="Room tour · preview"})});var a=i(e);p(a,r=>{}),c(o,e)}t(["click"]);export{u as component};

@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+		<title>Co-Intelligence Circle</title>
+		<meta name="description" content="Guided talking-stick circles with human and AI participants and a shared fire." />
+		<meta name="theme-color" content="#1ABC9C" />
+		<link rel="icon" type="image/png" href="/circle-engine/favicon.png" />
+		<link rel="apple-touch-icon" href="/circle-engine/brand/symbol-light.png" />
+		<link rel="manifest" href="/circle-engine/manifest.webmanifest" />
+		<meta property="og:title" content="Co-Intelligence Circle" />
+		<meta property="og:description" content="Guided talking-stick circles with human and AI participants and a shared fire." />
+		<meta property="og:image" content="/circle-engine/og.png" />
+		<!-- Fonts self-hosted only — third-party font/CDN links leak participant IPs
+		     before they enter the circle. No third-party analytics in this shell. -->
+		<!-- Static hosts (GH Pages) can't send COOP/COEP — a tiny service worker
+		     restores cross-origin isolation so SharedArrayBuffer (multi-threaded
+		     wllama) works there. No-ops where the headers already exist. -->
+		<script src="/circle-engine/coi-serviceworker.js"></script>
+		<meta http-equiv="content-security-policy" content="default-src 'self'; worker-src 'self' blob:; connect-src 'self' wss: https://github.com https://*.githubusercontent.com https://huggingface.co https://*.hf.co; font-src 'self'; img-src 'self' data: blob:; media-src 'self' blob: mediastream:; object-src 'none'; script-src 'self' 'wasm-unsafe-eval' blob: 'sha256-f8gE1VeL2zYcn0gHXMWLdRh2zxV3HI9OoFDeFbvOjfA='; style-src 'self' 'unsafe-inline'; base-uri 'none'; form-action 'self'">
+		<link href="/circle-engine/_app/immutable/entry/start.CEyvaP5k.js" rel="modulepreload">
+		<link href="/circle-engine/_app/immutable/chunks/gzhqglof.js" rel="modulepreload">
+		<link href="/circle-engine/_app/immutable/chunks/49FDdhPp.js" rel="modulepreload">
+		<link href="/circle-engine/_app/immutable/chunks/XjtaG_YD.js" rel="modulepreload">
+		<link href="/circle-engine/_app/immutable/chunks/yGmik_iR.js" rel="modulepreload">
+		<link href="/circle-engine/_app/immutable/entry/app.Dr2TtqQ7.js" rel="modulepreload">
+		<link href="/circle-engine/_app/immutable/chunks/Dp1pzeXC.js" rel="modulepreload">
+		<link href="/circle-engine/_app/immutable/chunks/Dp5d6D30.js" rel="modulepreload">
+		<link href="/circle-engine/_app/immutable/chunks/BjWfnbGb.js" rel="modulepreload">
+		<link href="/circle-engine/_app/immutable/chunks/CNHAzGy1.js" rel="modulepreload">
+		<link href="/circle-engine/_app/immutable/chunks/CGfQEC7v.js" rel="modulepreload">
+		<link href="/circle-engine/_app/immutable/chunks/BNOEaCQp.js" rel="modulepreload">
+		<link href="/circle-engine/_app/immutable/chunks/CvvAeqxR.js" rel="modulepreload">
+		<link href="/circle-engine/_app/immutable/nodes/0.D9Tr8aL6.js" rel="modulepreload">
+		
+		<link href="/circle-engine/_app/immutable/assets/0.C-_p4ws7.css" rel="stylesheet">
+	</head>
+	<body data-sveltekit-preload-data="hover">
+		<div style="display: contents">
+			<script>
+				{
+					__sveltekit_se2qoo = {
+						base: "/circle-engine",
+						assets: "/circle-engine"
+					};
+
+					const element = document.currentScript.parentElement;
+
+					Promise.all([
+						import("/circle-engine/_app/immutable/entry/start.CEyvaP5k.js"),
+						import("/circle-engine/_app/immutable/entry/app.Dr2TtqQ7.js")
+					]).then(([kit, app]) => {
+						kit.start(app, element);
+					});
+				}
+			</script>
+		</div>
+	</body>
+</html>
