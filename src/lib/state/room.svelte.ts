@@ -20,6 +20,7 @@ import { paidEntitled } from '../tier';
 import { BwBroker } from '../media/broker';
 import { SensoryPipe, type SensoryEvent } from '../ai/sensory';
 import { uploadRecording } from '../rec/cloud';
+import { addPoll, addAgenda, addSection, addTalkTimeStats } from '../notes/facilitate';
 import type { SipLeg } from '../media/sip';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import { noteArtifact } from '../bridge/artifacts';
@@ -206,6 +207,18 @@ export class RoomSession {
 			denyReasons(env.op, this.actorFor(env.senderId), this.stateSnapshot())
 		);
 		this.stick.start();
+		// talk-time equity: accumulate holder wall-time from stick snapshots —
+		// feeds /talktime → the notes doc's Talk time section
+		let heldSince: { id: string | null; at: number } = { id: null, at: 0 };
+		this.stick.subscribe((snap) => {
+			const id = snap.context.holderId ?? null;
+			if (heldSince.id && heldSince.id !== id)
+				this.talkMs.set(
+					heldSince.id,
+					(this.talkMs.get(heldSince.id) ?? 0) + (Date.now() - heldSince.at)
+				);
+			if (heldSince.id !== id) heldSince = { id, at: Date.now() };
+		});
 		this.broker = new BwBroker(
 			this.handle,
 			this.selfId,
@@ -1215,7 +1228,35 @@ export class RoomSession {
 		await this.leaveBreakout();
 	}
 
+	/** stick-hold wall-time per peer — feeds the /talktime notes section */
+	private talkMs = new Map<string, number>();
+
+	/**
+	 * Facilitation slash commands — typed in prod's own chat box, they write
+	 * into the synced notes doc (Yjs syncs to everyone; no new protocol):
+	 *   /poll question? | option | option     → synced taskList poll
+	 *   /agenda item | item | item            → ordered-list agenda
+	 *   /talktime                             → equity report section
+	 *   /recap                                → transcript tail as Recap section
+	 * Returns true when the text was a command.
+	 */
+	private facilitate(text: string): boolean {
+		const m = text.trim().match(/^\/(poll|agenda|talktime|recap)\s*(.*)$/i);
+		if (!m) return false;
+		const [, cmd, rest] = m;
+		const parts = rest.split('|').map((s) => s.trim()).filter(Boolean);
+		if (cmd.toLowerCase() === 'poll' && parts.length >= 3) addPoll(this.notes, parts[0], parts.slice(1));
+		else if (cmd.toLowerCase() === 'agenda' && parts.length) addAgenda(this.notes, parts);
+		else if (cmd.toLowerCase() === 'talktime')
+			addTalkTimeStats(this.notes, Object.fromEntries(this.talkMs), this.names);
+		else if (cmd.toLowerCase() === 'recap')
+			addSection(this.notes, 'Recap', this.transcriptWindow.slice(-15));
+		else return true; // recognized but malformed — don't publish as chat
+		return true;
+	}
+
 	sendChat(text: string, whisperTo?: string) {
+		if (!whisperTo && this.facilitate(text)) return;
 		// whisper = DC-targeted frame — only the recipient's client decodes it
 		this.handle.sendRealtime({ t: 'chat', text, whisperTo }, whisperTo);
 		this.chatLog = [...this.chatLog, { from: this.selfId, text, whisper: !!whisperTo }];

@@ -79,6 +79,51 @@ export function mountBadges(session: RoomSession): () => void {
 		}
 	};
 
+	// paid opt-in lanes + host actions — each an explicit click, each only
+	// shown when its endpoint exists; edge/sensory break E2EE by design so
+	// the click is the consent and the pill is the disclosure
+	const env = import.meta.env as Record<string, string | undefined>;
+	const chip = (label: string, title: string, fn: () => void) => {
+		const b = document.createElement('button');
+		b.textContent = label;
+		b.title = title;
+		b.style.cssText = wb.style.cssText;
+		b.onclick = fn;
+		root.appendChild(b);
+		return b;
+	};
+	if (env.VITE_CIC_DSP_ENDPOINT) {
+		chip('enhance audio', 'Edge denoise — mic audio is processed unencrypted at the edge (paid)', () => {
+			void session.enableEdgeDenoise();
+		});
+		chip('sense room', 'Diarized captions + audio events via speech provider (paid)', () => {
+			void session.enableSensory();
+		});
+	}
+	chip('invite', 'Download a calendar invite for this circle', () => {
+		void import('../notes/invite').then(({ icsInvite, downloadIcs }) => {
+			downloadIcs(
+				'circle.ics',
+				icsInvite({
+					title: 'Co-Intelligence Circle',
+					startAt: new Date(Date.now() + 3600_000),
+					minutes: 60,
+					joinUrl: location.href
+				})
+			);
+		});
+	});
+	chip('audit', 'Export the signed op-log (verifiable room record)', () => {
+		void import('../audit/export').then(({ exportAudit }) => {
+			const json = exportAudit(session.oplog.entries, session.oplog.epoch);
+			const a = document.createElement('a');
+			a.href = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
+			a.download = `circle-audit-${session.roomCode}.json`;
+			a.click();
+			URL.revokeObjectURL(a.href);
+		});
+	});
+
 	return () => {
 		window.clearInterval(tick);
 		unmountWb?.();
