@@ -317,6 +317,26 @@ source stays byte-pristine):
 - `static/coi-serviceworker.js` restores COOP/COEP → `crossOriginIsolated` →
   SharedArrayBuffer for multi-threaded WASM, which Pages headers can't set.
 
+## Edge services (all optional, env-gated)
+
+The app is fully functional with zero configuration. Optional env vars light
+up edge infrastructure — none of them see room secrets or plaintext media:
+
+| Env | Effect |
+|---|---|
+| `VITE_CIC_LANES` | signaling lanes, comma-separated: `mqtt` (default), `nostr`, `torrent`, `ipfs`, `supabase` |
+| `VITE_CIC_MQTT_BROKERS` / `VITE_CIC_NOSTR_RELAYS` | relay URL lists for those lanes |
+| `VITE_CIC_SUPABASE_URL` / `VITE_CIC_SUPABASE_KEY` | enable the supabase lane |
+| `VITE_CIC_TURN` | JSON `RTCIceServer[]` static TURN entries (prefer the `/api/ice` broker for real deploys) |
+| `VITE_CIC_SFU_ENDPOINT` | cloud-SFU adapter endpoint (default shape: `/api/sfu`, proxy to CF Realtime) |
+| `VITE_CIC_AI_ENDPOINT` | zero-retention AI gateway endpoint (`/ai/chat`, `/ai/stt`, `/ai/tts`); unset → on-device sherpa/wllama |
+
+`functions/api/ice.ts` + `functions/api/sfu/[[path]].ts` are Cloudflare Pages
+Functions (TURN credential broker, SFU auth proxy) — deployed automatically
+with `pnpm build:cf` on Pages. `workers/` holds standalone Worker variants
+(ice, signaling DO, VAPID push, ai-gateway) for non-Pages mounts; each has its
+own `wrangler.toml` and takes secrets via `wrangler secret put`.
+
 ## Security
 
 - Room secret in `#fragment` — never on the wire.

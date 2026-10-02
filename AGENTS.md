@@ -8,6 +8,10 @@ Zero-server, client-only P2P video circle app. SvelteKit (adapter-static, `ssr=f
 ## Commands
 - `pnpm install` — pnpm 11; `pnpm-workspace.yaml` `allowBuilds` must stay (esbuild/msw/protobufjs).
 - `pnpm check` / `pnpm test` / `pnpm build` — must all pass before done.
+- `pnpm build:pages` — GitHub Pages deploy build (CIC_BASE=/circle-engine).
+- `pnpm build:cf` — Cloudflare Pages deploy build (root base; _headers/_redirects
+  + functions/ Pages Functions for /api/ice and /api/sfu are picked up
+  automatically).
 - `pnpm policy:build` — recompile `src/lib/policy/cic.rego` → `static/policy/cic.wasm` (needs `opa` CLI at ~/.local/bin/opa).
 - `pnpm test:e2e` — Playwright, all three engines pass.
   Fedora WebKit workaround (Playwright ships Ubuntu-built WebKit): missing libs

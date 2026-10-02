@@ -9,6 +9,11 @@ the wire contract our implementation must remain compatible with.
 | Category | Observed names |
 |---|---|
 | Presence | `hello`, `welcome`, `join`, `join-room`, `leave`, `admit`, `admitted`, `lobby`, `participant` |
+
+> Internal mesh realtime (peer↔peer over Trystero datachannels, never the prod
+> room socket): `hello` carries `cap[]` (idkey, e2ee key, access proof) plus an
+> optional `sfu` field — the peer's cloud-SFU session id when it publishes via
+> `VITE_CIC_SFU_ENDPOINT`. Older clients ignore it (zod-optional, stripped).
 | Stick/round | `round`, `stick`, `open-throw`, `question`, `hand-*` (implied), `seat` fields |
 | Chat/notes | `chat`, `note`, `notes`, `notes-state`, `notes-save`, `reaction`, `whisper` |
 | Captions | `captions`, `caption-ticket`, `caption-subscribe`, `caption-state`, `caption-source`, `caption-source-ready`, `caption-source-failed`, `caption-update`, `caption-clear`, `caption-capture`, `caption-capability`, `caption-audio`, `caption-audio-stop` |
