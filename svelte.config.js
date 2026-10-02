@@ -6,6 +6,10 @@ const config = {
 	preprocess: vitePreprocess(),
 	kit: {
 		adapter: adapter({ fallback: 'index.html' }),
+		// ssr=false emits no crawlable HTML, so prerender entries must be
+		// explicit — these routes ship as real files (200 on Pages) instead
+		// of the 404-status fallback. Prod's invite links target /join?code=…
+		prerender: { entries: ['*', '/join', '/account/link'] },
 		// CIC_BASE: mount path for static hosts that serve under a prefix
 		// (GitHub Pages project site → '/circle-engine'). Empty in dev/root deploys.
 		paths: { base: process.env.CIC_BASE ?? '' },

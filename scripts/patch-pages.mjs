@@ -34,6 +34,7 @@ const STATIC_PREFIXES = [
 const STATIC_FILES = [
 	'/ai-flow.lottie', '/bluefire.lottie', '/campfire.lottie', '/sloth-meditate.lottie',
 	'/wave.lottie', '/bg-cave-desktop.webp', '/bg-cave-mobile.webp', '/fire2.webp',
+	'/fire-bowl.png',
 	'/caption-capture-worklet.js', '/dg-capture-worklet.js', '/dotlottie-player.wasm',
 	'/manifest.webmanifest', '/favicon.png', '/og.png', '/coi-serviceworker.js'
 ];

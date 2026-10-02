@@ -2,6 +2,7 @@
 	/** Local join entry — the SaaS dashboard doesn't exist here; this is the
 	 * room-code + name gate that lands on /room/{code}#{secret}. */
 	import { goto } from '$app/navigation';
+	import { base } from '$app/paths';
 	import { onMount } from 'svelte';
 
 	let name = $state('');
@@ -22,7 +23,7 @@
 			params.set('name', name.trim());
 			try { sessionStorage.setItem('cic.name', name.trim()); } catch {}
 		}
-		goto(`/room/${c}?${params}#${crypto.randomUUID()}`);
+		goto(`${base}/room/${c}?${params}#${crypto.randomUUID()}`);
 	}
 </script>
 
@@ -40,7 +41,7 @@
 			<input bind:value={code} inputmode="numeric" placeholder="123456" />
 		</label>
 		<button type="submit">Join circle</button>
-		<p><a href="/">← Back</a></p>
+		<p><a href="{base}/">← Back</a></p>
 	</form>
 </main>
 
