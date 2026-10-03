@@ -18,6 +18,10 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 speechd = { path = "speechd" }
 
+[features]
+# production builds serve frontendDist over the custom protocol instead of devUrl
+custom-protocol = ["tauri/custom-protocol"]
+
 [profile.release]
 panic = "abort"
 lto = true

@@ -14,3 +14,4 @@ deploy/turnserver.rendered.conf
 # rust build artifacts
 src-tauri/target/
 src-tauri/speechd/target/
+src-tauri/gen/

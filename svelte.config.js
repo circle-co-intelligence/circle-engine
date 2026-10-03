@@ -21,10 +21,22 @@ const config = {
 				// — all wss endpoints + model-pack remotes. GitHub release
 				// downloads redirect to *.githubusercontent.com; HF LFS to
 				// *.hf.co CDNs. The dotlottie CDN fetch is shimmed to the
-				// vendored copy in install.ts.
+				// vendored copy in install.ts. Loopback ws/http allows the
+				// native shell's local speech service (and a user-run engine
+				// for web clients) without opening insecure remote origins.
 				'connect-src': [
 					'self',
 					'wss:',
+					'ws://localhost:*',
+					'ws://127.0.0.1:*',
+					'http://localhost:*',
+					'http://127.0.0.1:*',
+					// edge services the build scripts point at (entitlement/AI,
+					// DSP relay, SFU) — fetch/WebSocket to these must pass CSP
+					'https://cic-ai-gateway.terexmaps.workers.dev',
+					'https://cic-dsp.terexmaps.workers.dev',
+					'https://cic-sfu.terexmaps.workers.dev',
+					'wss://cic-signaling.circle-engine.workers.dev',
 					'https://github.com',
 					'https://*.githubusercontent.com',
 					'https://huggingface.co',
