@@ -12,6 +12,7 @@
  *      GCC tunes bitrate, it can't reroute paths.
  */
 import type { RoomHandle } from '../net/room';
+import { applyPullHint } from './simulcast';
 
 const SAMPLE_MS = 2000;
 const RTT_WINDOW = 5;
@@ -143,18 +144,15 @@ export class BwBroker {
 		this.applyLimit();
 	}
 
-	/** clamp our video senders to the room budget — overrides nothing below it */
+	/**
+	 * Clamp our video senders to the room budget. Simulcast-capable senders
+	 * deactivate spatial layers first (q floor → h → f); single-encoding
+	 * senders get a plain maxBitrate clamp — same budget either way.
+	 */
 	private applyLimit() {
 		if (this.selfLimit === null) return;
-		for (const pc of Object.values(this.room.raw.getPeers())) {
-			for (const s of pc.getSenders()) {
-				if (s.track?.kind !== 'video') continue;
-				const p = s.getParameters();
-				for (const enc of p.encodings ?? [])
-					enc.maxBitrate = Math.min(enc.maxBitrate ?? Infinity, this.selfLimit * 1000);
-				s.setParameters(p).catch(() => {});
-			}
-		}
+		for (const pc of Object.values(this.room.raw.getPeers()))
+			applyPullHint(pc, this.selfLimit);
 	}
 
 	dispose() {

@@ -20,7 +20,7 @@
 
 ## Entry surface (co-intelligence.online landing)
 
-The entry page mirrors the deployed marketing page — structure, copy, palette
+The entry page follows the deployed marketing page — structure, copy, palette
 (ea-light: `#faf9f6` base, sand/sky/sage atmo blobs, feTurbulence grain), pill
 buttons, capsule form, benefit cards with the production SVG icons, and the
 brand logo — with these deliberate deviations:

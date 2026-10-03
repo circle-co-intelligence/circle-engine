@@ -1,0 +1,44 @@
+# Self-host stack — the complete zero-Cloudflare deployment.
+#
+#   caddy      — static frontend + reverse proxy (TLS, one config file)
+#   mosquitto  — signaling lane (trystero 'mqtt' strategy over websockets)
+#   coturn     — STUN/TURN for restrictive NATs
+#
+# Everything the browser touches rides through Caddy on 443 (TLS).
+# Compose stays dependency-light: all images Apache-2.0 / EPL-2.0 / BSD.
+name: cic
+
+services:
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    ports:
+      - "443:443"
+      - "80:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ../build:/srv:ro           # pnpm build output (adapter-static)
+      - caddy-data:/data
+    environment:
+      DOMAIN: ${DOMAIN:?set in .env — e.g. circle.example.com}
+    depends_on: [mosquitto]
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    restart: unless-stopped
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto-data:/mosquitto/data
+    # no host ports — only reachable via Caddy /mqtt
+
+  coturn:
+    image: coturn/coturn:4.6
+    restart: unless-stopped
+    network_mode: host            # TURN needs the real port range
+    volumes:
+      # rendered by selfhost.sh from turnserver.conf (coturn reads no env)
+      - ./turnserver.rendered.conf:/etc/coturn/turnserver.conf:ro
+
+volumes:
+  caddy-data:
+  mosquitto-data:

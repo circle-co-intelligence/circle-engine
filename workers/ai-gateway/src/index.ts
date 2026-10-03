@@ -35,6 +35,9 @@ export interface Env {
 	AE?: AnalyticsEngineDataset; // opt-in anonymous quality telemetry
 	TURNSTILE_SECRET?: string; // siteverify on paid lanes when set
 	GRANT_PUBKEY?: string; // Ed25519 hex — verifies top-up grants
+	GRANT_SECRET?: string; // Ed25519 hex seed — /admin/mint signs grants
+	CF_ACCESS_TEAM?: string; // e.g. 'yourteam.cloudflareaccess.com'
+	CF_ACCESS_AUD?: string; // Access application AUD tag
 }
 
 const PROVIDER_URLS: Record<string, string> = {
@@ -50,7 +53,7 @@ const cors = {
 };
 
 export default {
-	async fetch(req: Request, env: Env): Promise<Response> {
+	async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 		if (req.method === 'OPTIONS') return new Response(null, { headers: cors });
 		const url = new URL(req.url);
 		try {
@@ -63,9 +66,13 @@ export default {
 			if (url.pathname === '/ai/entitlement' && req.method === 'GET')
 				return await entitlement(url, env);
 			if (url.pathname === '/ai/usage' && req.method === 'POST')
-				return await usage(req, env);
+				return await usage(req, env, ctx);
 			if (url.pathname === '/ai/topup' && req.method === 'POST')
-				return await topup(req, env);
+				return await topup(req, env, ctx);
+			if (url.pathname === '/admin/overview' && req.method === 'GET')
+				return await adminOverview(req, env);
+			if (url.pathname === '/admin/mint' && req.method === 'POST')
+				return await adminMint(req, env);
 			if (url.pathname.startsWith('/ai/pack/') && req.method === 'GET')
 				return await pack(url.pathname.slice(9));
 			if (url.pathname === '/ai/telemetry' && req.method === 'POST')
@@ -185,7 +192,7 @@ async function entitlement(url: URL, env: Env): Promise<Response> {
  * at zero, paid lanes drop back to on-device. Each call = CALL_COST s.
  */
 const CALL_COST = 5;
-async function usage(req: Request, env: Env): Promise<Response> {
+async function usage(req: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
 	if (!env.METER) return json({ balanceSeconds: 0 });
 	const { room, seconds, calls } = (await req.json()) as {
 		room?: string;
@@ -195,7 +202,9 @@ async function usage(req: Request, env: Env): Promise<Response> {
 	if (!room) return json({ error: 'room required' }, 400);
 	const debit = Math.max(0, Math.min(3600, Math.round(seconds ?? 0))) +
 		Math.max(0, Math.min(1000, Math.round(calls ?? 0))) * CALL_COST;
-	return meter(env, room, 'debit', { amount: debit });
+	const res = await meter(env, room, 'debit', { amount: debit });
+	indexReport(env, ctx, room, res.clone());
+	return res;
 }
 
 /**
@@ -206,7 +215,7 @@ async function usage(req: Request, env: Env): Promise<Response> {
  * streaming payments land as sequential top-ups. Signature + nonce replay
  * check happen in the global MeterBus (nonce store shared across rooms).
  */
-async function topup(req: Request, env: Env): Promise<Response> {
+async function topup(req: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
 	if (!env.METER || !env.GRANT_PUBKEY) return json({ error: 'topup unconfigured' }, 503);
 	const { room, grant } = (await req.json()) as { room?: string; grant?: string };
 	if (!room || !grant) return json({ error: 'room + grant required' }, 400);
@@ -232,8 +241,97 @@ async function topup(req: Request, env: Env): Promise<Response> {
 	} catch (e) {
 		return json({ error: `invalid grant: ${e instanceof Error ? e.message : 'x'}` }, 403);
 	}
-	await meter(env, room, 'credit', { amount: seconds });
+	const credited = await meter(env, room, 'credit', { amount: seconds });
+	indexReport(env, ctx, room, credited.clone());
 	return json({ ok: true, creditedSeconds: seconds });
+}
+
+/** feed the shared '__index__' MeterBus with each room's latest numbers */
+function indexReport(env: Env, ctx: ExecutionContext | undefined, room: string, res: Response): void {
+	if (!env.METER) return;
+	const work = res
+		.json()
+		.then((b) =>
+			meter(env, '__index__', 'report', {
+				room,
+				...(b as Record<string, unknown>)
+			})
+		)
+		.catch(() => {});
+	if (ctx) ctx.waitUntil(work);
+	else void work;
+}
+
+// ------------------------------------------------------------- enterprise console
+//
+// Cloudflare Access fronts /admin/* — the JWT arrives as the
+// Cf-Access-Jwt-Assertion header; we verify RS256 against the team JWKS
+// (cached), check aud + exp, and reject anything else. Zero-dependency:
+// WebCrypto does RS256 verification natively. Pseudonymity is preserved —
+// the console only ever sees room codes and resource numbers.
+
+let jwksCache: { keys: JsonWebKey[]; at: number } | null = null;
+
+async function accessUser(req: Request, env: Env): Promise<string | null> {
+	if (!env.CF_ACCESS_TEAM || !env.CF_ACCESS_AUD) return null;
+	const jwt = req.headers.get('cf-access-jwt-assertion');
+	if (!jwt) return null;
+	const [h, p, sig] = jwt.split('.');
+	if (!h || !p || !sig) return null;
+	const header = JSON.parse(atob(h.replace(/-/g, '+').replace(/_/g, '/'))) as { kid?: string };
+	const payload = JSON.parse(atob(p.replace(/-/g, '+').replace(/_/g, '/'))) as {
+		aud?: string | string[];
+		exp?: number;
+		email?: string;
+	};
+	if (payload.exp && payload.exp * 1000 < Date.now()) return null;
+	const auds = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
+	if (!auds.includes(env.CF_ACCESS_AUD)) return null;
+	if (!jwksCache || Date.now() - jwksCache.at > 300_000) {
+		const r = await fetch(`https://${env.CF_ACCESS_TEAM}/cdn-cgi/access/certs`);
+		if (!r.ok) return null;
+		jwksCache = { keys: ((await r.json()) as { keys: JsonWebKey[] }).keys, at: Date.now() };
+	}
+	const jwk = jwksCache.keys.find((k) => (k as { kid?: string }).kid === header.kid);
+	if (!jwk) return null;
+	const key = await crypto.subtle.importKey('jwk', jwk, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify']);
+	const ok = await crypto.subtle.verify(
+		'RSASSA-PKCS1-v1_5',
+		key,
+		Uint8Array.from(atob(sig.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0)),
+		new TextEncoder().encode(`${h}.${p}`)
+	);
+	return ok ? (payload.email ?? 'access-user') : null;
+}
+
+/** GET /admin/overview — room spend table for the console UI */
+async function adminOverview(req: Request, env: Env): Promise<Response> {
+	if (!env.CF_ACCESS_TEAM) return json({ error: 'console unconfigured' }, 503);
+	const user = await accessUser(req, env);
+	if (!user) return json({ error: 'forbidden' }, 403);
+	if (!env.METER) return json({ user, rooms: [] });
+	const res = await meter(env, '__index__', 'list', {});
+	const body = (await res.json()) as { rooms?: unknown };
+	return json({ user, rooms: body.rooms ?? {} });
+}
+
+/** POST /admin/mint {room, seconds} — server-signed top-up grant */
+async function adminMint(req: Request, env: Env): Promise<Response> {
+	if (!env.CF_ACCESS_TEAM) return json({ error: 'console unconfigured' }, 503);
+	if (!(await accessUser(req, env))) return json({ error: 'forbidden' }, 403);
+	if (!env.GRANT_SECRET) return json({ error: 'mint unconfigured' }, 503);
+	const { room, seconds } = (await req.json()) as { room?: string; seconds?: number };
+	if (!room || !seconds || seconds <= 0 || seconds > 86_400)
+		return json({ error: 'room + seconds (1..86400) required' }, 400);
+	// PKCS8-wrap the 32B Ed25519 seed → WebCrypto sign key
+	const seed = hexToBytes(env.GRANT_SECRET);
+	const pkcs8 = new Uint8Array([...[0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20], ...seed]);
+	const key = await crypto.subtle.importKey('pkcs8', pkcs8, 'Ed25519', false, ['sign']);
+	const nonce = crypto.randomUUID();
+	const sig = await crypto.subtle.sign('Ed25519', key, new TextEncoder().encode(`${room}.${seconds}.${nonce}`));
+	const grant = btoa(JSON.stringify({ seconds, nonce, sig: btoa(String.fromCharCode(...new Uint8Array(sig))) }))
+		.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+	return json({ ok: true, room, grant });
 }
 
 function meter(env: Env, room: string, op: string, body: object): Promise<Response> {
@@ -284,6 +382,24 @@ export class MeterBus implements DurableObject {
 			if (await s.get(`nonce:${b.nonce}`)) return json({ ok: false }, 409);
 			await s.put(`nonce:${b.nonce}`, 1);
 			return json({ ok: true });
+		}
+		if (op === '/report') {
+			// '__index__' instance only: record a room's latest meter state —
+			// what /admin/overview reads. Pseudonymous: room code + numbers.
+			const room = (b as { room?: string }).room;
+			if (!room) return json({ ok: false }, 400);
+			await s.put(`room:${room}`, {
+				balanceSeconds: (b as { balanceSeconds?: number }).balanceSeconds ?? null,
+				spentSeconds: (b as { spentSeconds?: number }).spentSeconds ?? null,
+				lastSeen: Date.now()
+			});
+			return json({ ok: true });
+		}
+		if (op === '/list') {
+			const rooms: Record<string, unknown> = {};
+			for await (const [k, v] of await s.list<unknown>({ prefix: 'room:' }))
+				rooms[k.slice(5)] = v;
+			return json({ rooms });
 		}
 		return json({ error: 'unknown op' }, 404);
 	}

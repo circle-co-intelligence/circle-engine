@@ -16,7 +16,12 @@
 // /api/ice endpoint (short-lived credentials from the edge worker).
 import { joinRoom as joinMqtt, selfId } from 'trystero/mqtt';
 import { opEnvelope, realtimeMessage, type OpEnvelope, type RealtimeMessage } from '../wire/messages';
+import { installSimulcast } from '../media/simulcast';
 import type { DataPayload, Room } from 'trystero';
+
+// mesh simulcast: upgrade pc.addTrack → rid-layered transceivers on every
+// lane pc (trystero + ws). Module-level so the patch precedes joinRoom.
+installSimulcast();
 
 export interface RoomHandle {
 	selfId: string;

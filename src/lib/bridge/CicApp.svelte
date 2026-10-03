@@ -1,7 +1,7 @@
 <script lang="ts">
 	/**
 	 * CicApp — mounts the vendored production CIC application bundle.
-	 * The real compiled frontend (site-mirrors/cic-app → static/cic) boots
+	 * The real compiled frontend (vendored at static/cic) boots
 	 * inside this element via its own SvelteKit start(); every backend
 	 * touchpoint (room socket, caption socket, /api/*) is terminated by
 	 * the local bridge installed before import.

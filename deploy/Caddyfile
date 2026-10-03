@@ -1,0 +1,22 @@
+{$DOMAIN} {
+	root * /srv
+	encode zstd gzip
+
+	# COOP/COEP — required for SharedArrayBuffer (sherpa-onnx, sframe)
+	header {
+		Cross-Origin-Opener-Policy "same-origin"
+		Cross-Origin-Embedder-Policy "require-corp"
+		Cross-Origin-Resource-Policy "cross-origin"
+		-Server
+	}
+
+	# trystero mqtt lane → mosquitto websockets
+	@mqtt path /mqtt
+	handle @mqtt {
+		reverse_proxy mosquitto:8080
+	}
+
+	# SPA fallback — adapter-static emits a 404 page per route already
+	try_files {path} {path}.html /index.html
+	file_server
+}

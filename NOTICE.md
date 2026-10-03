@@ -6,18 +6,16 @@ Circle experience. Its composition is deliberately layered:
 ## 1. Vendored production frontend — `static/cic/` — PROPRIETARY, NOT OSS
 
 The compiled application bundle in `static/cic/` is the real production
-frontend captured from `circle.co-intelligence.online` (see
-`site-mirrors/cic-app/`). It is **not open source**. It is vendored here as
+frontend of `circle.co-intelligence.online`, vendored here unmodified as
 the visual/interaction source of truth for a self-hosted deployment of the
-same product. Redistribution or commercial use outside that context requires
-authorization from the rights holder. The vendored bundle is unmodified
-except where documented in `docs/DISCREPANCIES.md`.
+same product. It is **not open source**. Redistribution or commercial use
+outside that context requires authorization from the rights holder.
+Vendored modifications, if any, are documented in `docs/DISCREPANCIES.md`.
 
 ## 2. Marketing site — `static/site/` — PROPRIETARY, NOT OSS
 
-The static marketing page is a verbatim capture of
-`www.co-intelligence.online` (HTTrack mirror in
-`site-mirrors/co-intelligence/`) with scripts removed (hydration + analytics
+The static marketing page is the verbatim production page of
+`www.co-intelligence.online` with scripts removed (hydration + analytics
 have no place in a privacy-preserving build). Same rights note as §1.
 
 ## 3. Open-source runtime — npm dependencies

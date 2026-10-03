@@ -63,6 +63,7 @@
     "dompurify": "^3.2.3",
     "emoji-picker-element": "^1.26.0",
     "flexsearch": "^0.8.0",
+    "hls.js": "^1.7.3",
     "ics": "^3.12.1",
     "libarchive.js": "^2.0.2",
     "linkify-it": "^5.0.0",

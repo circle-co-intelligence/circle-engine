@@ -11,6 +11,7 @@
  * the Trystero mesh; mesh streams are offered back as pull m-lines.
  */
 import type { RoomSession } from '../state/room.svelte';
+import { skipSimulcast } from '../media/simulcast';
 
 type Frame = Record<string, unknown>;
 interface BridgeLike {
@@ -43,6 +44,8 @@ export class SfuLoopback {
 	private ensurePc(): RTCPeerConnection {
 		if (this.pc) return this.pc;
 		const pc = new RTCPeerConnection(RTC_CFG);
+		// pulls head to prod's display pc — rid layers on this leg are waste
+		skipSimulcast(pc);
 		pc.ontrack = (ev) => {
 			// frontend's captured media — relay to the mesh
 			this.session?.publishLocal(ev.streams[0] ?? new MediaStream([ev.track]));

@@ -196,7 +196,25 @@ export const realtimeMessage = z.discriminatedUnion('t', [
 	// bw-allocator; it broadcasts a per-peer sender budget — cross-flow
 	// coordination libwebrtc's per-flow congestion control can't do
 	z.object({ t: z.literal('bw-stats'), rttMs: z.number(), estKbps: z.number() }),
-	z.object({ t: z.literal('bw-budget'), limit: z.number().int() })
+	z.object({ t: z.literal('bw-budget'), limit: z.number().int() }),
+	// per-receiver layer selection: a receiver asks the sender to activate
+	// one rid on JUST our pc — mesh simulcast without an SFU. 'none' drops
+	// the video leg entirely (witnesses hold audio + stage video only)
+	z.object({ t: z.literal('pull-hint'), rid: z.enum(['f', 'h', 'q', 'none']) }),
+	// webinar fanout: authority announces a Cloudflare Stream live HLS
+	// manifest — witnesses past the mesh scale ceiling play it instead of
+	// pulling per-peer tracks (code-ready for CF Stream creds, B3)
+	z.object({ t: z.literal('stream-manifest'), hls: z.string().max(500) }),
+	// ISO recording manifest: each recorder announces sealed segments as it
+	// uploads — the host assembles the multi-track index from these
+	z.object({
+		t: z.literal('rec-manifest'),
+		rec: z.string().max(64), // recording id
+		seg: z.number().int().min(0),
+		durationMs: z.number().min(0),
+		bytes: z.number().int().min(0),
+		ts: z.number().int()
+	})
 ]);
 export type RealtimeMessage = z.infer<typeof realtimeMessage>;
 

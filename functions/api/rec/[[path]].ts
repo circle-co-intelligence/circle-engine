@@ -10,6 +10,7 @@ interface Env {
 }
 
 const PATH = /^api\/rec\/([\w-]+)\/([\w-]+)\/(\d+)$/;
+const PREFIX_PATH = /^api\/rec\/([\w-]+)\/([\w-]+)$/;
 
 export const onRequestPut: PagesFunction<Env> = async ({ request, env, params }) => {
 	const m = PATH.exec((params.path as string[]).join('/'));
@@ -31,4 +32,22 @@ export const onRequestGet: PagesFunction<Env> = async ({ env, params }) => {
 	return new Response(obj.body, {
 		headers: { 'content-type': 'application/octet-stream', 'cache-control': 'private, no-store' }
 	});
+};
+
+/**
+ * DELETE /api/rec/{room}/{recId} — drop a recording prefix (all segments).
+ * Used when a participant withdraws consent mid-record: their sealed ISO
+ * objects are removed. The objects were ciphertext-only either way.
+ */
+export const onRequestDelete: PagesFunction<Env> = async ({ env, params }) => {
+	const m = PREFIX_PATH.exec((params.path as string[]).join('/'));
+	if (!m) return new Response('bad path', { status: 400 });
+	const prefix = `rec/${m[1]}/${m[2]}/`;
+	let cursor: string | undefined;
+	do {
+		const page = await env.REC_BUCKET.list({ prefix, cursor, limit: 500 });
+		await Promise.all(page.objects.map((o) => env.REC_BUCKET.delete(o.key)));
+		cursor = page.truncated ? page.cursor : undefined;
+	} while (cursor);
+	return new Response(null, { status: 204 });
 };

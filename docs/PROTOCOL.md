@@ -1,7 +1,7 @@
 # CIC Protocol — Ground Truth
 
 Message and state vocabulary extracted from the deployed production bundle
-(`site-mirrors/cic-app`, SvelteKit immutable chunks, 2026-09). These names are
+(`static/cic`, SvelteKit immutable chunks, 2026-09). These names are
 the wire contract our implementation must remain compatible with.
 
 ## Confirmed message types (verbatim strings in production JS)
@@ -163,7 +163,7 @@ entries drop on socket close.
 `/` → vendored marketing site (`static/site/`); `/join` → local entry gate
 (reads prod's `?code`/`?name`, seeds `cic.name`); `/room/{code}` +
 `[...rest]` → prod bundle mount; `/account/link` → link-challenge resolver;
-`/site/*.html` → static mirrors (privacy/terms/imprint/login).
+`/site/*.html` → static copies (privacy/terms/imprint/login).
 
 ## Local realtime extensions (mesh-only, invisible to prod wire)
 
@@ -177,6 +177,18 @@ data channel and prod's deployed protocol is untouched:
 - `reaction-kind` `{kind}` — already carries prod reaction kinds; the sensory
   lane also emits `audio:<event>` (laughter/applause/music) from Speechmatics
   audio events.
+- `pull-hint` `{rid: 'f'|'h'|'q'|'none'}` — per-receiver layer selection:
+  the receiver asks the sender to activate a simulcast rid on just that
+  peer's pc (media/simulcast.ts). Witnesses use it for webinar-lite:
+  stage video 'f', everyone else 'none', audio untouched. Producers pull
+  every seat at 'h'. Single-encoding senders degrade to bitrate/active
+  clamps — same semantics.
+- `stream-manifest` `{hls}` — authority → room announcement that a
+  Cloudflare Stream live input exists; witnesses beyond mesh scale attach
+  the HLS manifest via media/hlsPlay.ts (native HLS or lazy hls.js).
+- `rec-manifest` `{rec, seg, durationMs, bytes, ts}` — a peer's ISO
+  recorder announced a sealed segment (src/lib/rec/iso.ts); assembled
+  host-side into the multi-track index (session.recManifests).
 
 ## Paid lanes (all opt-in, all badged)
 
@@ -195,6 +207,13 @@ data channel and prod's deployed protocol is untouched:
   as `[S3] text` / `[room] laughter`.
 - `uploadRecording()` — segments sealed client-side (XChaCha20-Poly1305,
   HKDF(roomSecret)) → `PUT /api/rec/{room}/{recId}/{n}` → R2 ciphertext.
+- `IsoRecorder` (rec/iso.ts) — each seat records its OWN raw feed into
+  rotating WebM segments (VP9/Opus, up to 4K on paid tiers), sealed +
+  progressively uploaded during the session; journaled ciphertext survives
+  crashes and `resumeUploads()` drains on next join. `clip.ts` trims any
+  sealed segment by transcript span (mediabunny Conversion). Composite
+  recording stays the convenience output; ISO is the production master.
+- `?role=producer` — witness + never recorded + monitors all seats at 'h'.
 
 ## Metered spend (paid = seconds pool, not a flag)
 

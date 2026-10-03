@@ -1,0 +1,6 @@
+# vendored bundles — scanned as-shipped, we never modify them
+static/cic/
+static/site/
+build/
+.svelte-kit/
+static/models/

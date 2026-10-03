@@ -84,6 +84,9 @@ importers:
       flexsearch:
         specifier: ^0.8.0
         version: 0.8.212
+      hls.js:
+        specifier: ^1.7.3
+        version: 1.7.3
       ics:
         specifier: ^3.12.1
         version: 3.12.1
@@ -2000,6 +2003,9 @@ packages:
 
   hi-base32@0.5.1:
     resolution: {integrity: sha512-EmBBpvdYh/4XxsnUybsPag6VikPYnN30td+vQk+GI3qpahVEG9+gTkG0aXVxTjBqQ5T6ijbWIu77O+C5WFWsnA==}
+
+  hls.js@1.7.3:
+    resolution: {integrity: sha512-MsPlx6yVW4Qv4C7mEVou4/gk/5cN2dVxOTnrNjPSmyH2f0Ln+/UkG10Ax1PE6OvrmTVPKgQYozTtBaPOuCzq7A==}
 
   hookified@1.15.1:
     resolution: {integrity: sha512-MvG/clsADq1GPM2KGo2nyfaWVyn9naPiXrqIe4jYjXNZQt238kWyOGrsyc/DmRAQ+Re6yeo6yX/yoNCG5KAEVg==}
@@ -5189,6 +5195,8 @@ snapshots:
   help-me@5.0.0: {}
 
   hi-base32@0.5.1: {}
+
+  hls.js@1.7.3: {}
 
   hookified@1.15.1: {}
 

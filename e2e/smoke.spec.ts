@@ -3,7 +3,7 @@ import AxeBuilder from '@axe-core/playwright';
 
 test('entry page renders and creates a circle', async ({ page }) => {
 	await page.goto('/');
-	// vendored marketing landing — verbatim from the scraped www site
+	// vendored marketing landing — verbatim from the production www site
 	await expect(page.getByRole('heading', { name: /find coherence/i })).toBeVisible();
 	await page.getByRole('link', { name: 'Log in' }).first().click();
 	await expect(page).toHaveURL(/\/join/);
@@ -38,7 +38,7 @@ test('entry page passes axe accessibility scan', async ({ page }) => {
 	await expect(page.getByRole('heading', { name: /find coherence/i })).toBeVisible();
 	const results = await new AxeBuilder({ page }).analyze();
 	// vendored marketing markup carries its own known violations (color-contrast
-	// 4.15:1 on .ea-eyebrow, link-in-text-block) — we don't patch the scraped
+	// 4.15:1 on .ea-eyebrow, link-in-text-block) — we don't patch the vendored
 	// page, so gate only on critical regressions
 	const critical = results.violations.filter((v) => v.impact === 'critical');
 	expect(critical).toEqual([]);

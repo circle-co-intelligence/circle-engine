@@ -30,9 +30,9 @@ from "the backend" is implemented locally, in your tab.
 
 ## What this is
 
-- **The frontend is the real production app.** `static/cic/` holds the scraped
-  production bundle (SvelteKit immutable chunks), vendored unmodified. The
-  marketing site at `/` is the scraped `www.co-intelligence.online` landing,
+- **The frontend is the real production app.** `static/cic/` holds the vendored
+  production bundle (SvelteKit immutable chunks), unmodified. The
+  marketing site at `/` is the `www.co-intelligence.online` landing,
   rendered verbatim (scripts stripped).
 - **The backend is this repo — and it runs in your browser.** Every production
   backend touchpoint (`/ws/room`, `/ws/caption`, the SFU media plane, `/api/*`,
@@ -361,7 +361,7 @@ key; preview deploys use dedicated `cic-prev3` credentials.
 ## Repository layout
 
 ```
-src/routes/          landing (scraped site render), /join, /room/[code], /account/link
+src/routes/          landing (vendored marketing site), /join, /room/[code], /account/link
 src/lib/bridge/      install.ts shims, RoomSocket/Bridge, SfuLoopback, stt, artifacts
 src/lib/net/         Trystero room adapter, breakouts
 src/lib/state/       RoomSession — mesh engine, participants, gates
@@ -373,7 +373,7 @@ src/lib/media/       mic/cam capture
 src/lib/rec/         mediabunny recorder + OPFS journal
 src/lib/wire/        production-compatible wire messages (zod)
 static/cic/          vendored production app (source of truth)
-static/site/         scraped marketing site (rendered at /)
+static/site/         vendored marketing site (rendered at /)
 static/models/       gitignored — fetched at runtime from upstream
 scripts/             patch-pages.mjs, fetch-models.sh, licenses.mjs
 docs/                PROTOCOL.md, SECURITY-MODEL.md, DESIGN-DELTAS.md

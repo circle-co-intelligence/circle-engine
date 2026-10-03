@@ -18,8 +18,10 @@ import { CloudMilo, aiEndpoint, cloudTts } from '../ai/cloud';
 import { adaptSenders, deviceClass, pressureLevel } from '../media/adapt';
 import { paidEntitled, invalidateTier, UsageMeter } from '../tier';
 import { BwBroker } from '../media/broker';
+import { applyPullHint, type PullRid } from '../media/simulcast';
 import { SensoryPipe, type SensoryEvent } from '../ai/sensory';
 import { uploadRecording } from '../rec/cloud';
+import { IsoRecorder } from '../rec/iso';
 import { addPoll, addAgenda, addSection, addTalkTimeStats } from '../notes/facilitate';
 import type { SipLeg } from '../media/sip';
 import { bytesToHex } from '@noble/hashes/utils.js';
@@ -37,6 +39,9 @@ import {
 	shouldWaitlist,
 	type GateView
 } from './gates';
+
+/** consent round wait — silent peers are excluded, not waited on forever */
+const CONSENT_WAIT_MS = 10_000;
 
 /** same MediaStreamTrack set (ids), regardless of order — used to dedupe
  *  onPeerStream refires that carry no actual track change */
@@ -218,7 +223,10 @@ export class RoomSession {
 					heldSince.id,
 					(this.talkMs.get(heldSince.id) ?? 0) + (Date.now() - heldSince.at)
 				);
-			if (heldSince.id !== id) heldSince = { id, at: Date.now() };
+			if (heldSince.id !== id) {
+				heldSince = { id, at: Date.now() };
+				this.pullHintAll(); // witnesses re-pin video to the new stage
+			}
 		});
 		this.broker = new BwBroker(
 			this.handle,
@@ -271,6 +279,7 @@ export class RoomSession {
 			// trystero addStream only reaches already-connected peers — re-offer
 			// our published streams to late joiners or they never see our media
 			for (const stream of this.publishedStreams) this.offerStream(stream, peerId);
+			this.pullHintAll();
 			this.syncSeats();
 		});
 		this.handle.onPeerLeave((peerId) => {
@@ -519,6 +528,7 @@ export class RoomSession {
 					this.handle.sendRealtime({ t: 'lobby-wait' }, peerId);
 					this.broadcastWaiting();
 				}
+				this.pullHintAll();
 				this.syncSeats();
 				break;
 			}
@@ -541,8 +551,13 @@ export class RoomSession {
 				this.chatLog = [...this.chatLog, { from: peerId, text: msg.text, whisper: !!msg.whisperTo }];
 				break;
 			case 'caption-update':
+				// while recording, a non-consenting peer's speech is excluded
+				// from transcript context — their captions may render live
+				// (their own client suppresses them anyway) but never reach
+				// Milo, recaps, or persisted transcript artifacts
 				this.captions = [...this.captions.slice(-50), { from: peerId, text: msg.text, final: msg.final }];
-				if (msg.final) void this.maybeMilo(msg.text);
+				if (msg.final && (!this.recording || this.isConsented(peerId)))
+					void this.maybeMilo(msg.text);
 				break;
 			case 'caption-sections':
 				// personal-caption lane sections from a remote source — forwarded to
@@ -608,6 +623,26 @@ export class RoomSession {
 			case 'bw-stats':
 			case 'bw-budget':
 				this.broker.handle(msg, peerId);
+				break;
+			case 'pull-hint':
+				// the receiver picks which of OUR simulcast layers it wants —
+				// apply only on the pc toward that peer (per-receiver selection)
+				{
+					const pc = this.handle.raw.getPeers()[peerId];
+					if (pc) applyPullHint(pc, msg.rid);
+				}
+				break;
+			case 'stream-manifest':
+				// webinar fanout live — witnesses beyond mesh scale play HLS
+				this.streamHls = msg.hls;
+				break;
+			case 'rec-manifest':
+				// a peer's ISO recorder announced a sealed segment — collect for
+				// the multi-track assembly index (host-side recordings list)
+				this.recManifests = [
+					...this.recManifests.filter((m) => !(m.peer === peerId && m.rec === msg.rec && m.seg === msg.seg)),
+					{ peer: peerId, rec: msg.rec, seg: msg.seg, durationMs: msg.durationMs, bytes: msg.bytes, ts: msg.ts }
+				];
 				break;
 			case 'lobby-join':
 				// a joiner's announce holds them here even if our onPeerJoin ran
@@ -919,6 +954,45 @@ export class RoomSession {
 
 	/** witness/audience mode — receive-only: we pull, never publish */
 	witnessOnly = $state(false);
+	/** producer crew — witness + never ISO-recorded + monitors every seat */
+	producerOnly = $state(false);
+	private iso: IsoRecorder | null = null;
+
+	/**
+	 * Webinar-lite pull hints: a witness subscribes audio-everything +
+	 * video only from the stage (stick holder / fallback: authority);
+	 * a producer gets every seat at half-res for monitoring. Senders honor
+	 * hints per-pc via simulcast rid activation — audience bandwidth scales
+	 * to ~1 video leg regardless of seat count.
+	 */
+	private pullHintAll() {
+		if (!this.witnessOnly) return;
+		const stage = this.stickHolderId ?? this.authorityId;
+		for (const p of this.peers)
+			if (p !== this.selfId)
+				this.handle.sendRealtime(
+					{ t: 'pull-hint', rid: this.producerOnly ? 'h' : p === stage ? 'f' : 'none' },
+					p
+				);
+	}
+
+	/** explicit pull hint toward one peer (e.g. focus-pin a seat's video) */
+	pullHint(peerId: string, rid: PullRid) {
+		this.handle.sendRealtime({ t: 'pull-hint', rid }, peerId);
+	}
+
+	/** ISO segments announced by peers — multi-track recording index */
+	recManifests = $state<{ peer: string; rec: string; seg: number; durationMs: number; bytes: number; ts: number }[]>([]);
+
+	/** webinar fanout — set when the authority broadcasts a CF Stream HLS manifest */
+	streamHls = $state<string | null>(null);
+
+	/** host announces a live HLS manifest (Cloudflare Stream) to witnesses */
+	announceStream(hls: string) {
+		if (!this.canManage(this.selfId)) return;
+		this.streamHls = hls;
+		this.handle.sendRealtime({ t: 'stream-manifest', hls });
+	}
 
 	/** opt-in media enhancements (enhance.ts): all default-off, fail-open */
 	mediaFx = $state({
@@ -1058,6 +1132,9 @@ export class RoomSession {
 
 	/** sensory events from the /speech relay: diarized transcript + audio events */
 	ingestSensory(ev: SensoryEvent) {
+		// excluded participant: our own mic's transcript also stays out of
+		// Milo context + recaps while recording is active
+		if (this.recording && !this.isConsented(this.selfId)) return;
 		if (ev.t === 'transcript' && ev.text) {
 			const label = ev.speaker ? `[${ev.speaker}] ${ev.text}` : ev.text;
 			this.transcriptWindow = [...this.transcriptWindow.slice(-39), label];
@@ -1072,8 +1149,11 @@ export class RoomSession {
 	/** a caption segment from the speech stream (prod frontend streams PCM via speech-frame) */
 	appendCaption(text: string, final: boolean) {
 		this.captions = [...this.captions.slice(-50), { from: this.selfId, text, final }];
-		this.handle.sendRealtime({ t: 'caption-update', text, final, lang: 'en' });
-		if (final) {
+		// excluded participant (denied/silent while recording): our speech is
+		// never broadcast as captions, never stored, never fed to Milo
+		const excluded = this.recording && !this.isConsented(this.selfId);
+		if (!excluded) this.handle.sendRealtime({ t: 'caption-update', text, final, lang: 'en' });
+		if (final && !excluded) {
 			this.storeTranscriptLine(this.names[this.selfId] ?? this.displayName, text);
 			void this.maybeMilo(text);
 		}
@@ -1170,6 +1250,17 @@ export class RoomSession {
 		if (this.roles?.['recorder-primary'] === this.selfId || this.roles?.['recorder-standby'] === this.selfId) {
 			await this.recorder.start();
 		}
+		// ISO: every CONSENTING seat records its own raw feed — a peer who
+		// denied or never answered produces no ISO track (fail-closed).
+		if (
+			this.localMedia && !this.witnessOnly && !this.producerOnly && !this.iso?.running &&
+			this.consents[this.selfId] === 'granted'
+		) {
+			this.iso = new IsoRecorder(this.roomCode, this.roomSecret, this.selfId, () => this.paid());
+			this.iso.onSegment = (info) =>
+				this.handle.sendRealtime({ t: 'rec-manifest', ...info });
+			await this.iso.start(this.localMedia.stream).catch(() => {});
+		}
 	}
 
 	/** bumps when finalized recording bytes land in /rec-local — bridge emits `recordings` */
@@ -1177,6 +1268,7 @@ export class RoomSession {
 
 	/** stop the recorder and publish real segment blobs into the local artifact store */
 	private async finishRecording() {
+		await this.iso?.stop();
 		const blobs = await this.recorder.stop();
 		// paid rooms: ciphertext upload to R2 (rec/cloud seals before PUT —
 		// plaintext never leaves the device)
@@ -1192,6 +1284,18 @@ export class RoomSession {
 			} catch {}
 		}
 		if (blobs.length) this.artifactSeq++;
+	}
+
+	/** retention control: erase this room's journaled recording bytes (both paths) */
+	async purgeRecordings() {
+		await this.recorder.purge();
+		await IsoRecorder.purge(this.roomCode);
+	}
+
+	/** transcript→clip: fetch + open a sealed ISO segment, trim, return blob URL */
+	async clipIsoSegment(rec: string, seg: number, startS: number, endS: number): Promise<string | null> {
+		const { clipRemoteSegment } = await import('../rec/clip');
+		return clipRemoteSegment(this.roomSecret, this.roomCode, rec, seg, startS, endS);
 	}
 
 	requestStick() { this.emitOp({ t: 'stick-request' }); }
@@ -1212,19 +1316,55 @@ export class RoomSession {
 		this.consentAsked = true;
 		this.recordingProposer = this.selfId;
 		this.consents[this.selfId] = 'granted';
+		this.consentPromptAt = Date.now();
+		// silent peers are excluded (fail-closed) — don't wait forever for
+		// answers; start once everyone answered or the window closes
+		window.setTimeout(() => this.maybeStartRecording(), CONSENT_WAIT_MS);
 	}
 	answerConsent(granted: boolean) {
 		this.consents[this.selfId] = granted ? 'granted' : 'denied';
 		this.handle.sendRealtime({ t: 'recording-consent', state: granted ? 'granted' : 'denied' });
 		this.consentAsked = false;
+		// exclusion reacts live: granted mid-record → join the ISO record;
+		// denied mid-record → stop ours and purge our pending segments
+		if (this.recording) {
+			if (granted) void this.maybeRecord();
+			else void this.iso?.discard();
+		}
 		this.maybeStartRecording();
 	}
 	get allConsented() {
 		return this.peers.every((p) => this.consents[p] === 'granted') && this.consents[this.selfId] === 'granted';
 	}
-	/** the proposer fires the real recording-start op once every member grants */
+	/**
+	 * Recording consent is exclude-not-block: recording proceeds with only
+	 * the participants who granted. Silent peers count as denied
+	 * (fail-closed). Everyone not in this set is absent from every record:
+	 * no ISO track, no captions, no transcript/recap lines.
+	 */
+	get consentedPeers(): Set<string> {
+		return new Set(
+			[this.selfId, ...this.peers].filter((p) => this.consents[p] === 'granted')
+		);
+	}
+	/** is this participant in the record? (granted only — silence excludes) */
+	isConsented(peerId: string): boolean {
+		return this.consents[peerId] === 'granted';
+	}
+	private consentPromptAt = 0;
+	/**
+	 * The proposer fires recording-start once every member has answered or
+	 * the wait window closed — non-granters are excluded from the record,
+	 * not blockers of it (recording proceeds without them).
+	 */
 	private maybeStartRecording() {
-		if (this.consentAsked && this.recordingProposer === this.selfId && this.allConsented && !this.recording) {
+		if (
+			this.consentAsked &&
+			this.recordingProposer === this.selfId &&
+			!this.recording &&
+			(this.peers.every((p) => this.consents[p] !== undefined) ||
+				Date.now() - this.consentPromptAt > CONSENT_WAIT_MS)
+		) {
 			this.consentAsked = false;
 			this.emitOp({ t: 'recording-start' });
 		}

@@ -1,0 +1,9 @@
+name = "cic-sfu"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+workers_dev = true
+
+# Secrets: wrangler secret put CALLS_APP_SECRET
+# Vars:    CALLS_APP_ID — set below once the Realtime app exists
+# [vars]
+# CALLS_APP_ID = "..."

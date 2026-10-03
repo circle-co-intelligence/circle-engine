@@ -6,3 +6,7 @@ build
 *.tar.gz
 .DS_Store
 static/models/
+
+# self-host secrets/rendered configs
+deploy/.env
+deploy/turnserver.rendered.conf

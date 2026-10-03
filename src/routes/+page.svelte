@@ -1,7 +1,7 @@
 <script lang="ts">
 	/**
-	 * Landing — the scraped production marketing page (site-mirrors/
-	 * co-intelligence/www.* → static/site/), rendered verbatim. Assets resolve
+	 * Landing — the vendored production marketing page
+	 * (static/site/), rendered verbatim. Assets resolve
 	 * under /site/*; the page's JS is stripped (hydration + gtag don't belong
 	 * in a privacy-preserving build). "Log in" links to /join, our entry.
 	 */
@@ -25,7 +25,7 @@
 		for (const style of doc.querySelectorAll('style'))
 			document.head.appendChild(document.createElement('style')).textContent = style.textContent;
 		markup = doc.body.innerHTML
-			// authored additions (scraped file stays pristine):
+			// authored additions (vendored file stays pristine):
 			// pricing section + nav link, GitHub repo link in the footer
 			.replace('<a href="#faq">FAQ</a>', '<a href="#pricing">Pricing</a><a href="#faq">FAQ</a>')
 			.replace(
@@ -114,7 +114,7 @@
 <div bind:this={host} onsubmit={onSubmit}>{@html markup}</div>
 
 <style>
-	/* Pricing section — authored addition injected into the scraped landing.
+	/* Pricing section — authored addition injected into the vendored landing.
 	   Reuses the site's ea-* design tokens so it reads as production. */
 	:global(.ea-pricing) {
 		display: grid;

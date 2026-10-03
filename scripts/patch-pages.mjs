@@ -50,8 +50,8 @@ const CIC_CSS_ESCAPE_RE = /url\((['"]?)\.\.\/\.\.\/\.\.\//g;
 // literal route hrefs in static HTML bypass the vendored router (which would
 // prepend base itself for JS nav) — hard navigations need the prefix
 const HTML_ROUTE_RE = /(href|src)="\/(join|demo|billing|login|account)"/g;
-// site css kept prod's root-absolute /early-access/ refs — those files were
-// mirrored under /site/early-access/
+// site css kept prod's root-absolute /early-access/ refs — those files live
+// under /site/early-access/ in the vendored site tree
 const SITE_EARLY_RE = /url\((['"]?)\/early-access\//g;
 
 function patchJsCss(src, file = '') {

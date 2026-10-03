@@ -457,8 +457,14 @@ class RoomBridge {
 				} else if (!this.session) {
 					this.session = new RoomSession(roomSecretFromCode(this.code, this.roomKey), this.name, this.code);
 					// witness link (?witness=1 or hello flag) → receive-only audience seat
-					if (m.witness === true || new URLSearchParams(location.search).get('witness') === '1')
+					const params = new URLSearchParams(location.search);
+					if (m.witness === true || params.get('witness') === '1')
 						this.session.witnessOnly = true;
+					// producer crew: receive-only + never ISO-recorded + sees all seats
+					if (params.get('role') === 'producer') {
+						this.session.witnessOnly = true;
+						this.session.producerOnly = true;
+					}
 					sessionByCode.set(this.code, { session: this.session, leaveTimer: 0 });
 					this.bindSfu(this.session);
 					created = true;
