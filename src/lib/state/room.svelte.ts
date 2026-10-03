@@ -22,6 +22,7 @@ import { applyPullHint, type PullRid } from '../media/simulcast';
 import { SensoryPipe, type SensoryEvent } from '../ai/sensory';
 import { uploadRecording } from '../rec/cloud';
 import { IsoRecorder } from '../rec/iso';
+import { nativeSpeechEndpoint } from '../native';
 import { addPoll, addAgenda, addSection, addTalkTimeStats } from '../notes/facilitate';
 import type { SipLeg } from '../media/sip';
 import { bytesToHex } from '@noble/hashes/utils.js';
@@ -1100,7 +1101,12 @@ export class RoomSession {
 		// VITE_CIC_DSP_ENDPOINT is an https origin; WS paths derive ws(s)://
 		const dsp = env.VITE_CIC_DSP_ENDPOINT;
 		const dspWs = dsp?.replace(/^http/, 'ws');
-		if (env.VITE_CIC_SPEECH_URL) {
+		// native shell: the in-process speechd endpoint is local — no JWT,
+		// no cloud hop; preferred over any configured remote
+		const nativeEp = await nativeSpeechEndpoint();
+		if (nativeEp) {
+			this.sensory = new SensoryPipe(nativeEp, this, true);
+		} else if (env.VITE_CIC_SPEECH_URL) {
 			let url = env.VITE_CIC_SPEECH_URL;
 			if (!url.includes('jwt=') && dsp) {
 				const tok = await fetch(`${dsp}/speech-token`)

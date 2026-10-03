@@ -10,3 +10,7 @@ static/models/
 # self-host secrets/rendered configs
 deploy/.env
 deploy/turnserver.rendered.conf
+
+# rust build artifacts
+src-tauri/target/
+src-tauri/speechd/target/

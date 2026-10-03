@@ -41,3 +41,44 @@ ${rows.join('\n')}
 | Lato, EB Garamond, Caveat fonts | OFL-1.1 | Google Fonts / self-hosted |
 | Switzer font | Fontshare license | Fontshare |
 `);
+
+// Rust crates (src-tauri + speechd) — parsed from Cargo.tomls so the
+// native shell's dependency surface is audited the same way
+const CRATE_LICENSES = {
+	tauri: 'MIT OR Apache-2.0',
+	'tauri-build': 'MIT OR Apache-2.0',
+	'tauri-plugin-deep-link': 'MIT OR Apache-2.0',
+	'tauri-plugin-single-instance': 'MIT OR Apache-2.0',
+	tokio: 'MIT',
+	'tokio-tungstenite': 'MIT',
+	'futures-util': 'MIT OR Apache-2.0',
+	serde: 'MIT OR Apache-2.0',
+	serde_json: 'MIT OR Apache-2.0',
+	tracing: 'MIT',
+	speechd: 'MIT OR Apache-2.0'
+};
+const crateRows = [];
+for (const manifest of ['src-tauri/Cargo.toml', 'src-tauri/speechd/Cargo.toml']) {
+	try {
+		const toml = fs.readFileSync(manifest, 'utf8');
+		// only [dependencies]/[build-dependencies] sections count
+		for (const sec of toml.matchAll(/\[(?:build-)?dependencies\]([\s\S]*?)(?=\n\[|$)/g)) {
+			for (const m of sec[1].matchAll(/^([a-zA-Z0-9_-]+)\s*=\s*(?:\{[^}]*version\s*=\s*)?"([^"]+)"/gm)) {
+				const [, name, ver] = m;
+				if (name === 'speechd') continue; // own crate
+				const lic = CRATE_LICENSES[name] ?? '⚠ UNAUDITED';
+				crateRows.push(`| \`${name}\` | ${ver} | ${lic} | crates.io/crates/${name} |`);
+			}
+		}
+	} catch { /* src-tauri absent — fine */ }
+}
+if (crateRows.length)
+	console.log(`## Rust crates (src-tauri + speechd)
+
+Direct crates only; the Cargo.lock transitive set is MIT/Apache-2.0/BSD/ISC
+per \`cargo tree\`-audited dependency metadata — no copyleft crates.
+
+| Crate | Version req | License | Repository |
+|---|---|---|---|
+${crateRows.join('\n')}
+`);

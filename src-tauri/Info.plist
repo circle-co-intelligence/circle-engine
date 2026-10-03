@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSCameraUsageDescription</key>
+	<string>Circle needs your camera for video rooms.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Circle needs your microphone for rooms and on-device speech features.</string>
+</dict>
+</plist>

@@ -17,7 +17,11 @@
     "probe": "node probe-flows.mjs",
     "probe:pw": "node probe-pw.mjs",
     "build:pages": "CIC_BASE=/circle-engine VITE_CIC_AI_ENDPOINT=https://cic-ai-gateway.terexmaps.workers.dev/ai VITE_CIC_DSP_ENDPOINT=https://cic-dsp.terexmaps.workers.dev vite build && rm -rf build/models && cp build/index.html build/404.html && touch build/.nojekyll && CIC_BASE=/circle-engine node scripts/patch-pages.mjs",
-    "build:cf": "VITE_CIC_SFU_ENDPOINT=/api/sfu VITE_CIC_AI_ENDPOINT=/api/ai VITE_CIC_DSP_ENDPOINT=https://cic-dsp.terexmaps.workers.dev VITE_CIC_SIGNAL_WS=/sig VITE_CIC_LANES=mqtt,ws vite build && rm -rf build/models && node scripts/patch-pages.mjs"
+    "build:cf": "VITE_CIC_SFU_ENDPOINT=/api/sfu VITE_CIC_AI_ENDPOINT=/api/ai VITE_CIC_DSP_ENDPOINT=https://cic-dsp.terexmaps.workers.dev VITE_CIC_SIGNAL_WS=/sig VITE_CIC_LANES=mqtt,ws vite build && rm -rf build/models && node scripts/patch-pages.mjs",
+    "build:native": "VITE_CIC_SFU_ENDPOINT=https://cic-sfu.terexmaps.workers.dev VITE_CIC_AI_ENDPOINT=https://cic-ai-gateway.terexmaps.workers.dev/ai VITE_CIC_DSP_ENDPOINT=https://cic-dsp.terexmaps.workers.dev VITE_CIC_SIGNAL_WS=wss://cic-signaling.circle-engine.workers.dev VITE_CIC_LANES=ws,mqtt vite build && rm -rf build/models && node scripts/patch-pages.mjs",
+    "icons": "node scripts/gen-icons.mjs",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.13.0",
@@ -25,6 +29,7 @@
     "@sveltejs/adapter-static": "^3.0.8",
     "@sveltejs/kit": "^2.16.0",
     "@sveltejs/vite-plugin-svelte": "^5.0.3",
+    "@tauri-apps/cli": "^2.9.4",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "browserslist": "^4.29.3",
@@ -40,6 +45,8 @@
   },
   "dependencies": {
     "@excalidraw/excalidraw": "0.17.6",
+    "@tauri-apps/api": "^2.9.0",
+    "@tauri-apps/plugin-deep-link": "^2.4.5",
     "@lottiefiles/dotlottie-svelte": "^0.5.0",
     "@mediapipe/tasks-vision": "^0.10.17",
     "@noble/ciphers": "^2.4.0",

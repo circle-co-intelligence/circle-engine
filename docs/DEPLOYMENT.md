@@ -61,3 +61,43 @@ on-prem Speechmatics appliance — plug in via `VITE_CIC_SPEECH_URL` /
   (101 upgrade), `turnutils_uclient` against 3478.
 - **Secrets**: `.env` is gitignored; `turnserver.rendered.conf` contains the
   TURN secret — also gitignored, chmod-600 on disk recommended.
+
+## Native app (Tauri shell)
+
+`src-tauri/` wraps the same static build in a system webview — P2P media,
+E2EE, sherpa STT, wllama Milo all run identically; the shell adds a local
+speech endpoint and deep links.
+
+```bash
+pnpm icons          # regenerate src-tauri/icons (no ImageMagick needed)
+pnpm tauri:dev      # vite dev + webview window
+pnpm tauri:build    # pnpm build:native → bundled installers
+```
+
+`build:native` bakes the deployed worker endpoints (ai-gateway, dsp, sfu,
+signaling bus over `VITE_CIC_SIGNAL_WS`) — same lanes as the hosted site.
+
+**What the shell adds**
+
+- `speech_endpoint` → in-process **speechd** (`src-tauri/speechd`), a local
+  Speechmatics-RT-protocol WebSocket on 127.0.0.1. Engine selection:
+  `CIC_SPEECH_UPSTREAM=ws://…` relays sessions to an on-prem appliance, an
+  On-Device SDK service bridge, or any RT-compatible engine — verbatim
+  `StartRecognition` passthrough, so diarization/audio-events survive.
+  With no upstream the endpoint refuses sessions cleanly and the client
+  stays on its sherpa lane. `cargo test --manifest-path src-tauri/speechd/Cargo.toml`.
+- `circle://` deep links + single-instance — `circle://room/184729#secret`
+  focuses the running window and lands in the room.
+
+**Platform notes**
+
+- Linux build host needs: `sudo dnf install webkit2gtk4.1-devel libsoup3-devel
+  gtk3-devel libappindicator-gtk3-devel librsvg2-devel openssl-devel
+  dbus-devel pkgconf-pkg-config` (apt equivalents on Debian).
+- macOS: camera/mic entitlements + usage strings ship in
+  `entitlements.plist`/`Info.plist`; WKWebView getUserMedia needs macOS 14+.
+- Linux getUserMedia depends on the WebKitGTK/wry media-capture support in
+  the deployed webkit — verify camera/mic on the target distro before
+  shipping a .deb/.rpm. Windows (WebView2) grants media by default.
+- Speechmatics On-Device SDK is commercial-procurement; the seam is built,
+  drop-in is a license + bridge-service away.

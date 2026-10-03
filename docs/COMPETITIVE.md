@@ -55,7 +55,7 @@ not code.
 | AI moments | **Surpass** — laughter/applause events → clip markers; no equivalent on their side |
 | E2EE | **Surpass decisively** — theirs is plaintext-to-cloud, always |
 | Live social streaming | **Trail** — code-ready (`stream-manifest` + hls.js witness path); flips on CF Stream creds |
-| Mobile apps | **Trail** — Tauri shell planned (Phase C) |
+| Mobile apps | **Parity-** — Tauri shell shipped (desktop); stores/notarization + mobile ports remain |
 
 ### Cohort A — facilitation tools (circl.es, Butter, SessionLab, BBB)
 
@@ -76,7 +76,7 @@ not code.
 | Media under load | **Parity- → Parity** — mesh simulcast + pull-hints + beyond-GCC broker shipped; CF SFU layer-selection pending creds (mesh path needs no creds) |
 | Audio quality | **Parity+** — on-device denoise/vbg/spatial/loudness + opt-in edge lane |
 | Scale | **Parity-** — webinar-lite mesh mode ships; >100 webinar + PSTN coded, cred-gated (CF Stream) |
-| Mobile | **Trail** — browser + PWA only; Tauri planned |
+| Mobile | **Parity-** — Tauri desktop shell shipped; mobile ports remain |
 | Enterprise | **Parity-** — Access-gated console + metered pools live; SSO/SCIM provisioning deferred |
 
 ### Cohort C — privacy video (Element Call, Jitsi, Signal, Brave Talk)
@@ -92,8 +92,9 @@ not code.
 
 **#1 in the niche, and the Riverside moat (local-first ISO + progressive
 upload) is now matched with an E2EE advantage it can't copy.** Remaining
-gaps are cred-gated deploys (CF Realtime/Stream/R2) and the Tauri shell —
-documented in the megaplan, not missing features.
+gaps are cred-gated deploys (CF Realtime/Stream/R2) and store/mobile
+distribution of the shipped Tauri shell — documented in the megaplan,
+not missing features.
 
 ## Part 2 — what remains (all code-ready or cred-gated)
 

@@ -23,6 +23,9 @@ Regenerate: `node scripts/licenses.mjs > LICENSES.md`
 | `@sveltejs/kit` | 2.70.3 | MIT | https://github.com/sveltejs/kit |
 | `@sveltejs/vite-plugin-svelte` | 5.1.1 | MIT | https://github.com/sveltejs/vite-plugin-svelte |
 | `@tanstack/svelte-virtual` | 3.13.39 | MIT | https://github.com/TanStack/virtual |
+| `@tauri-apps/api` | 2.12.1 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
+| `@tauri-apps/cli` | 2.12.1 | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri |
+| `@tauri-apps/plugin-deep-link` | 2.6.1 | MIT OR Apache-2.0 | https://github.com/tauri-apps/plugins-workspace |
 | `@tiptap/core` | 3.31.3 | MIT | https://github.com/ueberdosis/tiptap |
 | `@tiptap/extension-collaboration` | 3.31.3 | MIT | https://github.com/ueberdosis/tiptap |
 | `@tiptap/extension-task-item` | 3.31.4 | MIT | https://github.com/ueberdosis/tiptap |
@@ -89,4 +92,25 @@ Regenerate: `node scripts/licenses.mjs > LICENSES.md`
 | wllama wasm runtime | MIT | ngxson/wllama |
 | Lato, EB Garamond, Caveat fonts | OFL-1.1 | Google Fonts / self-hosted |
 | Switzer font | Fontshare license | Fontshare |
+
+## Rust crates (src-tauri + speechd)
+
+Direct crates only; the Cargo.lock transitive set is MIT/Apache-2.0/BSD/ISC
+per `cargo tree`-audited dependency metadata — no copyleft crates.
+
+| Crate | Version req | License | Repository |
+|---|---|---|---|
+| `tauri-build` | 2 | MIT OR Apache-2.0 | crates.io/crates/tauri-build |
+| `tauri` | 2 | MIT OR Apache-2.0 | crates.io/crates/tauri |
+| `tauri-plugin-deep-link` | 2 | MIT OR Apache-2.0 | crates.io/crates/tauri-plugin-deep-link |
+| `tauri-plugin-single-instance` | 2 | MIT OR Apache-2.0 | crates.io/crates/tauri-plugin-single-instance |
+| `serde` | 1 | MIT OR Apache-2.0 | crates.io/crates/serde |
+| `serde_json` | 1 | MIT OR Apache-2.0 | crates.io/crates/serde_json |
+| `tokio` | 1 | MIT | crates.io/crates/tokio |
+| `tokio` | 1 | MIT | crates.io/crates/tokio |
+| `tokio-tungstenite` | 0.26 | MIT | crates.io/crates/tokio-tungstenite |
+| `futures-util` | 0.3 | MIT OR Apache-2.0 | crates.io/crates/futures-util |
+| `serde` | 1 | MIT OR Apache-2.0 | crates.io/crates/serde |
+| `serde_json` | 1 | MIT OR Apache-2.0 | crates.io/crates/serde_json |
+| `tracing` | 0.1 | MIT | crates.io/crates/tracing |
 

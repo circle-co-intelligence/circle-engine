@@ -31,6 +31,10 @@ Zero-server, client-only P2P video circle app. SvelteKit (adapter-static, `ssr=f
   session's authority/lobby/password/waiting view — use it to find the
   authority page (`self === auth`) since manager ops are policy-gated.
   Prod's Lobby & access UI is gated on canManageRoom (drawer → Options tab).
+- `pnpm tauri:dev` / `pnpm tauri:build` / `pnpm build:native` — Tauri native
+  shell (src-tauri/). Linux build host needs webkit2gtk4.1-devel etc — see
+  docs/DEPLOYMENT.md "Native app". `cargo test --manifest-path
+  src-tauri/speechd/Cargo.toml` — local RT speech endpoint tests.
 
 ## Invariants (do not violate)
 - No server code in `cic-core`. Static bundle only.
