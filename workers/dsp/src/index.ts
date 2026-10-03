@@ -46,9 +46,17 @@ export default {
 			});
 			if (!res.ok) return new Response('token mint failed', { status: 502 });
 			return new Response(await res.text(), {
-				headers: { 'content-type': 'application/json', 'cache-control': 'no-store' }
+				headers: {
+					'content-type': 'application/json',
+					'cache-control': 'no-store',
+					'access-control-allow-origin': '*' // browsers mint cross-origin
+				}
 			});
 		}
+		if (req.method === 'OPTIONS')
+			return new Response(null, {
+				headers: { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET' }
+			});
 		if (req.headers.get('upgrade') !== 'websocket')
 			return new Response('expected websocket', { status: 426 });
 		if (url.pathname === '/speech') {

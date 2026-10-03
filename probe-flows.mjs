@@ -10,7 +10,8 @@ import { chromium } from '@playwright/test';
 // probe detects which page holds host controls and drives host actions there.
 
 const CODE = String(Math.floor(100000 + Math.random() * 900000));
-const URL = `http://localhost:5173/room/${CODE}`;
+const BASE = process.env.PROBE_BASE ?? 'http://localhost:5173';
+const URL = `${BASE}/room/${CODE}`;
 console.log('room code:', CODE);
 
 const browser = await chromium.launch({

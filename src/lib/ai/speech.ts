@@ -35,11 +35,15 @@ const PACKS = {
 
 // upstream tarballs (models/manifest.json) — used when the extracted pack
 // isn't served locally (e.g. GitHub Pages deploys, where 400MB of weights
-// can't be committed)
+// can't be committed). Upstream release assets carry no CORS headers, so
+// prefer the ai-gateway /pack proxy (allowlisted, same-origin-capable);
+// the raw manifest URL remains the no-gateway last resort.
 const REMOTE_KEYS = { vad: 'vad', asr: 'asr-en', tts: 'tts-en' } as const;
+const aiBase = (import.meta.env as Record<string, string | undefined>).VITE_CIC_AI_ENDPOINT;
 for (const [kind, mkey] of Object.entries(REMOTE_KEYS)) {
 	const remote = (manifest.packs as Record<string, { url?: string }>)[mkey]?.url;
-	if (remote) (PACKS as Record<string, { remote: string }>)[kind].remote = remote;
+	const proxied = aiBase ? `${aiBase.replace(/\/ai\/?$/, '')}/ai/pack/${kind}` : null;
+	(PACKS as Record<string, { remote: string }>)[kind].remote = proxied ?? remote ?? '';
 }
 
 type PackKind = keyof typeof PACKS;

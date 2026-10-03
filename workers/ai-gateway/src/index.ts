@@ -31,7 +31,7 @@ export interface Env {
 	AI_STT_MODEL?: string;
 	AI_TTS_MODEL?: string;
 	AI_BASE_URL?: string;
-	DB?: D1Database; // metered accounts — server-verified paid rooms
+	METER?: DurableObjectNamespace<MeterBus>; // per-room metered pools
 	AE?: AnalyticsEngineDataset; // opt-in anonymous quality telemetry
 	TURNSTILE_SECRET?: string; // siteverify on paid lanes when set
 	GRANT_PUBKEY?: string; // Ed25519 hex — verifies top-up grants
@@ -66,6 +66,8 @@ export default {
 				return await usage(req, env);
 			if (url.pathname === '/ai/topup' && req.method === 'POST')
 				return await topup(req, env);
+			if (url.pathname.startsWith('/ai/pack/') && req.method === 'GET')
+				return await pack(url.pathname.slice(9));
 			if (url.pathname === '/ai/telemetry' && req.method === 'POST')
 				return await telemetry(req, env);
 			if (url.pathname === '/ai/status' && req.method === 'GET')
@@ -73,7 +75,7 @@ export default {
 					ok: true,
 					provider: env.AI_PROVIDER ?? 'workers-ai',
 					models: { chat: env.AI_CHAT_MODEL, stt: env.AI_STT_MODEL, tts: env.AI_TTS_MODEL },
-					entitlements: !!env.DB
+					entitlements: !!env.METER
 				});
 			return json({ error: 'not found' }, 404);
 		} catch (e) {
@@ -167,33 +169,24 @@ async function tts(req: Request, env: Env): Promise<Response> {
 // ------------------------------------------------------------- entitlement + telemetry
 
 /** GET /ai/entitlement?room= → {paid, balanceSeconds, spentSeconds}
- *  metered account: paid while balance_seconds > 0 (streaming spend) */
+ *  metered account: paid while balance > 0 (streaming spend) */
 async function entitlement(url: URL, env: Env): Promise<Response> {
-	if (!env.DB) return json({ paid: false });
 	const room = url.searchParams.get('room');
 	if (!room) return json({ error: 'room required' }, 400);
-	const row = await env.DB.prepare(
-		'SELECT balance_seconds, spent_seconds FROM accounts WHERE room = ?'
-	)
-		.bind(room)
-		.first<{ balance_seconds: number; spent_seconds: number }>();
-	return json({
-		paid: (row?.balance_seconds ?? 0) > 0,
-		balanceSeconds: row?.balance_seconds ?? 0,
-		spentSeconds: row?.spent_seconds ?? 0
-	});
+	if (!env.METER) return json({ paid: false });
+	return meter(env, room, 'get', {});
 }
 
 /**
  * POST /ai/usage {room, seconds, calls?} — the streaming-spend lane.
  * Clients heartbeat paid-resource seconds (SFU fanout, sensory, edge DSP)
- * and AI call counts; the worker debits the room's pool atomically and
- * returns the remaining balance — at zero, paid lanes drop back to
- * on-device. Each call costs CALL_COST seconds against the pool.
+ * and AI call counts; the room's MeterBus DO debits atomically (single-
+ * threaded per room — atomic by construction) and returns the balance —
+ * at zero, paid lanes drop back to on-device. Each call = CALL_COST s.
  */
 const CALL_COST = 5;
 async function usage(req: Request, env: Env): Promise<Response> {
-	if (!env.DB) return json({ balanceSeconds: 0 });
+	if (!env.METER) return json({ balanceSeconds: 0 });
 	const { room, seconds, calls } = (await req.json()) as {
 		room?: string;
 		seconds?: number;
@@ -202,15 +195,7 @@ async function usage(req: Request, env: Env): Promise<Response> {
 	if (!room) return json({ error: 'room required' }, 400);
 	const debit = Math.max(0, Math.min(3600, Math.round(seconds ?? 0))) +
 		Math.max(0, Math.min(1000, Math.round(calls ?? 0))) * CALL_COST;
-	if (debit === 0) return entitlement(new URL(`${req.url.split('?')[0]}?room=${room}`), env);
-	const row = await env.DB.prepare(
-		`UPDATE accounts SET balance_seconds = MAX(0, balance_seconds - ?),
-		 spent_seconds = spent_seconds + ?, updated_at = unixepoch()
-		 WHERE room = ? RETURNING balance_seconds`
-	)
-		.bind(debit, debit, room)
-		.first<{ balance_seconds: number }>();
-	return json({ paid: (row?.balance_seconds ?? 0) > 0, balanceSeconds: row?.balance_seconds ?? 0 });
+	return meter(env, room, 'debit', { amount: debit });
 }
 
 /**
@@ -218,14 +203,20 @@ async function usage(req: Request, env: Env): Promise<Response> {
  * {seconds, nonce, sig}; sig = Ed25519("room.seconds.nonce") by the
  * operator key (GRANT_PUBKEY env, hex). Whatever payment rail the operator
  * wires (checkout, crypto, invoice) mints grants after settlement —
- * streaming payments land as sequential top-ups. Nonce table blocks replay.
+ * streaming payments land as sequential top-ups. Signature + nonce replay
+ * check happen in the global MeterBus (nonce store shared across rooms).
  */
 async function topup(req: Request, env: Env): Promise<Response> {
-	if (!env.DB || !env.GRANT_PUBKEY) return json({ error: 'topup unconfigured' }, 503);
+	if (!env.METER || !env.GRANT_PUBKEY) return json({ error: 'topup unconfigured' }, 503);
 	const { room, grant } = (await req.json()) as { room?: string; grant?: string };
 	if (!room || !grant) return json({ error: 'room + grant required' }, 400);
+	let seconds: number;
 	try {
-		const g = JSON.parse(atob(grant)) as { seconds?: number; nonce?: string; sig?: string };
+		const g = JSON.parse(atob(grant.replace(/-/g, '+').replace(/_/g, '/'))) as {
+			seconds?: number;
+			nonce?: string;
+			sig?: string;
+		};
 		if (!g.seconds || !g.nonce || !g.sig) throw new Error('bad grant');
 		const key = await crypto.subtle.importKey(
 			'raw', hexToBytes(env.GRANT_PUBKEY), 'Ed25519', false, ['verify']
@@ -235,25 +226,99 @@ async function topup(req: Request, env: Env): Promise<Response> {
 			new TextEncoder().encode(`${room}.${g.seconds}.${g.nonce}`)
 		);
 		if (!ok) throw new Error('bad signature');
-		await env.DB.prepare('INSERT INTO grants(nonce) VALUES (?)').bind(g.nonce).run();
+		seconds = g.seconds;
+		const claim = await meter(env, '__grants__', 'claim', { nonce: g.nonce });
+		if (!claim.ok) throw new Error('grant already redeemed');
 	} catch (e) {
 		return json({ error: `invalid grant: ${e instanceof Error ? e.message : 'x'}` }, 403);
 	}
-	const { seconds } = JSON.parse(atob(grant)) as { seconds: number };
-	await env.DB.prepare(
-		`INSERT INTO accounts(room, balance_seconds, spent_seconds, updated_at)
-		 VALUES (?, ?, 0, unixepoch())
-		 ON CONFLICT(room) DO UPDATE SET balance_seconds = balance_seconds + ?, updated_at = unixepoch()`
-	)
-		.bind(room, seconds, seconds)
-		.run();
+	await meter(env, room, 'credit', { amount: seconds });
 	return json({ ok: true, creditedSeconds: seconds });
+}
+
+function meter(env: Env, room: string, op: string, body: object): Promise<Response> {
+	const stub = env.METER!.get(env.METER!.idFromName(room));
+	return stub.fetch(`https://meter/${op}`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify(body)
+	});
+}
+
+/**
+ * MeterBus DO — one instance per room: {balance, spent} in storage.
+ * Single-threaded per room → debits are atomic by construction, no D1
+ * needed. The shared '__grants__' instance holds redeemed grant nonces.
+ * Hibernates idle; storage is KV-backed (per-key, no schema).
+ */
+export class MeterBus implements DurableObject {
+	constructor(private ctx: DurableObjectState) {}
+
+	async fetch(req: Request): Promise<Response> {
+		const op = new URL(req.url).pathname;
+		const b = (await req.json().catch(() => ({}))) as {
+			amount?: number;
+			nonce?: string;
+		};
+		const s = this.ctx.storage;
+		if (op === '/get') {
+			const balance = (await s.get<number>('balance')) ?? 0;
+			const spent = (await s.get<number>('spent')) ?? 0;
+			return json({ paid: balance > 0, balanceSeconds: balance, spentSeconds: spent });
+		}
+		if (op === '/debit') {
+			const amount = b.amount ?? 0;
+			const balance = Math.max(0, ((await s.get<number>('balance')) ?? 0) - amount);
+			const spent = ((await s.get<number>('spent')) ?? 0) + amount;
+			await s.put({ balance, spent });
+			return json({ paid: balance > 0, balanceSeconds: balance, spentSeconds: spent });
+		}
+		if (op === '/credit') {
+			const balance = ((await s.get<number>('balance')) ?? 0) + (b.amount ?? 0);
+			await s.put('balance', balance);
+			return json({ ok: true, balanceSeconds: balance });
+		}
+		if (op === '/claim') {
+			// nonce replay guard — first claim wins, forever
+			if (!b.nonce) return json({ ok: false }, 400);
+			if (await s.get(`nonce:${b.nonce}`)) return json({ ok: false }, 409);
+			await s.put(`nonce:${b.nonce}`, 1);
+			return json({ ok: true });
+		}
+		return json({ error: 'unknown op' }, 404);
+	}
 }
 
 function hexToBytes(hex: string): Uint8Array {
 	const out = new Uint8Array(hex.length / 2);
 	for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
 	return out;
+}
+
+/**
+ * GET /ai/pack/<kind> — stream the on-device model pack through our origin.
+ * The manifest's upstream tarballs (github release assets) carry no CORS
+ * headers, so browsers on the deployed site can't fetch them directly —
+ * this proxies a fixed allowlist, streams the body, and sets ACAO:* +
+ * long cache. Free-tier speech works on the public site via this lane.
+ */
+const PACK_URLS: Record<string, string> = {
+	vad: 'https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-wasm-simd-v1.13.8-vad.tar.bz2',
+	asr: 'https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.7/sherpa-onnx-wasm-simd-v1.13.7-en-asr-zipformer.tar.bz2',
+	tts: 'https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-wasm-simd-1.13.8-vits-piper-en_US-libritts_r-medium.tar.bz2'
+};
+async function pack(kind: string): Promise<Response> {
+	const url = PACK_URLS[kind];
+	if (!url) return json({ error: 'unknown pack' }, 404);
+	const up = await fetch(url);
+	if (!up.ok || !up.body) return json({ error: `upstream ${up.status}` }, 502);
+	return new Response(up.body, {
+		headers: {
+			'content-type': 'application/x-bzip2',
+			'cache-control': 'public, max-age=2592000, immutable',
+			...cors
+		}
+	});
 }
 
 /** POST /ai/telemetry — opt-in anonymous quality points → Analytics Engine */
