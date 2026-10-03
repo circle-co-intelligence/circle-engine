@@ -44,7 +44,14 @@ function announcementFromJson(s: string): EpochAnnouncement {
 export class E2EESession {
 	readonly supported = supportsSFrame();
 	private ratchet: RoomRatchet;
+	// keyed per sender/receiver instance, not per peer — a pc carries several
+	// pooled senders+receivers per peer and per-role keys would orphan every
+	// cryptor but the last, leaving their transforms attached but forever
+	// unkeyed (inbound RTP arrives, decrypt starves, zero frames decoded)
 	private cryptors = new Map<string, FrameCryptor>();
+	private attachedSenders = new WeakSet<RTCRtpSender>();
+	private attachedReceivers = new WeakSet<RTCRtpReceiver>();
+	private cryptorSeq = 0;
 	private worker?: Worker;
 	private members = new Map<string, PeerIdentity>(); // peerId -> identity
 	active = false;
@@ -125,7 +132,7 @@ export class E2EESession {
 			// a receiver cryptor for a peer the epoch map doesn't cover yet (no
 			// cap[1] e2ee key, or joined after this epoch was authored) can't be
 			// keyed — their hello triggers a rotation that includes them
-			if (key.startsWith('r:') && !(key.slice(2) in params.peerIndexMap)) continue;
+			if (key.startsWith('r:') && !(key.split(':')[1] in params.peerIndexMap)) continue;
 			try {
 				await c.setEpoch(params);
 			} catch { /* stale cryptor — next rotation rekeys it */ }
@@ -154,17 +161,21 @@ export class E2EESession {
 	}
 
 	attachSender(peerId: string, sender: RTCRtpSender) {
+		if (this.attachedSenders.has(sender)) return;
 		const c = this.makeCryptor('sender', peerId);
 		if (!c) return;
 		c.attachSender(sender);
-		this.cryptors.set(`s:${peerId}`, c);
+		this.attachedSenders.add(sender);
+		this.cryptors.set(`s:${peerId}:${this.cryptorSeq++}`, c);
 	}
 
 	attachReceiver(peerId: string, receiver: RTCRtpReceiver) {
+		if (this.attachedReceivers.has(receiver)) return;
 		const c = this.makeCryptor('receiver', peerId);
 		if (!c) return;
 		c.attachReceiver(receiver);
-		this.cryptors.set(`r:${peerId}`, c);
+		this.attachedReceivers.add(receiver);
+		this.cryptors.set(`r:${peerId}:${this.cryptorSeq++}`, c);
 	}
 
 	/** SAS emoji for MITM verification — per-peer DH transcript */

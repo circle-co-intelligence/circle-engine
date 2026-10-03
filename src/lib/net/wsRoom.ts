@@ -65,6 +65,16 @@ interface Sig {
 	// opaque blobs.
 	app?: string;
 }
+// internal app namespace: publisher → receiver "pool transceiver index i is
+// a real claimed media slot" (and its release). Needed because some engines
+// send padding/keepalive RTP on negotiated-but-unclaimed sendrecv m-lines,
+// which un-mutes the receiver track — without the map we cannot tell a real
+// published stream apart from padding noise.
+const SMAP_NS = '__wsroom_smap__';
+interface SmapFrame {
+	i: number;
+	off?: boolean;
+}
 interface Peer {
 	busId: string;
 	sid: string;
@@ -85,6 +95,10 @@ interface Peer {
 	// local publish bookkeeping: which pooled transceiver index each of our
 	// outgoing tracks occupies (replaceTrack target)
 	claims: Map<MediaStreamTrack, number>;
+	// receive side: pool indices the remote has announced as real claimed
+	// slots (SMAP_NS), plus tracks pending adoption until their index maps
+	mapped: Set<number>;
+	pendingIdx: Set<number>;
 	// receive side: one merged MediaStream carrying every remote receiver
 	// track that has ever delivered media
 	recvStream: MediaStream;
@@ -191,32 +205,60 @@ export async function openWsRoom(
 	};
 	const handleAppFrame = (p: Peer, ns: string, data: unknown) => {
 		if (dedupeApp(`${p.sid}|${ns}|${JSON.stringify(data)}`)) return;
+		if (ns === SMAP_NS) {
+			handleSmap(p, data);
+			return;
+		}
 		actionListeners.get(ns)?.forEach((fn) => fn(data, p.sid));
 	};
 
-	// adopt a remote receiver track into the peer's merged stream the first
-	// time it can actually produce media — before that it is a muted
-	// negotiation placeholder, and publishing it early would render a black
-	// seat for a peer who never sent anything
-	const adoptTrack = (p: Peer, t: MediaStreamTrack) => {
-		if (p.recvSeen.has(t)) return;
-		p.recvSeen.add(t);
-		const attach = () => {
-			if (p.recvStream.getTracks().includes(t)) return;
-			p.recvStream.addTrack(t);
-			streamListeners.forEach((fn) => fn(p.recvStream, p.sid));
-		};
-		if (!t.muted) attach();
-		else t.addEventListener('unmute', attach);
+	// remote told us pool index i carries real published media — adopt that
+	// transceiver's receiver track once it can deliver frames (its 'unmute'
+	// is the genuine media-arrival signal); 'off' releases the slot so a
+	// stopped publish shrinks the seat's stream back down
+	const attachTrack = (p: Peer, t: MediaStreamTrack) => {
+		if (p.recvStream.getTracks().includes(t)) return;
+		p.recvStream.addTrack(t);
+		streamListeners.forEach((fn) => fn(p.recvStream, p.sid));
 	};
+	const adoptTrack = (p: Peer, i: number) => {
+		const t = p.pc.getTransceivers()[i]?.receiver?.track;
+		if (!t || p.recvSeen.has(t)) return;
+		p.recvSeen.add(t);
+		if (!t.muted) attachTrack(p, t);
+		else t.addEventListener('unmute', () => attachTrack(p, t));
+	};
+	const handleSmap = (p: Peer, data: unknown) => {
+		const f = data as SmapFrame | undefined;
+		if (typeof f?.i !== 'number') return;
+		if (f.off) {
+			p.mapped.delete(f.i);
+			const t = p.pc.getTransceivers()[f.i]?.receiver?.track;
+			if (t && p.recvStream.getTracks().includes(t)) {
+				p.recvStream.removeTrack(t);
+				streamListeners.forEach((fn) => fn(p.recvStream, p.sid));
+			}
+			return;
+		}
+		p.mapped.add(f.i);
+		adoptTrack(p, f.i);
+		// drain any receiver arrivals that beat the map frame
+		if (p.pendingIdx.delete(f.i)) adoptTrack(p, f.i);
+	};
+
 	// every pooled transceiver owns a receiver track from negotiation time —
 	// ontrack should fire for each, but some engines defer it until media
-	// flows, so sweep the transceiver list on connect as well
+	// flows, so sweep the transceiver list on connect as well. Tracks are
+	// only adopted once their pool index has been SMAP-mapped by the remote
+	// (otherwise padding/keepalive RTP on unclaimed sendrecv slots un-mutes
+	// receivers we would mistake for real published media); arrivals before
+	// the map lands are parked in pendingIdx
 	const collectReceivers = (p: Peer) => {
-		for (const tr of p.pc.getTransceivers()) {
-			const t = tr.receiver?.track;
-			if (t) adoptTrack(p, t);
-		}
+		p.pc.getTransceivers().forEach((tr, i) => {
+			if (!tr.receiver?.track) return;
+			if (p.mapped.has(i)) adoptTrack(p, i);
+			else p.pendingIdx.add(i);
+		});
 	};
 
 	const maybeJoin = (p: Peer) => {
@@ -300,7 +342,12 @@ export async function openWsRoom(
 					p.makingOffer = false;
 				});
 		};
-		pc.ontrack = (ev) => adoptTrack(p, ev.track);
+		pc.ontrack = (ev) => {
+			const i = pc.getTransceivers().findIndex((tr) => tr.receiver.track === ev.track);
+			if (i < 0) return;
+			if (p.mapped.has(i)) adoptTrack(p, i);
+			else p.pendingIdx.add(i);
+		};
 		pc.onconnectionstatechange = () => {
 			if (pc.connectionState === 'connected') maybeJoin(p);
 			if (pc.connectionState === 'failed' || pc.connectionState === 'closed') dropPeer(p);
@@ -314,7 +361,8 @@ export async function openWsRoom(
 			dc: null, makingOffer: false, ignoreOffer: false, joined: false,
 			pendingLocalOp: Promise.resolve(),
 			initiator, offered: false,
-			claims: new Map(), recvStream: new MediaStream(), recvSeen: new Set(),
+			claims: new Map(), mapped: new Set(), pendingIdx: new Set(),
+			recvStream: new MediaStream(), recvSeen: new Set(),
 			appChain: Promise.resolve()
 		};
 		peers.set(sid, p);
@@ -360,6 +408,8 @@ export async function openWsRoom(
 		// active local publishes are NOT auto-restored onto the fresh pc — the
 		// composite re-offers active streams on peer-join anyway
 		p.claims.clear();
+		p.mapped.clear();
+		p.pendingIdx.clear();
 		p.recvStream = new MediaStream();
 		p.recvSeen.clear();
 		p.dc = null;
@@ -557,6 +607,7 @@ export async function openWsRoom(
 					}
 					p.claims.set(t, i);
 					void p.pc.getTransceivers()[i].sender.replaceTrack(t).catch(() => {});
+					void sendAppFrame(p, SMAP_NS, { i } as SmapFrame);
 				}
 			}
 		},
@@ -566,10 +617,11 @@ export async function openWsRoom(
 					const i = p.claims.get(t);
 					if (i == null) continue;
 					p.claims.delete(t);
-					// slot stays reserved-for-nothing — freed for reuse; the remote
-					// receiver track mutes rather than ends, which reads as
-					// "stopped sending" without tearing down the stream object
+					// slot freed for reuse; the remote drops this index from its
+					// seat stream (smap off) — and the receiver track mutes on
+					// its own anyway once packets stop
 					void p.pc.getTransceivers()[i]?.sender.replaceTrack(null).catch(() => {});
+					void sendAppFrame(p, SMAP_NS, { i, off: true } as SmapFrame);
 				}
 			}
 		},
@@ -589,6 +641,7 @@ export async function openWsRoom(
 				dc: p.dc?.readyState ?? null,
 				offered: p.offered,
 				claims: [...p.claims.values()],
+				mapped: [...p.mapped],
 				recvTracks: p.recvStream.getTracks().map((t) => `${t.kind}:${t.readyState}:${t.muted ? 'muted' : 'live'}`),
 				makingOffer: p.makingOffer
 			})),

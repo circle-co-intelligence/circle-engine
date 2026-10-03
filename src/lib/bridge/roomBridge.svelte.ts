@@ -102,6 +102,9 @@ export class RoomSocket extends LocalSocket {
 	get captionSub(): number {
 		return this.bridge.captionSubscriptionRef;
 	}
+	get sfuDebug(): unknown {
+		return this.bridge.sfuDebug();
+	}
 
 	send(data: string | ArrayBufferLike | Blob | ArrayBufferView) {
 		if (typeof data !== 'string') return; // binary frames belong to the caption socket
@@ -227,6 +230,9 @@ class RoomBridge {
 	}
 	get captionSubscriptionRef(): number {
 		return this.captionSubscription;
+	}
+	sfuDebug(): unknown {
+		return (this.sfu as SfuLoopback).__debug?.() ?? null;
 	}
 
 	private get pendingKey(): string {

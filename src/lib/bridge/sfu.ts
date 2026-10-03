@@ -34,6 +34,10 @@ export class SfuLoopback {
 	private session: RoomSession | null = null;
 	private sentSessionIds = new Set<string>(); // announced in sfu-pull
 	private pullMidSession = new Map<string, string>(); // mid -> sessionId (ours)
+	// shaped audio tracks are wrapped copies — remember which sessionId each
+	// belongs to so the pulls[] announcement and sessionIdForTrack resolve it
+	private shapedTrackSession = new WeakMap<MediaStreamTrack, string>();
+	private shapedBySource = new WeakMap<MediaStreamTrack, MediaStreamTrack>();
 
 	constructor(private bridge: BridgeLike) {}
 
@@ -47,8 +51,18 @@ export class SfuLoopback {
 		// pulls head to prod's display pc — rid layers on this leg are waste
 		skipSimulcast(pc);
 		pc.ontrack = (ev) => {
-			// frontend's captured media — relay to the mesh
-			this.session?.publishLocal(ev.streams[0] ?? new MediaStream([ev.track]));
+			// frontend's captured media — relay to the mesh. Prod's publish
+			// offer also carries placeholder m-lines (screenshare slots) whose
+			// receiver tracks arrive muted; publishing them makes the mesh
+			// transmit black video that outranks the real track in remote
+			// remoteStreams merges. Publish only unmuted tracks, and arm the
+			// placeholder to publish on its first unmute instead.
+			const publish = () => {
+				const live = (ev.streams[0]?.getTracks() ?? [ev.track]).filter((t) => !t.muted);
+				if (live.length) this.session?.publishLocal(new MediaStream(live));
+			};
+			publish();
+			if (ev.track.muted) ev.track.addEventListener('unmute', publish, { once: true });
 		};
 		pc.onicecandidate = () => {}; // candidates embedded after gathering
 		pc.onconnectionstatechange = () =>
@@ -158,8 +172,25 @@ export class SfuLoopback {
 		if (!s) return null;
 		const [peerId, kind] = sessionId.split(':');
 		const stream = s.remoteStreams[peerId];
-		const track = stream?.getTracks().find((t) => t.kind === kind) ?? null;
-		return track && kind === 'audio' ? (this.shape?.(sessionId, track) ?? track) : track;
+		// prefer a live (unmuted) track — a peer that re-published can leave a
+		// stale/muted placeholder of the same kind in the merged stream
+		const track =
+			stream?.getTracks().find((t) => t.kind === kind && !t.muted) ??
+			stream?.getTracks().find((t) => t.kind === kind) ??
+			null;
+		if (!track || kind !== 'audio' || !this.shape) return track;
+		// memoize per source track — shape() allocates a new MediaStreamTrack
+		// every call, and an un-memoized return would trip notifyStreams'
+		// sender.track !== track check into a replaceTrack on every firing
+		let shaped = this.shapedBySource.get(track);
+		if (!shaped) {
+			shaped = this.shape(sessionId, track);
+			if (shaped !== track) {
+				this.shapedTrackSession.set(shaped, sessionId);
+				this.shapedBySource.set(track, shaped);
+			}
+		}
+		return shaped;
 	}
 
 	private availableTracks(): { sessionId: string; trackName: string; kind: string; ownerId: string }[] {
@@ -208,7 +239,19 @@ export class SfuLoopback {
 				if (sender) {
 					if (sender.track !== track) await sender.replaceTrack(track).catch(() => {});
 				} else {
-					this.senderBySession.set(sessionId, pc.addTrack(track, this.session!.remoteStreams[sessionId.split(':')[0]]));
+					// addTransceiver, never addTrack: addTrack would reuse prod's
+					// publish transceivers (recvonly + no sender track = a valid
+					// reuse target), leaving the pull sender bound to an m-line
+					// whose negotiated direction stays recvonly — zero RTP, and
+					// prod's seat renders a permanently muted track. Pulls need
+					// their own sendonly m-lines for prod to bind receivers to.
+					this.senderBySession.set(
+						sessionId,
+						pc.addTransceiver(track, {
+							direction: 'sendonly',
+							streams: [this.session!.remoteStreams[sessionId.split(':')[0]] ?? new MediaStream()]
+						}).sender
+					);
 				}
 			}
 			const offer = await pc.createOffer();
@@ -231,11 +274,34 @@ export class SfuLoopback {
 	}
 
 	private sessionIdForTrack(track: MediaStreamTrack): string {
+		const shaped = this.shapedTrackSession.get(track);
+		if (shaped) return shaped;
 		const s = this.session;
 		if (!s) return `:${track.kind}`;
 		for (const [peerId, stream] of Object.entries(s.remoteStreams))
 			if (stream.getTracks().includes(track)) return `${peerId}:${track.kind}`;
 		return `:${track.kind}`;
+	}
+
+	/** temporary diagnostics: pull-leg sender/track binding state */
+	__debug() {
+		return {
+			wanted: [...this.wanted.keys()],
+			senders: [...this.senderBySession.entries()].map(([sid, s]) => ({
+				sid,
+				track: s.track
+					? `${s.track.kind}${s.track.muted ? ':m' : ''}/${s.track.readyState}/${s.track.id.slice(0, 6)}`
+					: null,
+				enc: s
+					.getParameters()
+					.encodings?.map((e) => `${e.active !== false ? 'on' : 'off'}:${e.maxBitrate ?? '-'}`)
+					.join(',')
+			})),
+			mids: [...this.pullMidSession.entries()],
+			pcTrans: this.pc
+				?.getTransceivers()
+				.map((t) => `${t.direction}→${t.currentDirection}/${t.receiver.track?.kind}/${t.mid}`)
+		};
 	}
 
 	dispose() {

@@ -42,6 +42,20 @@ export function wireE2EE(room: RoomHandle, e2ee: E2EESession) {
 		for (const s of pc.getSenders()) e2ee.attachSender(peerId, s);
 		for (const r of pc.getReceivers()) e2ee.attachReceiver(peerId, r);
 	};
+	const attachAll = () => {
+		for (const peerId of Object.keys(room.raw.getPeers())) attach(peerId);
+	};
 	room.onPeerJoin(attach);
-	for (const peerId of Object.keys(room.raw.getPeers())) attach(peerId);
+	// relay lanes create senders/receivers lazily (per addStream/renegotiation),
+	// long after the join-time attach — rescan on every local publish and every
+	// adopted remote stream so cryptors cover transceivers that appear late
+	room.onPeerStream(attachAll);
+	const origAdd = room.addStream.bind(room);
+	room.addStream = (stream, targets) => {
+		origAdd(stream, targets);
+		// addTrack happens synchronously inside lane addStream — defer one tick
+		// so senders exist before we scan (transform must precede media flow)
+		queueMicrotask(attachAll);
+	};
+	attachAll();
 }

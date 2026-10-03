@@ -42,6 +42,8 @@ export function installCicShims(roomKey?: string) {
 		(code, frame) => roomSockets.get(code)?.send(JSON.stringify(frame));
 	(window as unknown as { __cicDebug: (code: string) => unknown }).__cicDebug =
 		(code) => roomSockets.get(code)?.session?.debugView() ?? null;
+	(window as unknown as { __sfuDebug: (code: string) => unknown }).__sfuDebug =
+		(code) => roomSockets.get(code)?.sfuDebug ?? null;
 }
 
 /**
