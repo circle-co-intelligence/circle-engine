@@ -21,6 +21,10 @@ export interface GateView {
 	/** hello cap[0] identity keys that already passed the access gate */
 	memberKeys: ReadonlySet<string>;
 	passwordHash: string; // '' = no password
+	/** we joined after the password was set — the joiner class. Joiners never
+	 *  gate member hellos (members don't carry cap[2]; gating them poisons
+	 *  our denied set into ignoring the members' legitimate access-denied) */
+	joinedAfterPassword: boolean;
 	joinAgeMs: number;
 	waitingIds: ReadonlySet<string>;
 }
@@ -42,14 +46,22 @@ export function shouldHoldOnJoin(peerId: string, v: GateView): boolean {
 
 /**
  * Member-side hello password gate: members verify a JOINER's proof (cap[2]) —
- * the joiner's op-log can't know the hash yet. We only gate once our own join
- * is proven (past the window) AND the peer's identity key is unknown: a seated
- * member's hello legitimately lacks cap[2] (joined pre-password), and denying
- * it poisons our authority/seat view → replayed ops policy-fail on that view.
+ * the joiner's op-log can't know the hash yet. Two self-states must not gate:
+ * a lobby-held joiner (waitingSelf — unproven, view legitimately diverges) and
+ * a post-password joiner (joinedAfterPassword — members' hellos legitimately
+ * lack cap[2], and denying them makes us ignore their valid access-denied as
+ * a "counter-denial", deadlocking the password prompt). Every member gates
+ * immediately: a hash we already hold IS the converged value, and the gate
+ * must be fail-closed — a wrongly-denied joiner simply retries, but a
+ * wrongly-admitted one pulls every member's media streams unverified.
+ * Seated members stay exempt via memberKeys — their hellos legitimately
+ * lack cap[2] (they joined pre-password), and denying them poisons our
+ * authority/seat view → replayed ops policy-fail on that view.
  */
 export function shouldDenyHello(cap: readonly (string | undefined)[], v: GateView): boolean {
 	return (
-		v.joinAgeMs > JOIN_PROOF_WINDOW_MS &&
+		!v.waitingSelf &&
+		!v.joinedAfterPassword &&
 		!(cap[0] && v.memberKeys.has(cap[0])) &&
 		!!v.passwordHash &&
 		cap[2] !== v.passwordHash

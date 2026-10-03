@@ -402,7 +402,7 @@ class RoomBridge {
 			trFanout: s.trFanout,
 			recording: s.recording,
 			recordingSessions: this.recordingSessions(),
-			chat: s.chatLog.map((c) => ({ from: this.prodId(c.from), name: s.names[c.from] ?? this.name, text: c.text, at: Date.now(), whisper: c.whisper })),
+			chat: s.chatLog.map((c) => ({ from: this.prodId(c.from), name: c.from === s.selfId ? s.displayName : s.names[c.from] ?? 'Peer', text: c.text, at: Date.now(), whisper: c.whisper })),
 			transcript: [],
 			feedbackPermit: true,
 			dashboardUrl: null
@@ -1057,8 +1057,12 @@ class RoomBridge {
 			$effect(() => {
 				const log = s.chatLog;
 				for (const c of log.slice(this.lastChatLen)) {
-					if (c.from === s.selfId) continue; // already echoed on send
-					this.frame({ t: 'chat', entry: { id: crypto.randomUUID(), from: this.prodId(c.from), name: s.names[c.from] ?? 'Peer', text: c.text, at: Date.now(), whisper: c.whisper } });
+					// self-authored chat echoes on send — but Milo speaks through
+					// this device without ever passing prod's chat input, so its
+					// entries must drain like remote ones or the brain's own UI
+					// never sees the reply
+					if (c.from === s.selfId && !c.milo) continue;
+					this.frame({ t: 'chat', entry: { id: crypto.randomUUID(), from: this.prodId(c.from), name: c.from === s.selfId ? s.displayName : s.names[c.from] ?? 'Peer', text: c.text, at: Date.now(), whisper: c.whisper } });
 				}
 				this.lastChatLen = log.length;
 			});

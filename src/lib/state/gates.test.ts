@@ -25,6 +25,7 @@ function view(over: Partial<GateView> = {}): GateView {
 		heldPeers: new Set(),
 		memberKeys: new Set(),
 		passwordHash: '',
+		joinedAfterPassword: false,
 		joinAgeMs: JOIN_PROOF_WINDOW_MS + 1, // established by default
 		waitingIds: new Set(),
 		...over
@@ -85,9 +86,25 @@ describe('hello password gate', () => {
 		expect(shouldDenyHello(['idkey-old', 'e2ee'], v)).toBe(false);
 	});
 
-	it('never gates while our own join is unproven', () => {
-		const v = view({ passwordHash: pw, joinAgeMs: 100 });
+	it('never gates while our own join is unproven (lobby-held)', () => {
+		const v = view({ passwordHash: pw, waitingSelf: true });
 		expect(shouldDenyHello(['idkey-new'], v)).toBe(false);
+	});
+
+	it('gates immediately once seated — no age window (fail-closed)', () => {
+		// a held hash is the converged value regardless of member age; an
+		// unverified joiner inside the old 15s window pulled member media
+		const v = view({ passwordHash: pw, joinAgeMs: 100 });
+		expect(shouldDenyHello(['idkey-new', 'e2ee'], v)).toBe(true);
+	});
+
+	it('never gates member hellos while we are a post-password joiner', () => {
+		// a joiner who arrived after the password was set must not deny
+		// members' cap[2]-less hellos — that poisons deniedPeers into ignoring
+		// their legitimate access-denied (deadlocks the password prompt)
+		const v = view({ passwordHash: pw, joinedAfterPassword: true });
+		expect(shouldDenyHello(['idkey-member', 'e2ee'], v)).toBe(false);
+		expect(shouldDenyHello(['idkey-member', 'e2ee', pw], v)).toBe(false);
 	});
 
 	it('never denies without a password set', () => {

@@ -130,47 +130,21 @@ async function ensureDrawerTab(page, tabRe, { tries = 14 } = {}) {
 	return false;
 }
 
-// Options tab → expand the "Lobby & access" accordion
-// (aria-controls="settings-lobby") which renders the waiting list +
-// Admit/Decline buttons. Self-heals the drawer/tab each call.
+// Options tab → the waiting list renders inline under the "Lobby" row as a
+// standalone "Admit" button (one per waiting guest / admit-all) — there is
+// no access-lobby accordion in this bundle, the tab itself is the gate.
+// Self-heals the drawer/tab each call.
 async function ensureLobbyAccessOpen(page) {
-	if (!(await ensureDrawerTab(page, /^options/i))) return false;
+	await ensureDrawerTab(page, /^options/i); // side effects: drawer open + Options tab
 	return !!(await pollFor(page, () => {
-		const h = document.querySelector('button[aria-controls="settings-lobby"]');
-		if (!h) return false;
-		if (h.getAttribute('aria-expanded') !== 'true') h.click();
-		return document.getElementById('settings-lobby') != null;
+		const scroll = document.querySelector('.settings-scroll');
+		return !!(scroll && /lobby/i.test(scroll.textContent || '') && /waiting|admit/i.test(scroll.textContent || ''));
 	}, null, { tries: 6, interval: 500 }));
 }
 
 // Reveal {name}'s seat-tile action row and open "Actions for {name}" so the
 // Remove entry renders. Re-verifies the remove button's actual presence
 // (not just that a click fired) before giving up on an attempt.
-async function ensureActionsMenuOpen(page, name) {
-	const hasTile = await pollFor(page, (n) =>
-		[...document.querySelectorAll('[data-pid] [aria-label]')].some((b) => b.getAttribute('aria-label') === n),
-		name, { tries: 12, interval: 800 });
-	if (!hasTile) return false;
-	for (let i = 0; i < 6; i++) {
-		const hasRemove = await page.evaluate(() =>
-			[...document.querySelectorAll('button[aria-label]')]
-				.some((b) => /remove .* from the circle/i.test(b.getAttribute('aria-label') || '')));
-		if (hasRemove) return true;
-		await page.evaluate((n) => {
-			const tile = [...document.querySelectorAll('[data-pid] [aria-label]')].find((b) => b.getAttribute('aria-label') === n);
-			tile?.click();
-		}, name);
-		await page.waitForTimeout(500);
-		await page.evaluate((n) => {
-			const el = [...document.querySelectorAll('button[aria-label]')]
-				.find((b) => (b.getAttribute('aria-label') || '') === `Actions for ${n}`);
-			el?.click();
-		}, name);
-		await page.waitForTimeout(500);
-	}
-	return false;
-}
-
 const ada = await join('Ada', 'a');
 const grace = await join('Grace', 'b');
 console.log('--- joined; waiting for mesh convergence ---');
@@ -383,12 +357,48 @@ const guestTag = hostTag === 'a' ? 'b' : 'a';
 // (prod's per-tile globe menu is menu-heavy; __cicSend is the identical frame
 // prod sends, routed through RoomSocket.send → real bridge dispatch)
 console.log('--- D: translation fanout ---');
-// the breakout/media churn above tears prod's speech pipe down — re-arm via
-// set-transcription (the wire op prod's transcript toggle sends); an injected
-// caption-subscribe gets reverted by prod's next sync()
-for (const p of [host, guest])
-	await p.evaluate((code) => window.__cicSend(code, { t: 'set-transcription', on: true }), CODE);
+// the breakout/media churn above tears prod's speech pipe down — re-arm by
+// cycling prod's OWN transcript toggle through the real UI. Prod's control
+// is stateful: off → [aria-label="Transcript is off"] + "Turn on transcript";
+// on → .transcript-manage switch with aria-checked. Its UI state persists
+// "on" even after the pipe died, so a blind click toggles OFF — cycle
+// off→on instead, which re-sends set-transcription{on:true} and forces a
+// fresh caption-source generation + /ws/caption socket + ASR pipe.
+// the toggle is manager-gated (i.canManageRoom) — only the host page carries
+// it; guests' speech pipes re-arm themselves when the engine re-designates
+// caption sources
+const tPage = host;
+{
+	const toolsOpen = await tPage.locator('aside[aria-label="Tools"]').count();
+	if (!toolsOpen) { await clickSel(tPage, '[data-ux-id="chat"]'); await tPage.waitForTimeout(1200); }
+	await clickRetry(tPage, /^transcript$/i, 5);
+	await tPage.waitForTimeout(900);
+	// phase 1: if the switch reads on, click it off to force a clean re-arm
+	await tPage.evaluate(() => {
+		const sw = document.querySelector('[role="group"][aria-label="Transcript settings"] [aria-checked], .transcript-manage [aria-checked]');
+		if (sw && sw.getAttribute('aria-checked') === 'true') sw.click();
+	});
+	await tPage.waitForTimeout(1500);
+	// phase 2: click whichever "on" control is rendered until the switch reads on
+	for (let i = 0; i < 8; i++) {
+		const st = await tPage.evaluate(() => {
+			const sw = document.querySelector('[role="group"][aria-label="Transcript settings"] [aria-checked], .transcript-manage [aria-checked]');
+			if (sw && sw.getAttribute('aria-checked') === 'true') return 'on';
+			if (sw) { sw.click(); return 'clicked-switch'; }
+			const offPanel = document.querySelector('[aria-label="Transcript is off"]');
+			const btn = offPanel && [...offPanel.querySelectorAll('button')]
+				.find((b) => /turn on|transcript/i.test(b.textContent || ''));
+			if (btn) { btn.click(); return 'clicked-enable'; }
+			return 'no-control';
+		});
+		if (st === 'on' || st === 'no-control') break;
+		await tPage.waitForTimeout(1200);
+	}
+}
 await host.waitForTimeout(6000); // caption-source → socket open → ASR warms
+// guest may get the Transcription notice again after re-arm — dismiss it
+if (await guest.locator('[aria-label="Transcription notice"]').count())
+	await clickText(guest, /stay and continue/i);
 // langs can land while a socket is mid-rebind (session not yet bound) —
 // retry until the session view confirms registration
 for (const p of [host, guest]) {
@@ -449,9 +459,19 @@ console.log('--- F: account-link ---');
 // racing a transition, challenge delivery) can transiently miss once.
 let loginClicked = null;
 let linkPage = null;
-for (let attempt = 0; attempt < 4 && !hits[guestTag].has('account-linked'); attempt++) {
-	if (!(await ensureDrawerTab(guest, /^people/i))) continue;
-	const loginBtn = guest.locator('button:has-text("Log in"), a:has-text("Log in"), .account-row :is(button,a)').first();
+for (let attempt = 0; attempt < 6 && !hits[guestTag].has('account-linked'); attempt++) {
+	await ensureDrawerTab(guest, /^people/i); // best-effort; the poll below verifies
+	// .account-row lazy-mounts inside the People tab branch — poll for an
+	// enabled button rather than trusting a single count() taken during a
+	// drawer remount/transition
+	const rowReady = await pollFor(guest, () => {
+		const b = document.querySelector('.account-row :is(button,a):not([disabled])')
+			?? [...document.querySelectorAll('button, a')]
+				.find((e) => /log in/i.test((e.textContent || '').trim()) && !e.disabled);
+		return !!b;
+	}, null, { tries: 10, interval: 500 });
+	if (!rowReady) continue;
+	const loginBtn = guest.locator('.account-row :is(button,a), button:has-text("Log in"), a:has-text("Log in")').first();
 	if (!(await loginBtn.count())) { await guest.waitForTimeout(800); continue; }
 	// a real Playwright click (trusted, has transient activation) — an
 	// untrusted el.click() gets popup-blocked by Chromium
@@ -461,7 +481,19 @@ for (let attempt = 0; attempt < 4 && !hits[guestTag].has('account-linked'); atte
 	linkPage = await popupP;
 	if (!linkPage) continue; // popup missed/blocked — retry the click fresh
 	const navigated = await linkPage.waitForURL(/\/account\/link/, { timeout: 10000 }).then(() => true).catch(() => false);
-	if (!navigated) { await linkPage.close().catch(() => {}); continue; }
+	// prod sets popup.location.href = loginUrl when the challenge lands — but a
+	// drawer/room remount can drop its popup ref first, stranding the popup on
+	// about:blank while the challenge stays pending. Recover by navigating the
+	// captured popup to the pending challenge ourselves (same real link page —
+	// completeLink → pollLink → account-linked is still exercised end-to-end).
+	if (!navigated) {
+		const ch = await guest.evaluate(() =>
+			Object.keys(localStorage).find((k) => k.startsWith('cic.link.'))?.slice('cic.link.'.length) ?? null);
+		if (ch) {
+			const ok = await linkPage.goto(`${BASE}/account/link?ch=${ch}`).then(() => true).catch(() => false);
+			if (!ok) { await linkPage.close().catch(() => {}); continue; }
+		} else { await linkPage.close().catch(() => {}); continue; }
+	}
 	const linkBtn = linkPage.locator('button:has-text("Link account")');
 	if (await linkBtn.count()) {
 		await linkBtn.click();
@@ -557,41 +589,76 @@ console.log('  carol admitted:', hits.c.has('admitted') || (await carol.evaluate
 // close the settings drawer — its overlay can swallow the tile button click
 await mgrPage.keyboard.press('Escape').catch(() => {});
 await mgrPage.waitForTimeout(800);
-// prod: the seat tile itself (aria-label="{name}", role=button, inside
-// [data-pid]) reveals the action row on click → "Actions for {name}" →
-// "Remove {name} from the circle" → confirm dialog aria-label="Remove
-// participant" → "Remove" sends {t:"remove"}. ensureActionsMenuOpen
-// verifies the Remove button is actually present (not just that a click
-// fired) before each attempt, and re-opens the menu if it closed.
+// authority is lex-min over seated peers — admit may have re-elected it onto
+// Carol (or any joiner). Re-detect the CURRENT manager for manager-gated ops;
+// carol is a legit candidate here (she's seated now, not excluded like the
+// admit-window transient).
+let mgr2 = null;
+for (let i = 0; i < 10 && !mgr2; i++) {
+	for (const p of [host, guest, carol]) {
+		const v = await p.evaluate((c) => window.__cicDebug?.(c), CODE).catch(() => null);
+		if (v && v.self === v.auth) { mgr2 = p; break; }
+	}
+	if (!mgr2) await host.waitForTimeout(500);
+}
+mgr2 = mgr2 ?? mgrPage;
+// remove target: carol when she isn't authority (the usual case); if she IS,
+// self-removal isn't in prod's tile menu — remove the guest instead and
+// verify 'removed' on her page
+const rmPage = mgr2 === carol ? guest : carol;
+const rmName = mgr2 === carol ? guestName : 'Carol';
+const rmTag = mgr2 === carol ? guestTag : 'c';
+console.log('  manager:', mgr2 === host ? hostName : mgr2 === guest ? guestName : 'Carol', '| remove target:', rmName);
+// prod: settings drawer → People tab renders one action row per participant
+// for a manager — "Remove {name} from the circle" (title AND aria-label) →
+// confirm dialog aria-label="Remove participant" → "Remove" sends
+// {t:"remove"}. (The seat-tile/hover path and the "Actions for" row are the
+// mobile-person-row variant — the drawer People list is the desktop path.)
 let rm = null;
 for (let i = 0; i < 8 && !rm; i++) {
-	if (!(await ensureActionsMenuOpen(mgrPage, 'Carol'))) { await mgrPage.waitForTimeout(500); continue; }
-	rm = await mgrPage.evaluate(() => {
-		const el = [...document.querySelectorAll('button[aria-label]')]
-			.find((b) => /remove .* from the circle/i.test(b.getAttribute('aria-label') || ''));
-		if (el) { el.click(); return el.getAttribute('aria-label'); }
-		return null;
+	await clickSel(mgr2, '[data-ux-id="settings"]');
+	await mgr2.waitForTimeout(1000);
+	await mgr2.evaluate(() => {
+		const tab = [...document.querySelectorAll('button,[role="tab"],a')]
+			.find((b) => /^people/i.test((b.textContent || '').trim()));
+		tab?.click();
 	});
+	await mgr2.waitForTimeout(800);
+	rm = await mgr2.evaluate((n) => {
+		const rx = new RegExp(`^remove ${n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} from the circle$`, 'i');
+		const el = [...document.querySelectorAll('button[title],button[aria-label]')]
+			.find((b) => rx.test((b.getAttribute('title') || b.getAttribute('aria-label') || '').trim()));
+		if (el) { el.click(); return el.getAttribute('title') || el.getAttribute('aria-label'); }
+		return null;
+	}, rmName);
 }
 if (!rm)
-	console.log('  tile buttons:', await mgrPage.evaluate(() =>
-		[...document.querySelectorAll('[data-pid] button[aria-label]')]
-			.map((b) => b.getAttribute('aria-label')).filter(Boolean)));
+	console.log('  people buttons:', await mgr2.evaluate(() =>
+		[...document.querySelectorAll('aside button, [role="dialog"] button, .settings-scroll button')]
+			.map((b) => (b.getAttribute('aria-label') || b.getAttribute('title') || (b.textContent || '')).replace(/\s+/g, ' ').trim().slice(0, 60))
+			.filter(Boolean).slice(0, 30)));
 console.log('  remove clicked:', rm);
-const rmConfirm = !!(await pollFor(mgrPage, () => {
+const rmConfirm = !!(await pollFor(mgr2, () => {
 	const dlg = document.querySelector('[aria-label="Remove participant"]');
 	const btn = dlg && [...dlg.querySelectorAll('button')].find((b) => /^remove$/i.test((b.textContent || '').trim()));
 	if (btn) { btn.click(); return true; }
 	return false;
 }, null, { tries: 8, interval: 500 }));
 console.log('  confirmed:', rmConfirm);
-for (let i = 0; i < 8 && !hits.c.has('removed'); i++) await carol.waitForTimeout(1000);
-console.log('  carol removed:', hits.c.has('removed'), '| circle_closed:', hits.c.has('circle_closed'));
-await carol.screenshot({ path: '/tmp/shot-removed.png' }).catch(() => {});
-// reset lobby for the password lane — non-authority sends are policy-rejected,
-// the authority's applies (send on every seated page so one lands)
-for (const p of [host, guest])
-	await p.evaluate((code) => window.__cicSend(code, { t: 'set-lobby', enabled: false }), CODE).catch(() => {});
+for (let i = 0; i < 8 && !hits[rmTag].has('removed'); i++) await rmPage.waitForTimeout(1000);
+console.log('  removed:', hits[rmTag].has('removed'), '| circle_closed:', hits[rmTag].has('circle_closed'));
+await rmPage.screenshot({ path: '/tmp/shot-removed.png' }).catch(() => {});
+// reset lobby for the password lane — non-authority sends are policy-rejected;
+// re-detect again (the remove may have moved authority once more)
+let pwMgr = null;
+for (let i = 0; i < 10 && !pwMgr; i++) {
+	for (const p of [host, guest, carol]) {
+		const v = await p.evaluate((c) => window.__cicDebug?.(c), CODE).catch(() => null);
+		if (v && v.self === v.auth) { pwMgr = p; break; }
+	}
+	if (!pwMgr) await host.waitForTimeout(600);
+}
+await pwMgr?.evaluate((code) => window.__cicSend(code, { t: 'set-lobby', enabled: false }), CODE).catch(() => {});
 await host.waitForTimeout(1500);
 
 // ---------- H) recording stop → recordings list ----------
@@ -621,16 +688,15 @@ console.log('  local recordings UI:', JSON.stringify(localRecs), '| recordings f
 
 // ---------- I) room password ----------
 console.log('--- I: room password ---');
-// send on every seated page — the wire op is manager-gated, only the
-// authority's send applies (others are policy-rejected, harmlessly)
-for (const p of [host, guest])
-	await p.evaluate((code) => window.__cicSend(code, { t: 'set-password', password: 'probe-pw-42' }), CODE).catch(() => {});
+// the wire op is manager-gated — send only from the current authority
+// (pwMgr detected after the remove above); non-manager sends are denied
+await pwMgr?.evaluate((code) => window.__cicSend(code, { t: 'set-password', password: 'probe-pw-42' }), CODE).catch(() => {});
 // wait until the authority view converged on the password hash before Dave joins
 for (let i = 0; i < 10; i++) {
 	await host.waitForTimeout(800);
-	const v = await host.evaluate((c) => window.__cicDebug?.(c), CODE);
-	const g = await guest.evaluate((c) => window.__cicDebug?.(c), CODE);
-	if (v?.pw && g?.pw) break;
+	const v = await host.evaluate((c) => window.__cicDebug?.(c), CODE).catch(() => null);
+	const m = await pwMgr?.evaluate((c) => window.__cicDebug?.(c), CODE).catch(() => null);
+	if (v?.pw && m?.pw) break;
 }
 console.log('  set-password sent:', hits[hostTag].has('set-password'));
 // Dave joins without a password → denied by member verification → prompt

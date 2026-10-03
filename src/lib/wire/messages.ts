@@ -196,6 +196,19 @@ export const realtimeMessage = z.discriminatedUnion('t', [
 	// bw-allocator; it broadcasts a per-peer sender budget — cross-flow
 	// coordination libwebrtc's per-flow congestion control can't do
 	z.object({ t: z.literal('bw-stats'), rttMs: z.number(), estKbps: z.number() }),
+	// capability auction input: each peer announces its Capability record so
+	// electAll() scores the same set everywhere — without this every node
+	// elects itself for every role (milo-brain fork)
+	z.object({
+		t: z.literal('capability'),
+		cpuScore: z.number(),
+		memoryGB: z.number(),
+		batterySaver: z.boolean(),
+		webgpu: z.boolean(),
+		models: z.array(z.string().max(40)).max(16),
+		uplinkKbps: z.number(),
+		isRecorderDevice: z.boolean()
+	}),
 	z.object({ t: z.literal('bw-budget'), limit: z.number().int() }),
 	// per-receiver layer selection: a receiver asks the sender to activate
 	// one rid on JUST our pc — mesh simulcast without an SFU. 'none' drops

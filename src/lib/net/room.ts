@@ -47,6 +47,13 @@ export interface RoomHandle {
 	iceServers: () => Promise<RTCIceServer[]>;
 	/** debug: per-lane peer pcs + lane membership (temporary diagnostics) */
 	__laneDebug?: () => Record<string, unknown>;
+	/**
+	 * Session policy: may this peer currently receive our published streams?
+	 * Consulted on every offer path (merged-join replay, lane-attach replay,
+	 * session offer) so password-unverified/held/denied joiners can never be
+	 * offered member media — regardless of which path would push it.
+	 */
+	offerGate?: (peerId: string) => boolean;
 }
 
 /** trystero's onPeer* setters are last-write-wins — wrap them as additive sets */
@@ -205,7 +212,12 @@ export function openRoom(roomSecret: string): RoomHandle {
 		s.add(stream.id);
 		return true;
 	};
+	// session-settable gate — consulted on EVERY offer path so a joiner the
+	// session hasn't verified yet (password proof pending) can never receive
+	// member media, no matter which path would push it
+	let offerGate: RoomHandle['offerGate'];
 	const offerToPeer = (lane: Lane, peerId: string) => {
+		if (offerGate && !offerGate(peerId)) return;
 		for (const { stream, targets } of activeStreams) {
 			if (targets && !targets.includes(peerId)) continue;
 			if (!markOffered(lane, peerId, stream)) continue;
@@ -338,9 +350,10 @@ export function openRoom(roomSecret: string): RoomHandle {
 
 	const applyStreams = (lane: Lane) => {
 		for (const { stream, targets } of activeStreams) {
-			const here = targets
+			const here = (targets
 				? targets.filter((t) => laneOfPeer.get(t)?.has(lane))
-				: Object.keys(lane.room.getPeers());
+				: Object.keys(lane.room.getPeers())
+			).filter((pid) => !offerGate || offerGate(pid));
 			const fresh = here.filter((pid) => markOffered(lane, pid, stream));
 			if (!fresh.length) continue;
 			try {
@@ -461,6 +474,12 @@ export function openRoom(roomSecret: string): RoomHandle {
 		onPeerJoin: (fn) => joinListeners.add(fn),
 		onPeerLeave: (fn) => leaveListeners.add(fn),
 		onPeerStream: (fn) => streamListeners.add(fn),
+		get offerGate() {
+			return offerGate;
+		},
+		set offerGate(fn: RoomHandle['offerGate']) {
+			offerGate = fn;
+		},
 		addStream: (stream, targets) => {
 			if (!connected) {
 				pendingStreams.push({ stream, targets });
@@ -468,9 +487,10 @@ export function openRoom(roomSecret: string): RoomHandle {
 			}
 			activeStreams.push({ stream, targets });
 			for (const lane of lanes) {
-				const here = targets
+				const here = (targets
 					? targets.filter((t) => laneOfPeer.get(t)?.has(lane))
-					: Object.keys(lane.room.getPeers());
+					: Object.keys(lane.room.getPeers())
+				).filter((pid) => !offerGate || offerGate(pid));
 				const fresh = here.filter((pid) => markOffered(lane, pid, stream));
 				if (!fresh.length) continue;
 				try {

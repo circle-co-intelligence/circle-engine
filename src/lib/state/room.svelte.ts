@@ -79,7 +79,7 @@ export class RoomSession {
 	stickHolderId = $derived(this.stick.getSnapshot().context.holderId);
 	stickState = $derived(this.stick.getSnapshot().value);
 	stickCtx = $derived(this.stick.getSnapshot().context);
-	chatLog = $state<{ from: string; text: string; whisper?: boolean }[]>([]);
+	chatLog = $state<{ from: string; text: string; whisper?: boolean; milo?: boolean }[]>([]);
 	captions = $state<{ from: string; text: string; final: boolean }[]>([]);
 	raisedHands = $state<Set<string>>(new Set());
 	consentAsked = $state(false); // someone proposed recording — dialog shown
@@ -113,6 +113,10 @@ export class RoomSession {
 	miloStopNotice = $state<{ by: string; eventId: string } | null>(null); // last stop-ai (peerId + event)
 	/** sha256(code + ':' + password) — '' means cleared; enforced per-bridge at hello */
 	passwordHash = $state('');
+	/** sentAt of the password-set op that armed the hash — sessions that
+	 *  joined AFTER it are the joiner class (they never gate member hellos);
+	 *  sessions joined before are the member class (they do the gating) */
+	passwordSetAt = 0;
 	/** our own proof hash, set by the bridge from hello.password before join */
 	accessHash = '';
 	/** peers that failed the access proof — denied by us, excluded from seats */
@@ -121,6 +125,12 @@ export class RoomSession {
 	 *  member reconnecting with the same key is not re-gated (they may
 	 *  legitimately lack cap[2], e.g. joined before the password was set) */
 	private memberKeys = new Set<string>();
+	/** first-accepted-hello receipt time + caps per peer — a password-set op
+	 *  landing AFTER their admission re-gates them (retro-deny), while peers
+	 *  admitted before the op's sentAt are the legit pre-password class */
+	private peerAdmittedAt = new Map<string, number>();
+	private peerHelloCap = new Map<string, readonly (string | undefined)[]>();
+	private helloRepliedTo = new Set<string>(); // peers whose hello we already answered
 	accessDenied = $state(false); // a member denied our proof — bridge closes the socket
 	ejected = $state(false); // host removed us — bridge emits removed + circle_closed
 	lobbyDeclined = $state(false); // host declined our waiting-room request
@@ -255,6 +265,15 @@ export class RoomSession {
 			if (!this.peers.includes(peerId)) this.peers = [...this.peers, peerId];
 			this.joinedAt[peerId] = Date.now();
 			this.handle.sendRealtime(this.helloMsg(), peerId); // targeted hello so the joiner gets our keys
+			// ...which can still race the DC open on trystero lanes (their sends
+			// drop silently when closed) — re-announce until their hello proves
+			// the channel live, bounded so a left peer stops the loop
+			const retryHello = (n: number) => setTimeout(() => {
+				if (!this.peers.includes(peerId) || this.helloRepliedTo.has(peerId)) return;
+				this.handle.sendRealtime(this.helloMsg(), peerId);
+				if (n > 0) retryHello(n - 1);
+			}, 1500);
+			retryHello(2);
 			// mute state only travels on transitions — a late joiner never saw
 			// ours, so default-unmuted reporting makes prod's stall monitor read
 			// a locally-muted (silent) track as a transport stall and rejoin
@@ -278,8 +297,12 @@ export class RoomSession {
 				return;
 			}
 			// trystero addStream only reaches already-connected peers — re-offer
-			// our published streams to late joiners or they never see our media
-			for (const stream of this.publishedStreams) this.offerStream(stream, peerId);
+			// our published streams to late joiners or they never see our media.
+			// Password rooms hold the offer until the peer's hello verifies —
+			// an unverified joiner must never receive member media, even for
+			// the ~1s window between pc-connect and hello denial.
+			if (!this.passwordHash)
+				for (const stream of this.publishedStreams) this.offerStream(stream, peerId);
 			this.pullHintAll();
 			this.syncSeats();
 		});
@@ -287,6 +310,9 @@ export class RoomSession {
 			this.peers = this.peers.filter((p) => p !== peerId);
 			this.waiting = this.waiting.filter((w) => w.id !== peerId);
 			this.heldLocal.delete(peerId);
+			this.helloRepliedTo.delete(peerId);
+			this.peerAdmittedAt.delete(peerId);
+			this.peerHelloCap.delete(peerId);
 			this.seatedPeers.delete(peerId);
 			this.streamOffers.delete(peerId);
 			this.peerAway.delete(peerId);
@@ -297,6 +323,7 @@ export class RoomSession {
 			delete this.peerSfuSessions[peerId];
 			delete this.peerSfuTracks[peerId];
 			delete this.peerLangs[peerId];
+			delete this.caps[peerId];
 			dropPeerKey(peerId);
 			this.syncSeats();
 			void this.rotateKeys('leave', peerId); // FS: departed peer can't read new frames
@@ -408,6 +435,7 @@ export class RoomSession {
 			heldPeers: this.heldPeers,
 			memberKeys: this.memberKeys,
 			passwordHash: this.passwordHash,
+			joinedAfterPassword: this.passwordSetAt > 0 && this.joinedAtMs > this.passwordSetAt,
 			joinAgeMs: Date.now() - this.joinedAtMs,
 			waitingIds: new Set(this.waiting.map((w) => w.id))
 		};
@@ -484,6 +512,15 @@ export class RoomSession {
 		};
 	}
 
+	/** capability auction input — broadcast on join, re-announced per-peer
+	 *  when a hello proves that DC live (first announce races late joiners) */
+	private announceCaps(to?: string) {
+		const cap = this.caps[this.selfId];
+		if (!cap) return;
+		const { peerId: _id, ...body } = cap;
+		this.handle.sendRealtime({ t: 'capability', ...body }, to);
+	}
+
 	/** cloud-SFU publish path got its session id — re-announce so peers can pull */
 	announceSfu(sessionId: string, trackNames: string[] = []) {
 		const changed =
@@ -507,10 +544,30 @@ export class RoomSession {
 				// authority/seat view and cascades into replay policy denials.
 				if (shouldDenyHello(msg.cap, this.gateView())) {
 					this.deniedPeers.add(peerId);
-					if (this.canManage(this.selfId)) this.handle.sendRealtime({ t: 'access-denied' }, peerId);
+					if (this.canManage(this.selfId)) {
+						// the joiner's hello proves their→our channel but ours→them
+						// may still be opening — the single send drops silently and
+						// they never see the password prompt. Bounded resend until
+						// they verify or leave.
+						const deny = (n: number) => {
+							if (!this.deniedPeers.has(peerId) || !this.peers.includes(peerId)) return;
+							this.handle.sendRealtime({ t: 'access-denied' }, peerId);
+							if (n > 0) setTimeout(() => deny(n - 1), 1500);
+						};
+						deny(3);
+					}
 					break;
 				}
 				this.deniedPeers.delete(peerId);
+				// their hello proves this action channel is live — our own
+				// join-time/onPeerJoin hello raced the DC open and may have
+				// dropped silently, leaving them unable to name or gate us
+				// (password rooms: an undelivered joiner hello = unverified
+				// member). Reply once per peer; processing is idempotent.
+				if (!this.helloRepliedTo.has(peerId)) {
+					this.helloRepliedTo.add(peerId);
+					this.handle.sendRealtime(this.helloMsg(), peerId);
+				}
 				if (msg.sfu) {
 					const sfu = typeof msg.sfu === 'string' ? msg.sfu : msg.sfu.session;
 					this.peerSfuSessions = { ...this.peerSfuSessions, [peerId]: sfu };
@@ -518,7 +575,14 @@ export class RoomSession {
 						this.peerSfuTracks = { ...this.peerSfuTracks, [peerId]: msg.sfu.tracks };
 				}
 				if (msg.cap[0]) this.memberKeys.add(msg.cap[0]);
+				if (!this.peerAdmittedAt.has(peerId)) {
+					this.peerAdmittedAt.set(peerId, Date.now());
+					this.peerHelloCap.set(peerId, msg.cap);
+				}
 				this.names[peerId] = msg.name;
+				// a verified hello releases the media held back at join —
+				// denied hellos break above before this point
+				for (const stream of this.publishedStreams) this.offerStream(stream, peerId);
 				// a hello proves the joiner's data channel is live — the
 				// onPeerJoin op-sync can fire before it opens, so replay again
 				// (opId dedupe makes this a no-op when the first send landed)
@@ -549,6 +613,9 @@ export class RoomSession {
 					this.broadcastWaiting();
 				}
 				this.pullHintAll();
+				// our first capability broadcast raced this peer's DC — hello
+				// proves it live now, so re-announce (idempotent, zod-shaped)
+				this.announceCaps(peerId);
 				this.syncSeats();
 				break;
 			}
@@ -641,8 +708,15 @@ export class RoomSession {
 				this.onReaction?.(msg.kind, peerId, this.names[peerId] ?? 'Peer');
 				break;
 			case 'bw-stats':
+				// live link estimate feeds the auction too — a peer whose uplink
+				// collapses shouldn't stay forwarder/bw-allocator/recorder
+				if (this.caps[peerId]) this.caps[peerId].uplinkKbps = msg.estKbps;
 			case 'bw-budget':
 				this.broker.handle(msg, peerId);
+				break;
+			case 'capability':
+				this.caps[peerId] = { ...msg, peerId };
+				this.syncSeats(); // converged auction input → re-elect
 				break;
 			case 'pull-hint':
 				// the receiver picks which of OUR simulcast layers it wants —
@@ -894,7 +968,35 @@ export class RoomSession {
 				}
 				break;
 			}
-			case 'password-set': this.passwordHash = env.op.hash; break;
+			case 'password-set': {
+				this.passwordHash = env.op.hash;
+				this.passwordSetAt = env.op.hash ? env.sentAt : 0;
+				// hellos raced the op broadcast: peers admitted in the window
+				// [op.sentAt, local apply] never proved against the now-set hash.
+				// Re-gate them — cap[2] matching the new hash proves retroactively,
+				// the rest must leave and retry (memberKeys purged so their
+				// identity key can't dodge the gate on rejoin). Peers admitted
+				// before sentAt are the pre-password member class — exempt.
+				if (env.op.hash) {
+					for (const pid of this.peers) {
+						const admittedAt = this.peerAdmittedAt.get(pid);
+						if (admittedAt === undefined || admittedAt <= env.sentAt) continue;
+						const cap = this.peerHelloCap.get(pid);
+						if (cap?.[2] === env.op.hash) continue;
+						this.deniedPeers.add(pid);
+						if (cap?.[0]) this.memberKeys.delete(cap[0]);
+						if (this.canManage(this.selfId)) {
+							const deny = (n: number) => {
+								if (!this.deniedPeers.has(pid) || !this.peers.includes(pid)) return;
+								this.handle.sendRealtime({ t: 'access-denied' }, pid);
+								if (n > 0) setTimeout(() => deny(n - 1), 1500);
+							};
+							deny(3);
+						}
+					}
+				}
+				break;
+			}
 			case 'breakout-open':
 				this.breakoutCount = env.op.count;
 				this.breakoutChannels = {};
@@ -941,10 +1043,29 @@ export class RoomSession {
 		}
 		this.joinedAtMs = Date.now();
 		wireE2EE(this.handle, this.e2ee);
+		// media egress gate (all lanes/offer paths): denied + lobby-held peers
+		// never receive our streams, password rooms hold every joiner's pulls
+		// until their hello verifies cap[2], and a joiner who arrived after the
+		// password was set holds her own streams until her proof matches (a
+		// member that denies her shouldn't see her camera while she's
+		// unverified — her teardown closes the pc, this gates new offers)
+		this.handle.offerGate = (peerId) => {
+			const joinerUnproven =
+				this.passwordSetAt > 0 &&
+				this.joinedAtMs > this.passwordSetAt &&
+				this.accessHash !== this.passwordHash;
+			return (
+				!this.deniedPeers.has(peerId) &&
+				!this.heldLocal.has(peerId) &&
+				!joinerUnproven &&
+				(!this.passwordHash || this.helloRepliedTo.has(peerId))
+			);
+		};
 		registerPeerKey(this.selfId, bytesToHex(this.identity.publicKey));
 		this.handle.sendRealtime(this.helloMsg());
 		this.handle.sendRealtime({ t: 'muted', audio: this.selfMuted, video: this.videoMuted });
 		this.caps[this.selfId] = await measureCapability(this.selfId);
+		this.announceCaps();
 		this.syncSeats();
 	}
 
@@ -1212,7 +1333,7 @@ export class RoomSession {
 		this.miloState = this.milo.state;
 		this.milo.onSay = (text) => {
 			this.handle.sendRealtime({ t: 'chat', text: `Milo: ${text}` });
-			this.chatLog = [...this.chatLog, { from: this.selfId, text: `Milo: ${text}` }];
+			this.chatLog = [...this.chatLog, { from: this.selfId, text: `Milo: ${text}`, milo: true }];
 			void this.speakMilo(text);
 			this.handle.sendRealtime({ t: 'milo-state', state: this.milo.state });
 		};

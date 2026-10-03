@@ -46,7 +46,7 @@ export class Milo {
 		const gen = this.generation;
 		this.state = 'listening';
 		const context = transcriptWindow.slice(-40).join('\n');
-		const text = await this.llm.createChatCompletion(
+		const raw = await this.llm.createChatCompletion(
 			[
 				{ role: 'system', content: SYSTEM },
 				{ role: 'user', content: `Transcript window:\n${context}\n\nQuestion: ${prompt}` }
@@ -54,6 +54,10 @@ export class Milo {
 			{ nPredict: 96 }
 		);
 		if (gen !== this.generation) return ''; // interrupted while generating
+		// small instruct models often echo the transcript's "Milo:" speaker
+		// tag (sometimes inside quotes) — strip repeated prefixes so chat
+		// doesn't render "Milo: Milo: …"
+		const text = raw.replace(/^[\s"'“”‘’]*(milo[\s,.:;–—-]*)+/i, '').trim() || raw.trim();
 		this.state = 'speaking';
 		this.onSay(text);
 		this.state = 'standby';
