@@ -45,6 +45,8 @@ export interface RoomHandle {
 	ready: Promise<void>;
 	/** resolved ICE server list (STUN + any TURN from env/broker) */
 	iceServers: () => Promise<RTCIceServer[]>;
+	/** debug: per-lane peer pcs + lane membership (temporary diagnostics) */
+	__laneDebug?: () => Record<string, unknown>;
 }
 
 /** trystero's onPeer* setters are last-write-wins — wrap them as additive sets */
@@ -189,6 +191,31 @@ export function openRoom(roomSecret: string): RoomHandle {
 	// streams currently requested of the mesh — re-applied to lanes that
 	// connect late (retry path) so late-joining lanes aren't media-blind
 	const activeStreams: { stream: MediaStream; targets?: string[] }[] = [];
+	// per-lane stream offers (lane → peerId → stream ids). A stream must reach
+	// every lane that sees the peer, not just whichever lane fired the merged
+	// join first — dedupe keeps repeated offers (rejoin, re-publish, both
+	// session offerStream and lane-join replay) from double-adding tracks
+	const laneOffers = new Map<Lane, Map<string, Set<string>>>();
+	const markOffered = (lane: Lane, peerId: string, stream: MediaStream): boolean => {
+		let m = laneOffers.get(lane);
+		if (!m) laneOffers.set(lane, (m = new Map()));
+		let s = m.get(peerId);
+		if (!s) m.set(peerId, (s = new Set()));
+		if (s.has(stream.id)) return false;
+		s.add(stream.id);
+		return true;
+	};
+	const offerToPeer = (lane: Lane, peerId: string) => {
+		for (const { stream, targets } of activeStreams) {
+			if (targets && !targets.includes(peerId)) continue;
+			if (!markOffered(lane, peerId, stream)) continue;
+			try {
+				lane.room.addStream(stream, [peerId]);
+			} catch {
+				/* already negotiated on this lane's pc */
+			}
+		}
+	};
 	let connected = false;
 
 	// dedupe: ops carry opId; realtime frames dedupe identical content within
@@ -240,6 +267,10 @@ export function openRoom(roomSecret: string): RoomHandle {
 			const first = set.size === 0;
 			set.add(lane);
 			laneOfPeer.set(peerId, set);
+			// a lane that joins the peer after the merged join already fired still
+			// needs the active streams — the session-level offer at merged-join
+			// time only reached whichever lane reported first
+			offerToPeer(lane, peerId);
 			if (first) joinListeners.forEach((fn) => fn(peerId));
 		});
 		lane.onLeave((peerId) => {
@@ -247,6 +278,7 @@ export function openRoom(roomSecret: string): RoomHandle {
 			if (!set) return;
 			set.delete(lane);
 			lane.iceStates.delete(peerId);
+			laneOffers.get(lane)?.delete(peerId);
 			if (set.size === 0) {
 				laneOfPeer.delete(peerId);
 				leaveListeners.forEach((fn) => fn(peerId));
@@ -306,12 +338,16 @@ export function openRoom(roomSecret: string): RoomHandle {
 
 	const applyStreams = (lane: Lane) => {
 		for (const { stream, targets } of activeStreams) {
-			if (!targets) {
-				lane.room.addStream(stream);
-				continue;
+			const here = targets
+				? targets.filter((t) => laneOfPeer.get(t)?.has(lane))
+				: Object.keys(lane.room.getPeers());
+			const fresh = here.filter((pid) => markOffered(lane, pid, stream));
+			if (!fresh.length) continue;
+			try {
+				lane.room.addStream(stream, fresh);
+			} catch {
+				/* already negotiated on this lane's pc */
 			}
-			const here = targets.filter((t) => laneOfPeer.get(t)?.has(lane));
-			if (here.length) lane.room.addStream(stream, here);
 		}
 	};
 
@@ -432,17 +468,22 @@ export function openRoom(roomSecret: string): RoomHandle {
 			}
 			activeStreams.push({ stream, targets });
 			for (const lane of lanes) {
-				if (!targets) {
-					lane.room.addStream(stream);
-					continue;
+				const here = targets
+					? targets.filter((t) => laneOfPeer.get(t)?.has(lane))
+					: Object.keys(lane.room.getPeers());
+				const fresh = here.filter((pid) => markOffered(lane, pid, stream));
+				if (!fresh.length) continue;
+				try {
+					lane.room.addStream(stream, fresh);
+				} catch {
+					/* already negotiated on this lane's pc */
 				}
-				const here = targets.filter((t) => laneOfPeer.get(t)?.has(lane));
-				if (here.length) lane.room.addStream(stream, here);
 			}
 		},
 		removeStream: (stream) => {
 			const i = activeStreams.findIndex((s) => s.stream === stream);
 			if (i >= 0) activeStreams.splice(i, 1);
+			for (const m of laneOffers.values()) for (const s of m.values()) s.delete(stream.id);
 			lanes.forEach((l) => l.room.removeStream(stream));
 		},
 		leave: () => compositeRoom.leave(),
@@ -456,7 +497,38 @@ export function openRoom(roomSecret: string): RoomHandle {
 		},
 		restartAll,
 		ready,
-		iceServers: async () => (await iceServers()).iceServers ?? []
+		iceServers: async () => (await iceServers()).iceServers ?? [],
+		__laneDebug: () => {
+			const out: Record<string, unknown> = { lanes: {}, laneOfPeer: {} };
+			for (const [pid, set] of laneOfPeer)
+				(out.laneOfPeer as Record<string, string[]>)[pid] = [...set].map((l) => l.name);
+			for (const lane of lanes) {
+				const pcs: Record<string, unknown> = {};
+				for (const [pid, pc] of Object.entries(lane.room.getPeers()))
+					pcs[pid] = {
+						sig: pc.signalingState,
+						conn: pc.connectionState,
+						ice: pc.iceConnectionState,
+						sctp: pc.sctp
+							? {
+									state: pc.sctp.state,
+									dtls: pc.sctp.transport?.state,
+									iceT: pc.sctp.transport?.iceTransport?.state
+								}
+							: null,
+						mAppLocal: pc.localDescription?.sdp?.includes('m=application') ?? null,
+						mAppRemote: pc.remoteDescription?.sdp?.includes('m=application') ?? null,
+						send: pc.getSenders?.().map((s) => s.track?.kind ?? 'null'),
+						recv: pc.getReceivers?.().map((r) => `${r.track.kind}:${r.track.readyState}`),
+						trans: pc.getTransceivers?.().map((t) => `${t.direction}/${t.receiver.track?.kind}`)
+					};
+				(out.lanes as Record<string, unknown>)[lane.name] = {
+					pcs,
+					peerInfo: (lane.room as { __peerInfo?: () => unknown }).__peerInfo?.()
+				};
+			}
+			return out;
+		}
 	};
 	return handle;
 }

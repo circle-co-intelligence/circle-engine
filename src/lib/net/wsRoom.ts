@@ -5,13 +5,41 @@
  *
  *   newcomer → offer to every established member (welcome.members)
  *   member   → answer on offer; candidates relayed both ways
- *   glare    → lower selfId is polite (rolls back its own offer)
  *
- * App traffic rides a 'cic' datachannel — makeAction namespaces work exactly
- * like Trystero's. Peer ids are announced as `sid` inside signaling payloads
- * so a peer reachable on this lane AND a relay lane merges under the same id.
+ * Glare avoidance is architectural, not recovery-based: the bus has no
+ * symmetric "a peer joined" notification (only the newcomer learns of
+ * existing members and can initiate contact), so the newcomer who created
+ * the signaling channel is permanently the 'initiator' for that pair — it
+ * is the ONLY side ever allowed to call setLocalDescription() to make an
+ * offer, for the lifetime of the connection. The acceptor only ever
+ * answers.
  *
- * The bus sees only hashed room keys (sha256(secret)) and opaque signaling
+ * Media is renegotiation-free by construction: the initiator's single
+ * offer carries a fixed pool of `sendrecv` transceivers (POOL_AUDIO +
+ * POOL_VIDEO) created before the offer. Both sides then publish and
+ * unpublish tracks purely with RTCRtpSender.replaceTrack(), which needs no
+ * signaling at all — so a pc does AT MOST ONE offer/answer cycle ever.
+ * This matters because some runtimes (this WebKitGTK build) deadlock the
+ * whole WebProcess on a second setLocalDescription() against an already-
+ * PLAYING webrtcbin, and can crash outright if close() races an in-flight
+ * setLocalDescription (see pendingLocalOp/safeClose below).
+ *
+ * On the receive side every pooled transceiver has a receiver track from
+ * negotiation time; it un-mutes when the remote actually starts sending.
+ * Tracks are merged into one MediaStream per peer (the session layer
+ * collapses remoteStreams to one stream per peer anyway), so no app-level
+ * stream-map protocol is needed — receiver 'unmute' is the real "media
+ * arrived" signal.
+ *
+ * App traffic rides a 'cic' datachannel — makeAction namespaces work
+ * exactly like Trystero's — AND a parallel encrypted copy over the bus
+ * (`app` payload): this WebKitGTK build negotiates SCTP but never flips
+ * RTCDataChannel to 'open', so the bus keeps ops/realtime/custom actions
+ * flowing. Receivers dedupe across both transports.
+ *
+ * Peer ids are announced as `sid` inside signaling payloads so a peer
+ * reachable on this lane AND a relay lane merges under the same id. The
+ * bus sees only hashed room keys (sha256(secret)) and opaque signaling
  * blobs — the room secret never leaves the client.
  */
 import { selfId } from 'trystero/mqtt';
@@ -29,6 +57,13 @@ interface Sig {
 	sid: string; // remote trystero selfId — merges membership across lanes
 	sdp?: { type: RTCSdpType; sdp: string };
 	cand?: RTCIceCandidateInit;
+	// bus-relayed app traffic (base64 AES-GCM envelope of {ns,data}) — the
+	// datachannel is the preferred transport, but some runtimes (this
+	// WebKitGTK build) negotiate SCTP and then never flip RTCDataChannel to
+	// 'open', making dc.send() unusable forever. The bus copy is encrypted
+	// with a key derived from the room secret so the relay still sees only
+	// opaque blobs.
+	app?: string;
 }
 interface Peer {
 	busId: string;
@@ -36,13 +71,34 @@ interface Peer {
 	pc: RTCPeerConnection;
 	dc: RTCDataChannel | null;
 	makingOffer: boolean;
-	ignoreOffer: boolean; // glare: impolite peer ignores remote offer while offering
-	joined: boolean; // join listeners fired once dc is open AND the real sid is known
+	ignoreOffer: boolean; // defensive fallback: impolite peer ignores remote offer while offering
+	joined: boolean; // join listeners fired once media can flow AND the real sid is known
 	// this WebKitGTK build crashes the WebProcess outright if close() races an
 	// in-flight setLocalDescription/createAnswer — always await this before
-	// closing a pc (see rebuildPc)
+	// closing a pc (see safeClose/rebuildPc)
 	pendingLocalOp: Promise<unknown>;
+	// fixed for the connection's lifetime: true for the side that created the
+	// datachannel (the newcomer who learned of this peer first) — only this
+	// side ever offers. See file header.
+	initiator: boolean;
+	offered: boolean; // initiator only: initial (and only) offer already sent
+	// local publish bookkeeping: which pooled transceiver index each of our
+	// outgoing tracks occupies (replaceTrack target)
+	claims: Map<MediaStreamTrack, number>;
+	// receive side: one merged MediaStream carrying every remote receiver
+	// track that has ever delivered media
+	recvStream: MediaStream;
+	recvSeen: Set<MediaStreamTrack>;
+	// serializes decrypt→dispatch of bus-relayed app frames so per-peer
+	// ordering matches arrival order
+	appChain: Promise<unknown>;
 }
+
+// fixed sendrecv transceiver pool — sized for camera + screen + headroom.
+// Never renegotiate: if the pool fills, extra tracks are dropped with a
+// warning rather than risking a runtime-killing re-offer.
+const POOL_AUDIO = 2;
+const POOL_VIDEO = 3;
 
 async function roomKey(secret: string): Promise<string> {
 	const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(secret));
@@ -50,6 +106,27 @@ async function roomKey(secret: string): Promise<string> {
 }
 
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+// app frames relayed over the bus are AES-GCM encrypted with a key derived
+// from the room secret — the bus relays only opaque ciphertext, same as the
+// signaling blobs it already carries
+async function appKey(secret: string): Promise<CryptoKey> {
+	const raw = await crypto.subtle.digest(
+		'SHA-256',
+		new TextEncoder().encode(`cic-app:${secret}`)
+	);
+	return crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, false, [
+		'encrypt',
+		'decrypt'
+	]);
+}
+const b64 = (buf: ArrayBuffer | Uint8Array) => {
+	const b = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+	let s = '';
+	for (const x of b) s += String.fromCharCode(x);
+	return btoa(s);
+};
+const unb64 = (s: string) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 
 export async function openWsRoom(
 	busUrl: string,
@@ -74,14 +151,84 @@ export async function openWsRoom(
 	let disposed = false;
 	let attempts = 0;
 	let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+	const keyP = appKey(roomSecret);
 
 	const send = (p: Peer, data: Sig) => {
 		if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ to: p.busId, data }));
 	};
 
+	// app frames ride BOTH transports: the 'cic' datachannel when it's open
+	// (peer-to-peer, preferred) and the bus as an encrypted `app` payload —
+	// the receiver can't tell which transports work on the far side (e.g.
+	// WebKitGTK where dc stays 'connecting' forever), so senders always emit
+	// the bus copy and receivers dedupe
+	const sendAppFrame = async (p: Peer, ns: string, data: unknown) => {
+		if (p.dc?.readyState === 'open') {
+			try {
+				p.dc.send(JSON.stringify({ ns, data }));
+			} catch {}
+		}
+		try {
+			const iv = crypto.getRandomValues(new Uint8Array(12));
+			const pt = new TextEncoder().encode(JSON.stringify({ ns, data }));
+			const ct = await crypto.subtle.encrypt(
+				{ name: 'AES-GCM', iv },
+				await keyP,
+				pt
+			);
+			send(p, { sid: selfId, app: b64(iv) + '.' + b64(ct) });
+		} catch {}
+	};
+
+	// dedupe: identical app frames arriving over dc + bus within the window
+	const seenApp = new Map<string, number>();
+	const dedupeApp = (key: string) => {
+		const now = Date.now();
+		for (const [k, at] of seenApp) if (now - at > 3000) seenApp.delete(k);
+		if (seenApp.has(key)) return true;
+		seenApp.set(key, now);
+		return false;
+	};
+	const handleAppFrame = (p: Peer, ns: string, data: unknown) => {
+		if (dedupeApp(`${p.sid}|${ns}|${JSON.stringify(data)}`)) return;
+		actionListeners.get(ns)?.forEach((fn) => fn(data, p.sid));
+	};
+
+	// adopt a remote receiver track into the peer's merged stream the first
+	// time it can actually produce media — before that it is a muted
+	// negotiation placeholder, and publishing it early would render a black
+	// seat for a peer who never sent anything
+	const adoptTrack = (p: Peer, t: MediaStreamTrack) => {
+		if (p.recvSeen.has(t)) return;
+		p.recvSeen.add(t);
+		const attach = () => {
+			if (p.recvStream.getTracks().includes(t)) return;
+			p.recvStream.addTrack(t);
+			streamListeners.forEach((fn) => fn(p.recvStream, p.sid));
+		};
+		if (!t.muted) attach();
+		else t.addEventListener('unmute', attach);
+	};
+	// every pooled transceiver owns a receiver track from negotiation time —
+	// ontrack should fire for each, but some engines defer it until media
+	// flows, so sweep the transceiver list on connect as well
+	const collectReceivers = (p: Peer) => {
+		for (const tr of p.pc.getTransceivers()) {
+			const t = tr.receiver?.track;
+			if (t) adoptTrack(p, t);
+		}
+	};
+
 	const maybeJoin = (p: Peer) => {
-		if (p.joined || p.sid.startsWith('pending:') || p.dc?.readyState !== 'open') return;
+		if (p.joined || p.sid.startsWith('pending:')) return;
+		// 'joined' = peer is usable for app traffic + media. With bus-relayed
+		// app frames the datachannel is a nice-to-have, not the gate — a pc at
+		// 'connected' means RTP/ICE/DTLS are up and the bus already proves the
+		// peer is alive. dc-open still fires the fast path on healthy runtimes.
+		const ready = p.dc?.readyState === 'open' || p.pc.connectionState === 'connected';
+		if (!ready) return;
 		p.joined = true;
+		collectReceivers(p);
 		joinListeners.forEach((fn) => fn(p.sid));
 	};
 
@@ -119,7 +266,7 @@ export async function openWsRoom(
 		dc.onmessage = (ev) => {
 			try {
 				const { ns, data } = JSON.parse(String(ev.data)) as { ns: string; data: unknown };
-				actionListeners.get(ns)?.forEach((fn) => fn(data, p.sid));
+				handleAppFrame(p, ns, data);
 			} catch {}
 		};
 		dc.onclose = () => {
@@ -134,10 +281,18 @@ export async function openWsRoom(
 			if (ev.candidate) send(p, { sid: selfId, cand: ev.candidate.toJSON() });
 		};
 		pc.onnegotiationneeded = () => {
+			// initiators fire this exactly once, right after the pool + dc are
+			// added — the one-and-only offer this pc will ever make. A second
+			// firing would mean something tried to renegotiate (e.g. a stale
+			// direction flip); on this WebKitGTK build a second
+			// setLocalDescription on a PLAYING webrtcbin deadlocks the whole
+			// WebProcess, so it is refused structurally.
+			if (!p.initiator || p.offered) return;
 			p.makingOffer = true;
 			p.pendingLocalOp = pc
 				.setLocalDescription()
 				.then(() => {
+					p.offered = true;
 					if (pc.localDescription) send(p, { sid: selfId, sdp: pc.localDescription });
 				})
 				.catch(() => {})
@@ -145,19 +300,22 @@ export async function openWsRoom(
 					p.makingOffer = false;
 				});
 		};
-		pc.ontrack = (ev) =>
-			streamListeners.forEach((fn) => fn(ev.streams[0] ?? new MediaStream([ev.track]), p.sid));
+		pc.ontrack = (ev) => adoptTrack(p, ev.track);
 		pc.onconnectionstatechange = () => {
+			if (pc.connectionState === 'connected') maybeJoin(p);
 			if (pc.connectionState === 'failed' || pc.connectionState === 'closed') dropPeer(p);
 		};
 		pc.ondatachannel = (ev) => wireDc(p, ev.channel);
 	};
 
-	const newPeer = (busId: string, sid: string): Peer => {
+	const newPeer = (busId: string, sid: string, initiator: boolean): Peer => {
 		const p: Peer = {
 			busId, sid, pc: new RTCPeerConnection(rtcConfig),
 			dc: null, makingOffer: false, ignoreOffer: false, joined: false,
-			pendingLocalOp: Promise.resolve()
+			pendingLocalOp: Promise.resolve(),
+			initiator, offered: false,
+			claims: new Map(), recvStream: new MediaStream(), recvSeen: new Set(),
+			appChain: Promise.resolve()
 		};
 		peers.set(sid, p);
 		byBusId.set(busId, p);
@@ -165,17 +323,26 @@ export async function openWsRoom(
 		return p;
 	};
 
-	// WebKitGTK builds without webrtc rollback support can never revert a stuck
-	// local offer — the polite glare path would wedge the pc in have-local-offer
-	// forever and remote media never arrives. Rebuild the pc instead: fresh
-	// ICE/DTLS/SCTP. The 'cic' datachannel is recreated by the caller AFTER the
-	// remote offer is answered — creating it here would fire negotiationneeded
-	// and re-glare the fresh pc instantly. Old handlers are detached first so
-	// pc.close() doesn't dropPeer() the peer we're about to keep. This
-	// WebKitGTK build crashes the whole WebProcess if close() races an
-	// in-flight setLocalDescription (e.g. the offer made by offerTo's initial
-	// negotiationneeded) — pendingLocalOp is awaited (bounded) before closing.
-	// Emit leave+join so the session re-offers published streams to the new pc.
+	// initiator-side pc setup: the media pool + the 'cic' channel, all before
+	// the first (and only) offer. Must be redone if the pc is ever rebuilt.
+	const initOfferSide = (p: Peer) => {
+		for (let i = 0; i < POOL_AUDIO; i++)
+			p.pc.addTransceiver('audio', { direction: 'sendrecv' });
+		for (let i = 0; i < POOL_VIDEO; i++)
+			p.pc.addTransceiver('video', { direction: 'sendrecv' });
+		wireDc(p, p.pc.createDataChannel('cic'));
+	};
+
+	// Defense-in-depth only: with one-offer-ever semantics the two sides
+	// should never collide, so this path is not expected to trigger in normal
+	// operation. Kept in case a bug, a stale peer from before a reconnect, or
+	// a future code path reintroduces a collision — WebKitGTK builds without
+	// rollback support can otherwise wedge the pc in have-local-offer
+	// forever. Rebuild instead: fresh ICE/DTLS/SCTP, preserving the peer's
+	// role. Old handlers are detached first so pc.close() doesn't dropPeer()
+	// the peer we're about to keep, and this WebKitGTK build crashes the
+	// whole WebProcess if close() races an in-flight setLocalDescription —
+	// pendingLocalOp is awaited (bounded) before closing.
 	const rebuildPc = async (p: Peer) => {
 		const old = p.pc;
 		const oldDc = p.dc;
@@ -190,19 +357,27 @@ export async function openWsRoom(
 		try { oldDc?.close(); } catch {}
 		try { old.close(); } catch {}
 		if (p.joined) leaveListeners.forEach((fn) => fn(p.sid));
+		// active local publishes are NOT auto-restored onto the fresh pc — the
+		// composite re-offers active streams on peer-join anyway
+		p.claims.clear();
+		p.recvStream = new MediaStream();
+		p.recvSeen.clear();
 		p.dc = null;
 		p.joined = false;
 		p.makingOffer = false;
+		p.offered = false;
 		p.pendingLocalOp = Promise.resolve();
 		p.pc = new RTCPeerConnection(rtcConfig);
 		wirePc(p);
+		if (p.initiator) initOfferSide(p); // fresh pc needs its pool + dc + offer
 	};
 
 	const onMsg = async (busId: string, sig: Sig) => {
-		const polite = selfId < sig.sid; // glare rule: lexicographically lower is polite
+		// an offer from a peer we don't know yet means we never contacted them —
+		// we're the acceptor for this pair (see file header)
 		let p = findPeer(busId, sig.sid);
 		if (!p && sig.sdp?.type === 'offer') {
-			p = newPeer(busId, sig.sid);
+			p = newPeer(busId, sig.sid, false);
 		} else if (p && p.busId !== busId) {
 			byBusId.delete(p.busId);
 			p.busId = busId; // peer rejoined the bus under a new member id
@@ -210,31 +385,58 @@ export async function openWsRoom(
 		}
 		if (!p) return;
 		if (sig.sid) learnSid(p, sig.sid);
+		if (sig.app) {
+			// decrypt+dispatch on a per-peer chain so ordering matches arrival
+			const blob = sig.app;
+			p.appChain = p.appChain.then(async () => {
+				try {
+					const [ivB, ctB] = blob.split('.');
+					const pt = await crypto.subtle.decrypt(
+						{ name: 'AES-GCM', iv: unb64(ivB) },
+						await keyP,
+						unb64(ctB)
+					);
+					const { ns, data } = JSON.parse(new TextDecoder().decode(pt)) as {
+						ns: string;
+						data: unknown;
+					};
+					handleAppFrame(p, ns, data);
+				} catch {}
+			});
+		}
 		const { pc } = p;
 		try {
 			if (sig.sdp) {
+				// a remote offer while we're non-stable means the other side
+				// offered a second time — impossible under one-offer-ever
+				// semantics, so treat as corruption and rebuild. Acceptor on a
+				// fresh/stable pc is the only legitimate offer-taker.
 				const offerCollision =
 					sig.sdp.type === 'offer' && (p.makingOffer || pc.signalingState !== 'stable');
-				p.ignoreOffer = !polite && offerCollision;
+				p.ignoreOffer = p.initiator && offerCollision;
 				if (p.ignoreOffer) return;
-				let rebuilt = false;
 				if (offerCollision) {
 					try {
 						await pc.setLocalDescription({ type: 'rollback' });
 					} catch {
 						await rebuildPc(p);
-						rebuilt = true;
 					}
 				}
 				await p.pc.setRemoteDescription(sig.sdp);
 				if (sig.sdp.type === 'offer') {
+					// the offer's pool transceivers arrive here as 'recvonly'
+					// (created by setRemoteDescription); flip them to 'sendrecv'
+					// before answering so this side may publish later via plain
+					// replaceTrack — a local direction set pre-answer needs no
+					// renegotiation, but skipping it leaves senders muted forever
+					for (const tr of p.pc.getTransceivers()) {
+						if (tr.receiver.track && tr.direction === 'recvonly')
+							tr.direction = 'sendrecv';
+					}
 					const localOp = p.pc.setLocalDescription();
 					p.pendingLocalOp = localOp.catch(() => {});
 					await localOp;
 					if (p.pc.localDescription) send(p, { sid: selfId, sdp: p.pc.localDescription });
-					// fresh pc needs our 'cic' channel — create it only now that the
-					// remote offer is answered (early creation would re-glare)
-					if (rebuilt) wireDc(p, p.pc.createDataChannel('cic'));
 				}
 			} else if (sig.cand) {
 				try {
@@ -250,9 +452,10 @@ export async function openWsRoom(
 
 	const offerTo = (busId: string) => {
 		// sid unknown until their first reply — key by a pending placeholder,
-		// re-keyed by learnSid() when any signaling payload arrives
-		const p = newPeer(busId, `pending:${busId}`);
-		wireDc(p, p.pc.createDataChannel('cic'));
+		// re-keyed by learnSid() when any signaling payload arrives. We created
+		// the datachannel, so we are the permanent initiator for this pair.
+		const p = newPeer(busId, `pending:${busId}`, true);
+		initOfferSide(p); // pool transceivers + dc fire onnegotiationneeded once
 	};
 
 	const url = `${busUrl.replace(/^http/, 'ws')}/room/${await roomKey(roomSecret)}`;
@@ -300,15 +503,29 @@ export async function openWsRoom(
 		});
 	await connect();
 
+	// find a pooled transceiver slot for an outgoing track: kind must match
+	// the m-line's, and the slot must be unclaimed and idle. Returns -1 when
+	// the pool is full — never fall back to addTrack/renegotiation.
+	const claimSlot = (p: Peer, track: MediaStreamTrack): number => {
+		const trs = p.pc.getTransceivers();
+		for (let i = 0; i < trs.length; i++) {
+			const tr = trs[i];
+			if (tr.receiver.track?.kind !== track.kind) continue;
+			if (tr.sender.track) continue; // occupied (should agree with claims, but trust the pc)
+			if ([...p.claims.values()].includes(i)) continue;
+			return i;
+		}
+		return -1;
+	};
+
 	const room = {
 		makeAction<T>(namespace: string) {
 			const sendAction = ((data: T, targets?: string[] | string | null) => {
-				const frame = JSON.stringify({ ns: namespace, data });
 				const list = targets == null ? [...peers.values()] : targets;
 				const arr = Array.isArray(list) ? list : [list];
 				for (const t of arr) {
 					const p = typeof t === 'string' ? peers.get(t) : (t as Peer);
-					if (p?.dc?.readyState === 'open') p.dc.send(frame);
+					if (p) void sendAppFrame(p, namespace, data);
 				}
 				return Promise.resolve();
 			}) as never;
@@ -324,17 +541,37 @@ export async function openWsRoom(
 		onPeerLeave: (fn: (id: string) => void) => leaveListeners.add(fn),
 		onPeerStream: (fn: (s: MediaStream, id: string) => void) => streamListeners.add(fn),
 		onPeerTrack: () => {},
+		// publishing is replaceTrack-into-pool on BOTH roles — identical for
+		// initiator and acceptor, and never triggers renegotiation. This is
+		// the invariant that keeps WebKitGTK's GstWebRTC alive: one
+		// offer/answer per pc, ever.
 		addStream: (stream: MediaStream, targets?: string[]) => {
 			for (const p of peers.values()) {
 				if (targets && !targets.includes(p.sid)) continue;
-				for (const t of stream.getTracks())
-					if (!p.pc.getSenders().some((s) => s.track === t)) p.pc.addTrack(t, stream);
+				for (const t of stream.getTracks()) {
+					if (p.claims.has(t)) continue; // already sending this exact track
+					const i = claimSlot(p, t);
+					if (i < 0) {
+						console.debug('[ws-room] transceiver pool exhausted for', t.kind);
+						continue;
+					}
+					p.claims.set(t, i);
+					void p.pc.getTransceivers()[i].sender.replaceTrack(t).catch(() => {});
+				}
 			}
 		},
 		removeStream: (stream: MediaStream) => {
-			for (const p of peers.values())
-				for (const s of p.pc.getSenders())
-					if (s.track && stream.getTracks().includes(s.track)) p.pc.removeTrack(s);
+			for (const p of peers.values()) {
+				for (const t of stream.getTracks()) {
+					const i = p.claims.get(t);
+					if (i == null) continue;
+					p.claims.delete(t);
+					// slot stays reserved-for-nothing — freed for reuse; the remote
+					// receiver track mutes rather than ends, which reads as
+					// "stopped sending" without tearing down the stream object
+					void p.pc.getTransceivers()[i]?.sender.replaceTrack(null).catch(() => {});
+				}
+			}
 		},
 		getPeers: () => {
 			const out: Record<string, RTCPeerConnection> = {};
@@ -342,14 +579,23 @@ export async function openWsRoom(
 				if (!p.sid.startsWith('pending:')) out[p.sid] = p.pc;
 			return out;
 		},
+		// temporary diagnostics: Peer internals (dc state, pool bookkeeping)
+		__peerInfo: () =>
+			[...peers.values()].map((p) => ({
+				sid: p.sid,
+				busId: p.busId,
+				initiator: p.initiator,
+				joined: p.joined,
+				dc: p.dc?.readyState ?? null,
+				offered: p.offered,
+				claims: [...p.claims.values()],
+				recvTracks: p.recvStream.getTracks().map((t) => `${t.kind}:${t.readyState}:${t.muted ? 'muted' : 'live'}`),
+				makingOffer: p.makingOffer
+			})),
 		leave: async () => {
 			disposed = true;
 			if (reconnectTimer) clearTimeout(reconnectTimer);
-			for (const p of [...peers.values()]) {
-				try {
-					p.pc.close();
-				} catch {}
-			}
+			await Promise.all([...peers.values()].map(safeClose));
 			peers.clear();
 			ws?.close();
 			ws = null;
