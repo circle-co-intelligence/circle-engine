@@ -311,11 +311,21 @@ export class RoomSession {
 			// repeated enough, prod's client treats the media connection as
 			// unstable and reconnects its whole room socket. Skip the
 			// reassignment (and the cascade) when the track set is unchanged.
+			//
+			// A peer publishes audio and video as SEPARATE streams (one
+			// addStream call each) — naive assignment would let the video
+			// stream clobber the audio one. Merge into a per-peer union so
+			// remoteStreams[peerId] carries every live track the peer sent.
 			const prev = this.remoteStreams[peerId];
 			if (prev && prev.id === stream.id &&
 				sameTrackIds(prev.getTracks(), stream.getTracks())) return;
+			const kept = prev
+				? prev.getTracks().filter((t) => t.readyState === 'live' && !stream.getTracks().some((n) => n.kind === t.kind))
+				: [];
+			const merged = new MediaStream([...kept, ...stream.getTracks()]);
+			if (prev && sameTrackIds(prev.getTracks(), merged.getTracks())) return;
 			console.debug('[engine] remote stream', peerId, stream.getTracks().map((t) => t.kind).join('+'));
-			this.remoteStreams[peerId] = stream;
+			this.remoteStreams[peerId] = merged;
 		});
 		this.handle.onRealtime((msg, peerId) => this.onRealtime(msg, peerId));
 		// ops arriving before the policy wasm loads are queued, not denied
@@ -410,7 +420,16 @@ export class RoomSession {
 			pw: !!this.passwordHash, waitingSelf: this.waitingSelf, admitted: this.admitted,
 			peers: [...this.peers], waiting: [...this.waiting.map((w) => w.id)],
 			held: [...this.heldPeers], denied: [...this.deniedPeers],
-			selfLang: this.selfLang, selfLangs: this.selfLangs, peerLangs: this.peerLangs
+			selfLang: this.selfLang, selfLangs: this.selfLangs, peerLangs: this.peerLangs,
+			media: {
+				local: this.localMedia?.stream.getTracks().map((t) => `${t.kind}:${t.readyState}`) ?? [],
+				remote: Object.fromEntries(
+					Object.entries(this.remoteStreams).map(([p, s]) => [
+						p,
+						s.getTracks().map((t) => `${t.kind}:${t.readyState}`)
+					])
+				)
+			}
 		};
 	}
 

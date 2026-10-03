@@ -173,7 +173,6 @@ export class SfuLoopback {
 	}
 
 	private negotiatePull(connectionId: string) {
-		if (!this.pc) return; // no shared transport until publish arrives
 		// prod's pc is impolite: an sfu-offer arriving while it holds a local
 		// (publish) offer throws sfu_renegotiate_failed → media close + room
 		// socket reconnect. Defer until the publish exchange has settled, and
@@ -186,10 +185,14 @@ export class SfuLoopback {
 	}
 
 	private async doNegotiatePull(connectionId: string) {
-		if (!this.pc || this.publishInFlight) {
-			if (this.publishInFlight) this.pendingOffer = true;
+		if (this.publishInFlight) {
+			this.pendingOffer = true;
 			return;
 		}
+		// receive-only clients (no camera / witness seat) never publish — the
+		// shared pc must still exist or their subscribes silently drop and
+		// remote video never reaches them
+		this.ensurePc();
 		if (this.negotiating) {
 			this.pendingOffer = true;
 			return;

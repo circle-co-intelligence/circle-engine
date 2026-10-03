@@ -1,14 +1,14 @@
 /**
- * badges.ts — the two required disclosure surfaces, rendered as a minimal
- * DOM overlay (the vendored prod frontend can't carry these states):
+ * badges.ts — disclosure + action surfaces for the vendored prod frontend:
  *
  *   1. quality dots — connection quality 0–3 driven by the room's pressure
- *      level, so "why is it choppy" has a visible answer
+ *      level, so "why is it choppy" has a visible answer (always-on overlay)
  *   2. edge-processed pill — REQUIRED privacy disclosure whenever the paid
  *      edge-denoise lane is on (plaintext leaves E2EE at the SFU)
- *
- * Both mount once, unobtrusively, bottom-left — same contract as prod's own
- * "not E2EE" badge: visible, never silent.
+ *   3. circle actions (whiteboard/enhance/sense/top-up/invite/audit) — injected
+ *      into the prod settings drawer's Appearance section (#settings-appearance)
+ *      so the room stays composition-clean; the always-on overlay keeps only
+ *      the two disclosures, same contract as prod's "not E2EE" badge.
  */
 import type { RoomSession } from '../state/room.svelte';
 
@@ -37,14 +37,6 @@ export function mountBadges(session: RoomSession): () => void {
 		'letter-spacing:.02em;box-shadow:0 2px 8px #0006';
 	root.appendChild(pill);
 
-	// whiteboard toggle — pointer events only on this chip
-	const wb = document.createElement('button');
-	wb.textContent = '✎ whiteboard';
-	wb.style.cssText =
-		'pointer-events:auto;background:#1a2233cc;color:#cbd2d9;border:1px solid #ffffff24;' +
-		'padding:4px 10px;border-radius:999px;font:inherit;cursor:pointer;backdrop-filter:blur(6px)';
-	root.appendChild(wb);
-
 	document.body.appendChild(root);
 	const COLORS = ['#4a5568', '#e53e3e', '#d69e2e', '#38a169'];
 	const tick = window.setInterval(() => {
@@ -59,7 +51,7 @@ export function mountBadges(session: RoomSession): () => void {
 	// the same Y.Doc as notes (E2EE data channel, zero new transport)
 	let panel: HTMLElement | null = null;
 	let unmountWb: (() => void) | null = null;
-	wb.onclick = async () => {
+	const toggleWb = async () => {
 		if (panel) {
 			unmountWb?.();
 			panel.remove();
@@ -79,62 +71,112 @@ export function mountBadges(session: RoomSession): () => void {
 		}
 	};
 
-	// paid opt-in lanes + host actions — each an explicit click, each only
-	// shown when its endpoint exists; edge/sensory break E2EE by design so
-	// the click is the consent and the pill is the disclosure
+	// circle actions — paid opt-in lanes + host actions, injected into the
+	// prod settings drawer's Appearance section so the room surface stays
+	// uncluttered; each is an explicit click, each only shown when its
+	// endpoint exists; edge/sensory break E2EE by design so the click is
+	// the consent and the pill is the disclosure
 	const env = import.meta.env as Record<string, string | undefined>;
-	const chip = (label: string, title: string, fn: () => void) => {
-		const b = document.createElement('button');
-		b.textContent = label;
-		b.title = title;
-		b.style.cssText = wb.style.cssText;
-		b.onclick = fn;
-		root.appendChild(b);
-		return b;
-	};
+	type Action = { label: string; desc: string; run: (b: HTMLButtonElement) => void };
+	const actions: Action[] = [
+		{ label: 'whiteboard', desc: 'Shared Excalidraw canvas for the circle', run: () => void toggleWb() }
+	];
 	if (env.VITE_CIC_DSP_ENDPOINT) {
-		chip('enhance audio', 'Edge denoise — mic audio is processed unencrypted at the edge (paid)', () => {
-			void session.enableEdgeDenoise();
-		});
-		chip('sense room', 'Diarized captions + audio events via speech provider (paid)', () => {
-			void session.enableSensory();
-		});
+		actions.push(
+			{ label: 'enhance audio', desc: 'Edge denoise — mic audio is processed unencrypted at the edge (paid)', run: () => void session.enableEdgeDenoise() },
+			{ label: 'sense room', desc: 'Diarized captions + audio events via speech provider (paid)', run: () => void session.enableSensory() }
+		);
 	}
 	if (env.VITE_CIC_AI_ENDPOINT) {
-		const b = chip('top up', 'Credit this room\'s paid-seconds pool with a grant from your payment', async () => {
-			const grant = prompt('Paste top-up grant');
-			if (!grant) return;
-			const { topUp } = await import('../tier');
-			b.textContent = (await topUp(session.roomCode, grant.trim())) ? 'topped up' : 'invalid grant';
-			setTimeout(() => (b.textContent = 'top up'), 4000);
+		actions.push({
+			label: 'top up',
+			desc: 'Credit this room\'s paid-seconds pool with a grant from your payment',
+			run: async (b) => {
+				const grant = prompt('Paste top-up grant');
+				if (!grant) return;
+				const { topUp } = await import('../tier');
+				b.querySelector('strong')!.textContent = (await topUp(session.roomCode, grant.trim()))
+					? 'topped up'
+					: 'invalid grant';
+				setTimeout(() => (b.querySelector('strong')!.textContent = 'top up'), 4000);
+			}
 		});
 	}
-	chip('invite', 'Download a calendar invite for this circle', () => {
-		void import('../notes/invite').then(({ icsInvite, downloadIcs }) => {
-			downloadIcs(
-				'circle.ics',
-				icsInvite({
-					title: 'Co-Intelligence Circle',
-					startAt: new Date(Date.now() + 3600_000),
-					minutes: 60,
-					joinUrl: location.href
-				})
-			);
-		});
+	actions.push(
+		{
+			label: 'invite',
+			desc: 'Download a calendar invite for this circle',
+			run: () => {
+				void import('../notes/invite').then(({ icsInvite, downloadIcs }) => {
+					downloadIcs(
+						'circle.ics',
+						icsInvite({
+							title: 'Co-Intelligence Circle',
+							startAt: new Date(Date.now() + 3600_000),
+							minutes: 60,
+							joinUrl: location.href
+						})
+					);
+				});
+			}
+		},
+		{
+			label: 'audit',
+			desc: 'Export the signed op-log (verifiable room record)',
+			run: () => {
+				void import('../audit/export').then(({ exportAudit }) => {
+					const json = exportAudit(session.oplog.entries, session.oplog.epoch);
+					const a = document.createElement('a');
+					a.href = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
+					a.download = `circle-audit-${session.roomCode}.json`;
+					a.click();
+					URL.revokeObjectURL(a.href);
+				});
+			}
+		}
+	);
+
+	// Render actions as prod-native preference rows inside the drawer's
+	// Appearance section (#settings-appearance). The svelte-* scope class is
+	// copied from a live prod element so scoped styles apply; re-injects via
+	// MutationObserver because Svelte remounts the drawer on tab switches.
+	const injectActions = (body: HTMLElement) => {
+		if (document.getElementById('cic-extras')) return;
+		const scope = body.querySelector('[class*="svelte-"]')?.className.match(/\bsvelte-[a-z0-9]+\b/)?.[0] ?? '';
+		const mk = <K extends keyof HTMLElementTagNameMap>(tag: K, cls: string, text = ''): HTMLElementTagNameMap[K] => {
+			const e = document.createElement(tag);
+			e.className = `${cls}${scope ? ` ${scope}` : ''}`;
+			if (text) e.textContent = text;
+			return e;
+		};
+		const wrap = document.createElement('div');
+		wrap.id = 'cic-extras';
+		wrap.className = `grid gap-2 pt-2${scope ? ` ${scope}` : ''}`;
+		wrap.appendChild(mk('h4', 'settings-flat-title', 'Circle tools'));
+		for (const a of actions) {
+			const b = mk('button', 'ui-preference-switch');
+			b.type = 'button';
+			const span = mk('span', 'grid');
+			span.appendChild(mk('strong', '', a.label));
+			span.appendChild(mk('span', 'text-[11px] text-[var(--muted)]', a.desc));
+			b.appendChild(span);
+			b.onclick = () => a.run(b);
+			wrap.appendChild(b);
+		}
+		body.appendChild(wrap);
+	};
+	const mo = new MutationObserver(() => {
+		const body = document.getElementById('settings-appearance');
+		if (body) injectActions(body);
 	});
-	chip('audit', 'Export the signed op-log (verifiable room record)', () => {
-		void import('../audit/export').then(({ exportAudit }) => {
-			const json = exportAudit(session.oplog.entries, session.oplog.epoch);
-			const a = document.createElement('a');
-			a.href = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
-			a.download = `circle-audit-${session.roomCode}.json`;
-			a.click();
-			URL.revokeObjectURL(a.href);
-		});
-	});
+	mo.observe(document.body, { childList: true, subtree: true });
+	const body = document.getElementById('settings-appearance');
+	if (body) injectActions(body);
 
 	return () => {
 		window.clearInterval(tick);
+		mo.disconnect();
+		document.getElementById('cic-extras')?.remove();
 		unmountWb?.();
 		panel?.remove();
 		root.remove();
