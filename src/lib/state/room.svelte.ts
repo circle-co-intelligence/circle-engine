@@ -724,6 +724,9 @@ export class RoomSession {
 					this.recordingProposer = peerId;
 				} else {
 					this.consents[peerId] = msg.state;
+					// composite filter follows consent live — a mid-record denial
+					// drops the peer's tile + mixed audio on the next frame
+					if (this.recording) this.recorder.setConsented(this.consentedPeers);
 					this.maybeStartRecording();
 				}
 				break;
@@ -1247,6 +1250,8 @@ export class RoomSession {
 	}
 
 	private async maybeRecord() {
+		// composite (dormant) + any future callers: filter tiles/mix to granters
+		this.recorder.setConsented(this.consentedPeers);
 		if (this.roles?.['recorder-primary'] === this.selfId || this.roles?.['recorder-standby'] === this.selfId) {
 			await this.recorder.start();
 		}
@@ -1328,6 +1333,7 @@ export class RoomSession {
 		// exclusion reacts live: granted mid-record → join the ISO record;
 		// denied mid-record → stop ours and purge our pending segments
 		if (this.recording) {
+			this.recorder.setConsented(this.consentedPeers);
 			if (granted) void this.maybeRecord();
 			else void this.iso?.discard();
 		}

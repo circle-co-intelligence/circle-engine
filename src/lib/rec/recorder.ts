@@ -47,13 +47,45 @@ export class Recorder {
 		this.canvas.height = 720;
 	}
 
-	addAudioStream(stream: MediaStream) {
-		this.audioCtx.createMediaStreamSource(stream).connect(this.mixDest);
+	private audioSources = new Map<string, MediaStreamAudioSourceNode>();
+	/** granted-consent set; null = not recording (no filtering) */
+	private consented: Set<string> | null = null;
+
+	/** consent gate — only granted participants may appear in the composite */
+	setConsented(ids: Set<string> | null) {
+		this.consented = ids;
+		for (const [id, src] of this.audioSources) this.applyAudioConsent(id, src);
 	}
 
-	/** draw grid of participant videos — called per rAF while running */
-	drawFrame(videos: HTMLVideoElement[]) {
+	private applyAudioConsent(id: string, src: MediaStreamAudioSourceNode) {
+		try {
+			src.disconnect(this.mixDest);
+		} catch {}
+		if (!this.consented || this.consented.has(id)) src.connect(this.mixDest);
+	}
+
+	addAudioStream(peerId: string, stream: MediaStream) {
+		this.removeAudioStream(peerId);
+		const src = this.audioCtx.createMediaStreamSource(stream);
+		this.audioSources.set(peerId, src);
+		this.applyAudioConsent(peerId, src);
+	}
+
+	removeAudioStream(peerId: string) {
+		const src = this.audioSources.get(peerId);
+		if (!src) return;
+		try {
+			src.disconnect();
+		} catch {}
+		this.audioSources.delete(peerId);
+	}
+
+	/** draw grid of consented participant videos — called per rAF while running */
+	drawFrame(tiles: { id: string; video: HTMLVideoElement }[]) {
 		const { ctx, canvas } = this;
+		const videos = (this.consented ? tiles.filter((t) => this.consented!.has(t.id)) : tiles).map(
+			(t) => t.video
+		);
 		ctx.fillStyle = '#181d23';
 		ctx.fillRect(0, 0, canvas.width, canvas.height);
 		const n = Math.max(1, videos.length);
@@ -116,6 +148,7 @@ export class Recorder {
 	/** explicit end only — room-end / end-recording op calls this */
 	async stop(): Promise<Blob[]> {
 		this.running = false;
+		this.consented = null;
 		clearInterval(this.journalTimer);
 		await this.flushJournal();
 		await this.output?.finalize();
