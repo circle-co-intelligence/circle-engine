@@ -38,12 +38,18 @@ interface Peer {
 	makingOffer: boolean;
 	ignoreOffer: boolean; // glare: impolite peer ignores remote offer while offering
 	joined: boolean; // join listeners fired once dc is open AND the real sid is known
+	// this WebKitGTK build crashes the WebProcess outright if close() races an
+	// in-flight setLocalDescription/createAnswer — always await this before
+	// closing a pc (see rebuildPc)
+	pendingLocalOp: Promise<unknown>;
 }
 
 async function roomKey(secret: string): Promise<string> {
 	const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(secret));
 	return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
+
+const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 export async function openWsRoom(
 	busUrl: string,
@@ -87,13 +93,23 @@ export async function openWsRoom(
 		maybeJoin(p);
 	};
 
-	const dropPeer = (p: Peer) => {
+	// this WebKitGTK build crashes the WebProcess outright if pc.close() races
+	// an in-flight setLocalDescription/createAnswer — always let any pending
+	// local-description op settle first (bounded, in case it never does)
+	const safeClose = async (p: Peer) => {
+		try {
+			await Promise.race([p.pendingLocalOp.catch(() => {}), delay(500)]);
+		} catch {}
 		try {
 			p.dc?.close();
 			p.pc.close();
 		} catch {}
+	};
+
+	const dropPeer = (p: Peer) => {
 		peers.delete(p.sid);
 		byBusId.delete(p.busId);
+		void safeClose(p);
 		if (p.joined) leaveListeners.forEach((fn) => fn(p.sid));
 	};
 
@@ -112,22 +128,22 @@ export async function openWsRoom(
 		};
 	};
 
-	const newPeer = (busId: string, sid: string): Peer => {
-		const pc = new RTCPeerConnection(rtcConfig);
-		const p: Peer = { busId, sid, pc, dc: null, makingOffer: false, ignoreOffer: false, joined: false };
-		peers.set(sid, p);
-		byBusId.set(busId, p);
+	const wirePc = (p: Peer) => {
+		const pc = p.pc;
 		pc.onicecandidate = (ev) => {
 			if (ev.candidate) send(p, { sid: selfId, cand: ev.candidate.toJSON() });
 		};
-		pc.onnegotiationneeded = async () => {
-			try {
-				p.makingOffer = true;
-				await pc.setLocalDescription();
-				if (pc.localDescription) send(p, { sid: selfId, sdp: pc.localDescription });
-			} catch {} finally {
-				p.makingOffer = false;
-			}
+		pc.onnegotiationneeded = () => {
+			p.makingOffer = true;
+			p.pendingLocalOp = pc
+				.setLocalDescription()
+				.then(() => {
+					if (pc.localDescription) send(p, { sid: selfId, sdp: pc.localDescription });
+				})
+				.catch(() => {})
+				.finally(() => {
+					p.makingOffer = false;
+				});
 		};
 		pc.ontrack = (ev) =>
 			streamListeners.forEach((fn) => fn(ev.streams[0] ?? new MediaStream([ev.track]), p.sid));
@@ -135,7 +151,51 @@ export async function openWsRoom(
 			if (pc.connectionState === 'failed' || pc.connectionState === 'closed') dropPeer(p);
 		};
 		pc.ondatachannel = (ev) => wireDc(p, ev.channel);
+	};
+
+	const newPeer = (busId: string, sid: string): Peer => {
+		const p: Peer = {
+			busId, sid, pc: new RTCPeerConnection(rtcConfig),
+			dc: null, makingOffer: false, ignoreOffer: false, joined: false,
+			pendingLocalOp: Promise.resolve()
+		};
+		peers.set(sid, p);
+		byBusId.set(busId, p);
+		wirePc(p);
 		return p;
+	};
+
+	// WebKitGTK builds without webrtc rollback support can never revert a stuck
+	// local offer — the polite glare path would wedge the pc in have-local-offer
+	// forever and remote media never arrives. Rebuild the pc instead: fresh
+	// ICE/DTLS/SCTP. The 'cic' datachannel is recreated by the caller AFTER the
+	// remote offer is answered — creating it here would fire negotiationneeded
+	// and re-glare the fresh pc instantly. Old handlers are detached first so
+	// pc.close() doesn't dropPeer() the peer we're about to keep. This
+	// WebKitGTK build crashes the whole WebProcess if close() races an
+	// in-flight setLocalDescription (e.g. the offer made by offerTo's initial
+	// negotiationneeded) — pendingLocalOp is awaited (bounded) before closing.
+	// Emit leave+join so the session re-offers published streams to the new pc.
+	const rebuildPc = async (p: Peer) => {
+		const old = p.pc;
+		const oldDc = p.dc;
+		old.onconnectionstatechange = null;
+		old.ondatachannel = null;
+		old.onnegotiationneeded = null;
+		old.onicecandidate = null;
+		old.ontrack = null;
+		try {
+			await Promise.race([p.pendingLocalOp.catch(() => {}), delay(500)]);
+		} catch {}
+		try { oldDc?.close(); } catch {}
+		try { old.close(); } catch {}
+		if (p.joined) leaveListeners.forEach((fn) => fn(p.sid));
+		p.dc = null;
+		p.joined = false;
+		p.makingOffer = false;
+		p.pendingLocalOp = Promise.resolve();
+		p.pc = new RTCPeerConnection(rtcConfig);
+		wirePc(p);
 	};
 
 	const onMsg = async (busId: string, sig: Sig) => {
@@ -157,11 +217,24 @@ export async function openWsRoom(
 					sig.sdp.type === 'offer' && (p.makingOffer || pc.signalingState !== 'stable');
 				p.ignoreOffer = !polite && offerCollision;
 				if (p.ignoreOffer) return;
-				if (offerCollision) await pc.setLocalDescription({ type: 'rollback' });
-				await pc.setRemoteDescription(sig.sdp);
+				let rebuilt = false;
+				if (offerCollision) {
+					try {
+						await pc.setLocalDescription({ type: 'rollback' });
+					} catch {
+						await rebuildPc(p);
+						rebuilt = true;
+					}
+				}
+				await p.pc.setRemoteDescription(sig.sdp);
 				if (sig.sdp.type === 'offer') {
-					await pc.setLocalDescription();
-					if (pc.localDescription) send(p, { sid: selfId, sdp: pc.localDescription });
+					const localOp = p.pc.setLocalDescription();
+					p.pendingLocalOp = localOp.catch(() => {});
+					await localOp;
+					if (p.pc.localDescription) send(p, { sid: selfId, sdp: p.pc.localDescription });
+					// fresh pc needs our 'cic' channel — create it only now that the
+					// remote offer is answered (early creation would re-glare)
+					if (rebuilt) wireDc(p, p.pc.createDataChannel('cic'));
 				}
 			} else if (sig.cand) {
 				try {

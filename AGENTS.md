@@ -61,3 +61,43 @@ Zero-server, client-only P2P video circle app. SvelteKit (adapter-static, `ssr=f
 
 ## Verification
 `pnpm check && pnpm test && pnpm build && pnpm test:e2e` + gitleaks/semgrep clean.
+
+## Native (Tauri) release builds
+Plain `cargo build --release` in `src-tauri/` does NOT embed the frontend —
+Cargo.toml's `custom-protocol` feature (`tauri/custom-protocol`) is normally
+auto-enabled by the `tauri` CLI; a raw `cargo build` serves `devUrl`/nothing
+and the app shows "asset not found: index.html" even though compilation
+succeeds cleanly. Always build with:
+```
+cargo build --release --features custom-protocol
+```
+Also: `tauri::generate_context!()` embeds `frontendDist` (`../build`) via a
+proc-macro file read that Cargo's incremental system does not track —
+rebuilding the frontend (`pnpm build:native`) and then `cargo build` again can
+silently keep serving the previous frontend snapshot. Force re-embedding by
+touching `src-tauri/src/lib.rs` (or `cargo clean -p circle`) before rebuilding
+whenever `build/` changed.
+
+### Known WebKitGTK caveat: offer-collision (glare) wedge
+`src/lib/net/wsRoom.ts`'s glare handling rebuilds the `RTCPeerConnection` when
+`setLocalDescription({type:'rollback'})` is unsupported (true on the
+WebRTC-enabled WebKitGTK 2.48.7 build from `scripts/setup-webkit-webrtc.sh`).
+Closing the old pc while its `setLocalDescription`/`createAnswer` is still
+in-flight used to crash the whole WebProcess outright; `pendingLocalOp` is now
+awaited (bounded to 500ms) before any `close()`, which reliably prevents the
+crash. However, when the *rebuilt* pc then has to answer a real (non-loopback,
+STUN-routed) remote offer carrying live audio+video m-lines, `setLocalDescription`
+on that answer has been observed to never settle on this WebKit build — the
+pc (and eventually the whole WebProcess's ability to run further webdriver
+scripts) becomes unresponsive, though the process itself keeps running. This
+only reproduces when the native peer is the one that raced an offer first
+(`offerTo`) and then received a colliding remote offer; a peer that joins
+*after* the remote side already holds the floor (no collision) negotiates,
+connects, and reaches `ice: completed` / `sig: stable` normally. Root cause is
+believed to be internal to this patched webrtcbin/GStreamer build, not the
+application protocol — browser↔browser (Chromium) media was re-verified
+end-to-end after every fix in this file (bidirectional `audio:live`+`video:live`
+receivers). A true fix likely requires a WebKitGTK build with native
+`setLocalDescription({type:'rollback'})` support, or redesigning the native
+lane to avoid ever racing an offer (e.g. always wait for `welcome.members`
+ordering to assign polite/impolite roles before offering).
