@@ -484,6 +484,7 @@ dependencies = [
  "tauri-plugin-deep-link",
  "tauri-plugin-single-instance",
  "tokio",
+ "webkit2gtk",
 ]
 
 [[package]]

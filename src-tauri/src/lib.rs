@@ -24,6 +24,28 @@ fn speech_endpoint(state: tauri::State<'_, SpeechdState>) -> String {
     state.endpoint.clone()
 }
 
+/// WebKitGTK ships WebRTC compiled in but gated behind the `enable-webrtc`
+/// runtime setting, which wry leaves off. Flip it before page JS runs so
+/// RTCPeerConnection/data channels are real in the shell, then navigate
+/// again so the new setting reaches the page's script context.
+#[cfg(target_os = "linux")]
+fn enable_webrtc(app: &tauri::App) {
+    use tauri::Manager;
+    use webkit2gtk::{SettingsExt, WebViewExt};
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.with_webview(move |platform| {
+            let wv = platform.inner();
+            if let Some(s) = wv.settings() {
+                s.set_enable_webrtc(true);
+                s.set_enable_media_stream(true);
+            }
+            // reload() is a no-op before the first navigation commits;
+            // load_uri re-navigates so the new context sees the setting.
+            wv.load_uri("tauri://localhost");
+        });
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -43,6 +65,11 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_deep_link::init())
+        .setup(|app| {
+            #[cfg(target_os = "linux")]
+            enable_webrtc(app);
+            Ok(())
+        })
         .manage(state)
         .invoke_handler(tauri::generate_handler![speech_endpoint])
         .run(tauri::generate_context!())

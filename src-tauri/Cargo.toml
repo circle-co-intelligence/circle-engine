@@ -18,6 +18,9 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 speechd = { path = "speechd" }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = "2"
+
 [features]
 # production builds serve frontendDist over the custom protocol instead of devUrl
 custom-protocol = ["tauri/custom-protocol"]

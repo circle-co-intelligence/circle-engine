@@ -35,6 +35,20 @@ Zero-server, client-only P2P video circle app. SvelteKit (adapter-static, `ssr=f
   shell (src-tauri/). Linux build host needs webkit2gtk4.1-devel etc — see
   docs/DEPLOYMENT.md "Native app". `cargo test --manifest-path
   src-tauri/speechd/Cargo.toml` — local RT speech endpoint tests.
+  IMPORTANT: always `pnpm build:native` before `cargo build` so the embedded
+  bundle carries VITE_CIC_SIGNAL_WS (the ws signaling lane silently no-ops
+  when it's absent — `joinLane` returns null with no warning).
+- Linux WebRTC runtime: Fedora's WebKitGTK compiles RTCPeerConnection out.
+  The machine-level workaround is a WebRTC-enabled WebKitGTK build at
+  `~/webkit-webrt` (prebuilt from manafishrov's webkitgtk-webrtc OCI image,
+  install prefix binary-patched from /usr/lib/Manafish/webkit to
+  /home/terex/webkit-webrt — equal-length path substitution) plus missing
+  deps in `~/webkit-webrtc/deps` (icu74, jpeg8, jxl→0.7 symlinks, woff2) and
+  `~/webkit-webrtc/gst-plugins/libgstnice.so` (nicesink/nicesrc — without
+  them webrtcbin closes and ICE negotiation dies). Launch via
+  `~/bin/circle-webrtc` which sets LD_LIBRARY_PATH + GST_PLUGIN_PATH;
+  `~/.local/bin/circle` symlinks to it. Release builds also need
+  `cargo build --features custom-protocol`.
 
 ## Invariants (do not violate)
 - No server code in `cic-core`. Static bundle only.
