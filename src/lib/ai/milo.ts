@@ -8,6 +8,7 @@
 
 import { Wllama } from '@wllama/wllama';
 import { WLLAMA_WASM } from './translate';
+import { emitModel } from './modelStatus';
 
 export interface MiloConfig {
 	modelUrl: string; // e.g. /models/llm/SmolLM2-360M-Instruct-Q4_K_M.gguf
@@ -26,14 +27,17 @@ export class Milo {
 
 	async init(cfg: MiloConfig) {
 		try {
+			emitModel('llm', 'loading');
 			this.llm = new Wllama(WLLAMA_WASM);
 			// wllama fetches inside a blob worker — relative URLs don't resolve there
 			await this.llm.loadModelFromUrl(new URL(cfg.modelUrl, location.origin).href, { n_ctx: cfg.maxContextTokens });
 			this.state = 'standby';
+			emitModel('llm', 'ready');
 			return true;
 		} catch (e) {
 			console.warn('[milo] wllama load failed:', e);
 			this.state = 'off'; // model unavailable — visible degrade
+			emitModel('llm', 'error');
 			return false;
 		}
 	}

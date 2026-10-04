@@ -36,6 +36,7 @@ export function installCicShims(roomKey?: string) {
 	seedLocalStorage();
 	patchFetch();
 	patchWebSocket(roomKey);
+	void import('../ui/capability').then((m) => m.capabilityGate());
 	// test seam: probes inject frames through the same entry path the app's own
 	// ws client uses (JSON → bridge.command) — real dispatch, no DOM flakiness
 	(window as unknown as { __cicSend: (code: string, frame: Record<string, unknown>) => void }).__cicSend =

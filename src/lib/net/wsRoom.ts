@@ -158,7 +158,8 @@ const unb64 = (s: string) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 export async function openWsRoom(
 	busUrl: string,
 	roomSecret: string,
-	rtcConfig: RTCConfiguration
+	rtcConfig: RTCConfiguration,
+	onBusState?: (state: 'up' | 'down') => void
 ): Promise<Room> {
 	const joinListeners = new Set<(peerId: string) => void>();
 	const leaveListeners = new Set<(peerId: string) => void>();
@@ -652,6 +653,7 @@ export async function openWsRoom(
 			sock.onopen = () => {
 				settled = true;
 				attempts = 0;
+				onBusState?.('up');
 				resolve();
 			};
 			sock.onerror = () => reject(new Error('ws connect failed'));
@@ -662,6 +664,7 @@ export async function openWsRoom(
 					disposed = true;
 					return;
 				}
+				onBusState?.('down');
 				for (const p of [...peers.values()]) dropPeer(p);
 				reconnectTimer = setTimeout(
 					() => void connect().catch(() => {}),

@@ -39,6 +39,12 @@ export interface RoomHandle {
 	raw: Room;
 	/** per-peer ICE state, merged across lanes */
 	peerConnState: (peerId: string) => string;
+	/** subscribe to merged per-peer ICE state changes */
+	onPeerConn: (fn: (peerId: string, state: string) => void) => void;
+	/** signaling-plane state: 'up' once a lane attaches, 'down' if every lane failed */
+	onSignal: (fn: (state: 'connecting' | 'up' | 'down') => void) => void;
+	/** ws-lane bus socket state — 'down' while the reconnect loop cycles */
+	onBus: (fn: (state: 'up' | 'down') => void) => void;
 	/** ICE-restart every peer connection (network flap / resume) */
 	restartAll: () => void;
 	/** resolves when the first lane is connected */
@@ -80,7 +86,12 @@ function laneList(): LaneName[] {
 		);
 }
 
-async function joinLane(lane: LaneName, secret: string, rtcConfig: RTCConfiguration): Promise<Room | null> {
+async function joinLane(
+	lane: LaneName,
+	secret: string,
+	rtcConfig: RTCConfiguration,
+	onBusState?: (state: 'up' | 'down') => void
+): Promise<Room | null> {
 	try {
 		switch (lane) {
 			case 'mqtt': {
@@ -114,7 +125,7 @@ async function joinLane(lane: LaneName, secret: string, rtcConfig: RTCConfigurat
 					bus = `${location.origin}${bus}`;
 				if (!bus) return null;
 				const { openWsRoom } = await import('./wsRoom');
-				return openWsRoom(bus, secret, rtcConfig);
+				return openWsRoom(bus, secret, rtcConfig, onBusState);
 			}
 			case 'supabase': {
 				const url = env.VITE_CIC_SUPABASE_URL;
@@ -187,6 +198,15 @@ export function openRoom(roomSecret: string): RoomHandle {
 	const leaveListeners = new Set<(peerId: string) => void>();
 	const streamListeners = new Set<(stream: MediaStream, peerId: string) => void>();
 	const connStateListeners = new Set<(peerId: string, state: string) => void>();
+	const signalListeners = new Set<(state: 'connecting' | 'up' | 'down') => void>();
+	const busListeners = new Set<(state: 'up' | 'down') => void>();
+	let signalState: 'connecting' | 'up' | 'down' = 'connecting';
+	const emitSignal = (state: typeof signalState) => {
+		if (signalState === state) return;
+		signalState = state;
+		signalListeners.forEach((fn) => fn(state));
+	};
+	const emitBus = (state: 'up' | 'down') => busListeners.forEach((fn) => fn(state));
 	const opListeners = new Set<(env: OpEnvelope, peerId: string) => void>();
 	const rtListeners = new Set<(msg: RealtimeMessage, peerId: string) => void>();
 	// custom actions (notes sync etc.) — namespace → listeners; lane receivers
@@ -395,11 +415,17 @@ export function openRoom(roomSecret: string): RoomHandle {
 	// background and join the composite whenever they connect
 	const joinWithRetry = async (name: LaneName, rtcConfig: RTCConfiguration) => {
 		for (let i = 0; i < LANE_RETRIES; i++) {
-			const room = await joinLane(name, roomSecret, rtcConfig).catch(() => null);
+			const room = await joinLane(
+				name,
+				roomSecret,
+				rtcConfig,
+				name === 'ws' ? emitBus : undefined
+			).catch(() => null);
 			if (room) {
 				attach(name, room);
 				if (!connected) {
 					connected = true;
+					emitSignal('up');
 					flushPending();
 				}
 				return true;
@@ -413,8 +439,14 @@ export function openRoom(roomSecret: string): RoomHandle {
 	const ready = (async () => {
 		const rtcConfig = await iceServers();
 		await Promise.all(laneList().map((name) => joinWithRetry(name, rtcConfig)));
-		if (!lanes.length) throw new Error('no signaling lanes available');
+		if (!lanes.length) {
+			emitSignal('down');
+			throw new Error('no signaling lanes available');
+		}
 	})();
+	// the rejection is reported via onSignal — mark handled so an unattached
+	// consumer doesn't get an unhandled-rejection noise event
+	ready.catch(() => {});
 
 	// composite room exposing merged peer connections (E2EE attach, ICE repair)
 	const compositeRoom = {
@@ -514,6 +546,16 @@ export function openRoom(roomSecret: string): RoomHandle {
 				if (st) return st;
 			}
 			return 'new';
+		},
+		onPeerConn: (fn) => {
+			connStateListeners.add(fn);
+		},
+		onSignal: (fn) => {
+			signalListeners.add(fn);
+			fn(signalState);
+		},
+		onBus: (fn) => {
+			busListeners.add(fn);
 		},
 		restartAll,
 		ready,

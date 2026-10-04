@@ -37,6 +37,15 @@ export function mountBadges(session: RoomSession): () => void {
 		'letter-spacing:.02em;box-shadow:0 2px 8px #0006';
 	root.appendChild(pill);
 
+	// connectivity pill — the honest "what's wrong" surface for states prod
+	// can't see: every lane failed (fatal), the ws bus cycling reconnects,
+	// or peers stuck in failed/disconnected while ICE repair retries
+	const netpill = document.createElement('div');
+	netpill.style.cssText =
+		'display:none;color:#fff;padding:4px 10px;border-radius:999px;' +
+		'letter-spacing:.02em;box-shadow:0 2px 8px #0006';
+	root.appendChild(netpill);
+
 	document.body.appendChild(root);
 	const COLORS = ['#4a5568', '#e53e3e', '#d69e2e', '#38a169'];
 	const tick = window.setInterval(() => {
@@ -45,6 +54,29 @@ export function mountBadges(session: RoomSession): () => void {
 		for (let i = 0; i < bars.length; i++)
 			(bars[i] as HTMLElement).style.background = i <= level ? COLORS[level] || '#38a169' : '#4a556866';
 		pill.style.display = session.edgeProcessed ? 'block' : 'none';
+		if (session.signalState === 'down') {
+			netpill.textContent = 'signaling unreachable — check connection, reload to retry';
+			netpill.style.background = '#b91c1c';
+			netpill.style.display = 'block';
+		} else if (session.busDown) {
+			netpill.textContent = 'reconnecting…';
+			netpill.style.background = '#b45309';
+			netpill.style.display = 'block';
+		} else if (session.badPeers > 0) {
+			netpill.textContent = `connection trouble with ${session.badPeers} seat${session.badPeers > 1 ? 's' : ''} — retrying`;
+			netpill.style.background = '#b45309';
+			netpill.style.display = 'block';
+		} else if (session.modelBusy.length) {
+			netpill.textContent = 'preparing on-device models… (first use downloads them)';
+			netpill.style.background = '#b45309';
+			netpill.style.display = 'block';
+		} else if (session.modelFailed.length) {
+			netpill.textContent = 'on-device AI models unavailable — captions/Milo degraded';
+			netpill.style.background = '#b91c1c';
+			netpill.style.display = 'block';
+		} else {
+			netpill.style.display = 'none';
+		}
 	}, 1000);
 
 	// Excalidraw island — lazy-mounts into a floating panel, synced through

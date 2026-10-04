@@ -13,6 +13,7 @@ import { NotesDoc } from '../notes/notes';
 import { BreakoutSession } from '../net/breakout.svelte';
 import { LocalTts } from '../ai/speech';
 import { llmModelUrl } from '../ai/translate';
+import { onModel } from '../ai/modelStatus';
 import { Milo } from '../ai/milo';
 import { CloudMilo, aiEndpoint, cloudTts } from '../ai/cloud';
 import { adaptSenders, deviceClass, pressureLevel } from '../media/adapt';
@@ -324,6 +325,10 @@ export class RoomSession {
 			this.peerSharing.delete(peerId);
 			this.peerMuted = { ...this.peerMuted, [peerId]: undefined as never };
 			delete this.peerMuted[peerId];
+			this.peerConns.delete(peerId);
+			this.badPeers = [...this.peerConns.values()].filter(
+				(s) => s === 'failed' || s === 'disconnected'
+			).length;
 			delete this.remoteStreams[peerId];
 			delete this.peerSfuSessions[peerId];
 			delete this.peerSfuTracks[peerId];
@@ -363,6 +368,29 @@ export class RoomSession {
 		this.handle.onRealtime((msg, peerId) => this.onRealtime(msg, peerId));
 		// ops arriving before the policy wasm loads are queued, not denied
 		this.handle.onOp((env, peerId) => void this.policyReady.then(() => this.onOp(env, peerId)));
+
+		// connectivity surfaces — the badge overlay reads these $state fields:
+		// signalDown = every lane failed (fatal), busDown = ws bus cycling
+		// its reconnect loop, badPeers = count of pcs in failed/disconnected
+		// (ICE repair retries in the background — the pill explains the wait)
+		this.handle.onSignal((st) => (this.signalState = st));
+		this.handle.onBus((st) => (this.busDown = st === 'down'));
+		this.handle.onPeerConn((peerId, st) => {
+			this.peerConns.set(peerId, st);
+			this.badPeers = [...this.peerConns.values()].filter(
+				(s) => s === 'failed' || s === 'disconnected'
+			).length;
+		});
+
+		// on-device model loads (100–270MB first touch): busy → "preparing"
+		// pill, error → persistent "degraded" note so silent stalls read honest
+		onModel((id, phase) => {
+			if (phase === 'loading' && !this.modelBusy.includes(id))
+				this.modelBusy = [...this.modelBusy, id];
+			if (phase !== 'loading') this.modelBusy = this.modelBusy.filter((p) => p !== id);
+			if (phase === 'error' && !this.modelFailed.includes(id))
+				this.modelFailed = [...this.modelFailed, id];
+		});
 
 		// authority heartbeat — lease renewal; missed 2x -> takeover via authorityOf()
 		this.heartbeat = window.setInterval(() => {
@@ -1087,6 +1115,18 @@ export class RoomSession {
 	/** last computed pressure level 0–3 — drives the quality badge */
 	pressure = $state(0);
 
+	/** signaling-plane health — 'down' means every lane failed (badge shows fatal) */
+	signalState = $state<'connecting' | 'up' | 'down'>('connecting');
+	/** ws signaling bus cycling its reconnect loop — transient, badge shows amber */
+	busDown = $state(false);
+	/** peers whose ICE is failed/disconnected — repair is retrying underneath */
+	badPeers = $state(0);
+	private peerConns = new Map<string, string>();
+	/** on-device model packs currently downloading/initializing */
+	modelBusy = $state<string[]>([]);
+	/** model packs that failed to load — their features degrade visibly */
+	modelFailed = $state<string[]>([]);
+
 	/** adaptive media pressure → per-sender bitrate/resolution clamps */
 	private adaptMedia() {
 		let worst = 'connected';
@@ -1354,7 +1394,14 @@ export class RoomSession {
 	private async maybeMilo(text: string) {
 		this.transcriptWindow = [...this.transcriptWindow.slice(-39), text];
 		if (this.roles?.['milo-brain'] !== this.selfId) return;
-		const match = text.trim().match(/^milo[\s,.:;-]+(.+)/i);
+		const src = text.trim();
+		// click mode: strict "milo, <question>" line start (chat + captions).
+		// hey_milo: the wake word IS the transcript — sherpa ASR already
+		// streams every speaker's finals here, so "hey milo" mid-utterance
+		// also wakes. No separate KWS model (and no license question) needed.
+		let match =
+			src.match(/^milo[\s,.:;-]+(.+)/i) ??
+			(this.miloWake === 'hey_milo' ? src.match(/\bhey[,.\s]*milo[\s,.:;-]+(.+)/i) : null);
 		if (!match) return;
 		this.miloState = 'listening';
 		await this.ensureMilo();

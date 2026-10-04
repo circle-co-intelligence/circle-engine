@@ -20,6 +20,7 @@ export interface SpeechSegment {
 
 import { base } from '$app/paths';
 import manifest from '../../../models/manifest.json';
+import { emitModel } from './modelStatus';
 
 const PACKS = {
 	vad: { dir: `${base}/models/vad/sherpa-onnx-wasm-simd-v1.13.8-vad`, remote: '' },
@@ -136,6 +137,7 @@ async function loadPack(kind: PackKind): Promise<SherpaModule | null> {
 	const packCfg = PACKS[kind];
 	const apiScript = { vad: 'sherpa-onnx-vad.js', asr: 'sherpa-onnx-asr.js', tts: 'sherpa-onnx-tts.js' }[kind];
 	const mainScript = `sherpa-onnx-wasm-main-${kind}.js`;
+	emitModel(kind, 'loading');
 	try {
 		await injectScript(`${packCfg.dir}/${apiScript}`);
 		const Module: SherpaModule = {};
@@ -144,9 +146,13 @@ async function loadPack(kind: PackKind): Promise<SherpaModule | null> {
 		window.Module = Module;
 		await injectScript(`${packCfg.dir}/${mainScript}`);
 		await ready;
+		emitModel(kind, 'ready');
 		return Module;
 	} catch {
-		if (!packCfg.remote) return null; // pack not deployed — caller degrades visibly
+		if (!packCfg.remote) {
+			emitModel(kind, 'error');
+			return null; // pack not deployed — caller degrades visibly
+		}
 	}
 	try {
 		const files = await fetchRemotePack(packCfg.remote);
@@ -157,9 +163,11 @@ async function loadPack(kind: PackKind): Promise<SherpaModule | null> {
 		window.Module = Module;
 		await injectScript(files[mainScript]);
 		await ready;
+		emitModel(kind, 'ready');
 		return Module;
 	} catch (e) {
 		console.warn(`[speech] remote pack ${kind} failed`, e);
+		emitModel(kind, 'error');
 		return null;
 	}
 }

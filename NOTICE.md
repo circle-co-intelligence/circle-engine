@@ -41,7 +41,7 @@ Fetched by `scripts/fetch-models.sh` per `models/manifest.json`:
 | sherpa-onnx wasm runtime + zipformer ASR | Apache-2.0 | k2-fsa/sherpa-onnx |
 | Silero VAD | MIT | snakers4/silero-vad |
 | Piper `en_US-libritts_r-medium` TTS voice | MIT | rhasspy/piper |
-| SmolLM2-135M-Instruct GGUF (Milo + translation) | Apache-2.0 | HuggingFaceTB/SmolLM2 |
+| SmolLM2-360M-Instruct GGUF (Milo + translation) | Apache-2.0 | HuggingFaceTB/SmolLM2 |
 | wllama runtime (llama.cpp wasm) | MIT | ngxson/wllama |
 
 Font licenses: Lato/EB Garamond/Caveat — OFL-1.1; Switzer — Fontshare

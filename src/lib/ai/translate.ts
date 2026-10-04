@@ -6,6 +6,7 @@
 import { Wllama } from '@wllama/wllama';
 import { base } from '$app/paths';
 import manifest from '../../../models/manifest.json';
+import { emitModel } from './modelStatus';
 
 const LOCAL_MODEL = `${base}/models/llm/SmolLM2-360M-Instruct-Q4_K_M.gguf`;
 const aiBase = (import.meta.env as Record<string, string | undefined>).VITE_CIC_AI_ENDPOINT;
@@ -48,14 +49,17 @@ async function getLlm(): Promise<Wllama | null> {
 	if (!loading) {
 		loading = (async () => {
 			try {
+				emitModel('llm', 'loading');
 				const w = new Wllama(WLLAMA_WASM);
 				// wllama fetches inside a blob worker — relative URLs don't
 				// resolve there, so hand it an absolute one
 				await w.loadModelFromUrl(await llmModelUrl(), { n_ctx: 2048 });
 				llm = w;
+				emitModel('llm', 'ready');
 				return w;
 			} catch (e) {
 				console.warn('[translate] wllama load failed:', e);
+				emitModel('llm', 'error');
 				return null; // model not vendored — caller reports honestly
 			}
 		})();
