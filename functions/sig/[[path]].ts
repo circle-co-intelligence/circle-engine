@@ -3,7 +3,7 @@
  * Same-origin proxy so clients never touch workers.dev directly — and
  * WebSocket upgrades pass through untouched.
  */
-const UPSTREAM = 'https://cic-signaling.circle-engine.workers.dev';
+const UPSTREAM = 'https://cic-signaling.terexmaps.workers.dev';
 
 interface Ctx {
 	request: Request;

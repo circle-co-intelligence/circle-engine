@@ -421,16 +421,23 @@ function hexToBytes(hex: string): Uint8Array {
 const PACK_URLS: Record<string, string> = {
 	vad: 'https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-wasm-simd-v1.13.8-vad.tar.bz2',
 	asr: 'https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.7/sherpa-onnx-wasm-simd-v1.13.7-en-asr-zipformer.tar.bz2',
-	tts: 'https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-wasm-simd-1.13.8-vits-piper-en_US-libritts_r-medium.tar.bz2'
+	tts: 'https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-wasm-simd-1.13.8-vits-piper-en_US-libritts_r-medium.tar.bz2',
+	// keep in sync with models/manifest.json packs.llm — the on-device
+	// LLM (Milo + translation) rides the same CORS-safe lane; HF's
+	// resolve CDN can't be relied on for the CORP header our COEP
+	// document requires
+	llm: 'https://huggingface.co/bartowski/SmolLM2-360M-Instruct-GGUF/resolve/main/SmolLM2-360M-Instruct-Q4_K_M.gguf'
 };
 async function pack(kind: string): Promise<Response> {
 	const url = PACK_URLS[kind];
 	if (!url) return json({ error: 'unknown pack' }, 404);
-	const up = await fetch(url);
+	// cacheEverything at the edge — these are large immutable release
+	// assets; repeat joins shouldn't re-pull upstream each time
+	const up = await fetch(url, { cf: { cacheEverything: true, cacheTtl: 2592000 } });
 	if (!up.ok || !up.body) return json({ error: `upstream ${up.status}` }, 502);
 	return new Response(up.body, {
 		headers: {
-			'content-type': 'application/x-bzip2',
+			'content-type': kind === 'llm' ? 'application/octet-stream' : 'application/x-bzip2',
 			'cache-control': 'public, max-age=2592000, immutable',
 			...cors
 		}

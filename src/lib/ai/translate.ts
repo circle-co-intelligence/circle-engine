@@ -1,14 +1,20 @@
 /**
  * Local translation lane — runs the same vendored wllama/SmolLM2 model Milo
  * uses, so translation never leaves the device and needs no new downloads.
- * Lazy: the ~100MB GGUF loads on first translation request, not on join.
+ * Lazy: the ~270MB GGUF loads on first translation request, not on join.
  */
 import { Wllama } from '@wllama/wllama';
 import { base } from '$app/paths';
 import manifest from '../../../models/manifest.json';
 
 const LOCAL_MODEL = `${base}/models/llm/SmolLM2-360M-Instruct-Q4_K_M.gguf`;
-const REMOTE_MODEL = (manifest.packs as Record<string, { url?: string }>)['llm']?.url ?? '';
+const aiBase = (import.meta.env as Record<string, string | undefined>).VITE_CIC_AI_ENDPOINT;
+// same CORS-safe lane the sherpa packs use (functions/api/ai → ai-gateway
+// /ai/pack/<kind>): HF's resolve CDN doesn't guarantee the CORP header our
+// COEP document needs, so prefer the proxy when an AI endpoint is set
+const PACK_MODEL = aiBase ? `${aiBase.replace(/\/ai\/?$/, '')}/ai/pack/llm` : '';
+const REMOTE_MODEL =
+	PACK_MODEL || (manifest.packs as Record<string, { url?: string }>)['llm']?.url || '';
 
 let modelUrlCache: string | null = null;
 /** local weights when vendored (dev/self-host), upstream HF resolve URL otherwise */
