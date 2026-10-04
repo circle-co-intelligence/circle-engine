@@ -9,8 +9,8 @@ interface Env {
 	REC_BUCKET: R2Bucket;
 }
 
-const PATH = /^api\/rec\/([\w-]+)\/([\w-]+)\/(\d+)$/;
-const PREFIX_PATH = /^api\/rec\/([\w-]+)\/([\w-]+)$/;
+const PATH = /^([\w-]+)\/([\w-]+)\/(\d+)$/;
+const PREFIX_PATH = /^([\w-]+)\/([\w-]+)$/;
 
 export const onRequestPut: PagesFunction<Env> = async ({ request, env, params }) => {
 	const m = PATH.exec((params.path as string[]).join('/'));
