@@ -7,7 +7,7 @@ import { Wllama } from '@wllama/wllama';
 import { base } from '$app/paths';
 import manifest from '../../../models/manifest.json';
 
-const LOCAL_MODEL = `${base}/models/llm/SmolLM2-135M-Instruct-Q4_K_M.gguf`;
+const LOCAL_MODEL = `${base}/models/llm/SmolLM2-360M-Instruct-Q4_K_M.gguf`;
 const REMOTE_MODEL = (manifest.packs as Record<string, { url?: string }>)['llm']?.url ?? '';
 
 let modelUrlCache: string | null = null;
@@ -76,14 +76,19 @@ export async function translateText(text: string, toLang: string, fromLang = 'En
 				},
 				{ role: 'user', content: text }
 			],
-			{ nPredict: 256 }
+			{
+				nPredict: 256,
+				// low temp + repeat penalty: the small instruct model otherwise
+				// rambles/echoes past the translation
+				sampling: { temp: 0.3, top_p: 0.9, top_k: 40, penalty_repeat: 1.15, penalty_last_n: 64 }
+			}
 		)
 	);
 	completion = run.catch(() => {});
 	try {
 		const out = await run;
-		// the 135M model rambles past the translation — a blank line marks
-		// where it starts continuing instead of translating
+		// the small instruct model can ramble past the translation — a blank
+		// line marks where it starts continuing instead of translating
 		return out.split(/\n\s*\n/)[0].trim() || null;
 	} catch {
 		return null;

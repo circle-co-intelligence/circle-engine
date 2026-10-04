@@ -41,6 +41,19 @@
  * reachable on this lane AND a relay lane merges under the same id. The
  * bus sees only hashed room keys (sha256(secret)) and opaque signaling
  * blobs — the room secret never leaves the client.
+ *
+ * RUNTIME QUIRK — always-initiator mode (ALWAYS_INITIATE): this WebKitGTK
+ * build deadlocks the WebProcess while *applying* a remote offer (the
+ * webrtcbin _set_description_task stalls before the answer is ever
+ * created), but its offerer path is healthy — offers negotiate, ICE/DTLS
+ * complete, media flows. So on that runtime the room never accepts an
+ * offer: incoming offers are ignored and answered with a counter-offer
+ * instead. For the far side this looks like ordinary glare — resolved by
+ * the existing sid tiebreak (larger sid keeps its offer) — so the local
+ * sid is emitted with a '~' prefix to sort above every trystero selfId
+ * ([0-9A-Za-z]), making this end the permanent initiator. Two
+ * always-initiator peers can never connect (one side must answer), which
+ * is an accepted limitation: the underlying engine cannot answer at all.
  */
 import { selfId } from 'trystero/mqtt';
 import type { Room } from 'trystero';
@@ -167,8 +180,93 @@ export async function openWsRoom(
 	let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 	const keyP = appKey(roomSecret);
 
-	const send = (p: Peer, data: Sig) => {
+	// ALWAYS_INITIATE (see file header): runtimes that cannot apply a remote
+	// offer must be the permanent initiator for every pair. Detected by the
+	// Tauri custom-protocol origin; overridable for browser-based testing.
+	const alwaysInitiate =
+		(import.meta.env.VITE_CIC_ALWAYS_INITIATE ?? '') === '1' ||
+		(typeof location !== 'undefined' && location.protocol === 'tauri:');
+	// '~' sorts above every char in trystero's selfId alphabet, so this sid
+	// always wins the collision tiebreak — remote peers always yield and
+	// answer our offer instead of the reverse.
+	const ourSid = alwaysInitiate ? `~${selfId}` : selfId;
+
+		const send = (p: Peer, data: Sig) => {
 		if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ to: p.busId, data }));
+	};
+
+	// this WebKitGTK build can emit SDP other engines refuse to parse
+	// (Chromium: "Failed to parse SessionDescription") in two ways:
+	//  1. a=bundle-only markers without an a=group:BUNDLE session line —
+	//     without a group the m-lines are individually transportable, so
+	//     the honest repair is to drop the marker.
+	//  2. payload types allocated incrementally across m-lines, overflowing
+	//     the 7-bit RTP pt space (>=128 on the 6th pooled m-line). PTs are
+	//     section-scoped, so any overflowing section is remapped onto
+	//     96..96+n-1 and its rtpmap/rtcp-fb/fmtp references rewritten.
+	//  3. extmap ids reused per-section (id 5 = ssrc-audio-level in audio,
+	//     = color-space in video) — legal unbundled, but a BUNDLE group
+	//     requires one id ↔ uri mapping across all m-lines. Ids are
+	//     renumbered so each extmap URI owns one global id.
+	const fixSdp = (sdp: string): string => {
+		let out = sdp;
+		if (!out.includes('a=group:BUNDLE') && out.includes('a=bundle-only'))
+			out = out.replace(/^a=bundle-only\r?\n/gm, '');
+		// pass 1: assign each extmap URI a single global id (needed only when
+		// the same id maps different URIs across bundled m-lines)
+		const uriId = new Map<string, number>();
+		const seen = new Map<number, string>(); // id -> uri
+		let collision = false;
+		for (const m of out.matchAll(/^a=extmap:(\d+)(?:\/\w+)?\s+(\S+)/gm)) {
+			const id = Number(m[1]);
+			const uri = m[2];
+			if (seen.has(id) && seen.get(id) !== uri) collision = true;
+			if (!uriId.has(uri)) uriId.set(uri, uriId.size + 1);
+			seen.set(id, uri);
+		}
+		const extGlobal = collision ? uriId : null;
+		const lines = out.split(/\r?\n/);
+		const outLines: string[] = [];
+		let pts: number[] | null = null;
+		let remap: Map<number, number> | null = null;
+		for (const line of lines) {
+			if (line.startsWith('m=')) {
+				const fields = line.split(' ');
+				pts = fields.slice(3).map(Number).filter((n) => !isNaN(n));
+				remap = pts.some((n) => n > 127 || n < 0)
+					? new Map(pts.map((n, i) => [n, 96 + i]))
+					: null;
+				if (remap)
+					outLines.push(
+						[...fields.slice(0, 3), ...pts.map((n) => remap!.get(n))].join(' ')
+					);
+				else outLines.push(line);
+				continue;
+			}
+			if (remap && /^(a=rtpmap|a=rtcp-fb|a=fmtp):/.test(line)) {
+				const [head, ...rest] = line.split(' ');
+				const [attr, ptStr] = head.split(':');
+				const n = remap.get(Number(ptStr));
+				if (n != null) outLines.push(`${attr}:${n} ${rest.join(' ')}`);
+				else outLines.push(line);
+				continue;
+			}
+			if (extGlobal && line.startsWith('a=extmap:')) {
+				const m = /^a=extmap:(\d+)((?:\/\w+)?)\s+(\S+.*)$/.exec(line);
+				if (m) {
+					const gid = extGlobal.get(m[3].split(/\s/)[0]);
+					if (gid != null) {
+						outLines.push(`a=extmap:${gid}${m[2]} ${m[3]}`);
+						continue;
+					}
+				}
+			}
+			outLines.push(line);
+		}
+		return outLines.join('\r\n');
+	};
+	const sendSdp = (p: Peer, desc: RTCSessionDescription) => {
+		send(p, { sid: ourSid, sdp: { type: desc.type, sdp: fixSdp(desc.sdp) } });
 	};
 
 	// app frames ride BOTH transports: the 'cic' datachannel when it's open
@@ -190,7 +288,7 @@ export async function openWsRoom(
 				await keyP,
 				pt
 			);
-			send(p, { sid: selfId, app: b64(iv) + '.' + b64(ct) });
+			send(p, { sid: ourSid, app: b64(iv) + '.' + b64(ct) });
 		} catch {}
 	};
 
@@ -295,10 +393,38 @@ export async function openWsRoom(
 		} catch {}
 	};
 
+	// detached pcs are parked here (never closed) — bounded so a flapping
+	// peer can't leak unbounded webrtcbin instances
+	const abandoned: RTCPeerConnection[] = [];
+	const detachPc = (p: Peer) => {
+		p.pc.onconnectionstatechange = null;
+		p.pc.ondatachannel = null;
+		p.pc.onnegotiationneeded = null;
+		p.pc.onicecandidate = null;
+		p.pc.ontrack = null;
+		if (p.dc) {
+			p.dc.onopen = null;
+			p.dc.onmessage = null;
+			p.dc.onclose = null;
+			try { p.dc.close(); } catch {}
+			p.dc = null;
+		}
+		abandoned.push(p.pc);
+		if (abandoned.length > 32) abandoned.shift();
+	};
+
 	const dropPeer = (p: Peer) => {
 		peers.delete(p.sid);
 		byBusId.delete(p.busId);
-		void safeClose(p);
+		if (alwaysInitiate) {
+			// this WebKitGTK build wedges the whole WebProcess in pc.close()
+			// — gst_webrtc_bin_change_state joins an rtpsession thread that
+			// can be mid-task (or never startable again). Detach + abandon
+			// instead of closing: a bounded pc leak beats a dead app.
+			detachPc(p);
+		} else {
+			void safeClose(p);
+		}
 		if (p.joined) leaveListeners.forEach((fn) => fn(p.sid));
 	};
 
@@ -320,7 +446,7 @@ export async function openWsRoom(
 	const wirePc = (p: Peer) => {
 		const pc = p.pc;
 		pc.onicecandidate = (ev) => {
-			if (ev.candidate) send(p, { sid: selfId, cand: ev.candidate.toJSON() });
+			if (ev.candidate) send(p, { sid: ourSid, cand: ev.candidate.toJSON() });
 		};
 		pc.onnegotiationneeded = () => {
 			// initiators fire this exactly once, right after the pool + dc are
@@ -335,7 +461,7 @@ export async function openWsRoom(
 				.setLocalDescription()
 				.then(() => {
 					p.offered = true;
-					if (pc.localDescription) send(p, { sid: selfId, sdp: pc.localDescription });
+					if (pc.localDescription) sendSdp(p, pc.localDescription);
 				})
 				.catch(() => {})
 				.finally(() => {
@@ -381,29 +507,18 @@ export async function openWsRoom(
 		wireDc(p, p.pc.createDataChannel('cic'));
 	};
 
-	// Defense-in-depth only: with one-offer-ever semantics the two sides
-	// should never collide, so this path is not expected to trigger in normal
-	// operation. Kept in case a bug, a stale peer from before a reconnect, or
-	// a future code path reintroduces a collision — WebKitGTK builds without
-	// rollback support can otherwise wedge the pc in have-local-offer
-	// forever. Rebuild instead: fresh ICE/DTLS/SCTP, preserving the peer's
-	// role. Old handlers are detached first so pc.close() doesn't dropPeer()
-	// the peer we're about to keep, and this WebKitGTK build crashes the
-	// whole WebProcess if close() races an in-flight setLocalDescription —
-	// pendingLocalOp is awaited (bounded) before closing.
-	const rebuildPc = async (p: Peer) => {
-		const old = p.pc;
-		const oldDc = p.dc;
-		old.onconnectionstatechange = null;
-		old.ondatachannel = null;
-		old.onnegotiationneeded = null;
-		old.onicecandidate = null;
-		old.ontrack = null;
-		try {
-			await Promise.race([p.pendingLocalOp.catch(() => {}), delay(500)]);
-		} catch {}
-		try { oldDc?.close(); } catch {}
-		try { old.close(); } catch {}
+	// Defense-in-depth: with one-offer-ever semantics the two sides should
+	// never collide, but simultaneous joins (each sees the other in
+	// welcome.members), stale bus members, or a reconnecting peer can still
+	// produce a second offer. Resolving it requires a fresh pc — and this
+	// WebKitGTK build can deadlock on setLocalDescription against an
+	// already-PLAYING webrtcbin AND crash outright if close() races an
+	// in-flight local op that may never settle. So the old pc is never
+	// closed: handlers are detached and it is abandoned (ICE never starts
+	// on an unanswered offer, so it simply idles). Rare path — a bounded
+	// leak beats a hung WebProcess.
+	const abandonToAcceptor = (p: Peer) => {
+		detachPc(p);
 		if (p.joined) leaveListeners.forEach((fn) => fn(p.sid));
 		// active local publishes are NOT auto-restored onto the fresh pc — the
 		// composite re-offers active streams on peer-join anyway
@@ -417,17 +532,20 @@ export async function openWsRoom(
 		p.makingOffer = false;
 		p.offered = false;
 		p.pendingLocalOp = Promise.resolve();
+		p.initiator = false;
 		p.pc = new RTCPeerConnection(rtcConfig);
 		wirePc(p);
-		if (p.initiator) initOfferSide(p); // fresh pc needs its pool + dc + offer
 	};
 
 	const onMsg = async (busId: string, sig: Sig) => {
-		// an offer from a peer we don't know yet means we never contacted them —
-		// we're the acceptor for this pair (see file header)
+		// an offer from a peer we don't know yet: always-initiator runtimes
+		// answer it with a counter-offer (their engine cannot apply a remote
+		// offer at all — the remote's sid tiebreak then makes IT the acceptor);
+		// everyone else becomes the acceptor for this pair (see file header)
 		let p = findPeer(busId, sig.sid);
 		if (!p && sig.sdp?.type === 'offer') {
-			p = newPeer(busId, sig.sid, false);
+			p = newPeer(busId, sig.sid, alwaysInitiate);
+			if (alwaysInitiate) initOfferSide(p);
 		} else if (p && p.busId !== busId) {
 			byBusId.delete(p.busId);
 			p.busId = busId; // peer rejoined the bus under a new member id
@@ -454,23 +572,40 @@ export async function openWsRoom(
 				} catch {}
 			});
 		}
-		const { pc } = p;
+		let { pc } = p;
 		try {
 			if (sig.sdp) {
-				// a remote offer while we're non-stable means the other side
-				// offered a second time — impossible under one-offer-ever
-				// semantics, so treat as corruption and rebuild. Acceptor on a
-				// fresh/stable pc is the only legitimate offer-taker.
-				const offerCollision =
-					sig.sdp.type === 'offer' && (p.makingOffer || pc.signalingState !== 'stable');
-				p.ignoreOffer = p.initiator && offerCollision;
-				if (p.ignoreOffer) return;
-				if (offerCollision) {
-					try {
-						await pc.setLocalDescription({ type: 'rollback' });
-					} catch {
-						await rebuildPc(p);
+				if (sig.sdp.type === 'offer') {
+					if (p.initiator) {
+						// both sides offered (simultaneous join, stale member):
+						// deterministic winner = larger trystero selfId keeps its
+						// offer. The loser abandons its pc (never closes it — see
+						// abandonToAcceptor) and answers the winner's offer, so
+						// exactly one pair survives. An offer landing on our
+						// initiator pc at ANY signaling state must never be
+						// answered — a second setLocalDescription on a PLAYING
+						// webrtcbin deadlocks the whole WebProcess.
+						// always-initiator peers never become the acceptor —
+						// their engine can't apply an offer at all, so even a
+						// lost tiebreak means ignoring (the pair just doesn't
+						// form) rather than wedging on an answer
+						if (!alwaysInitiate && sig.sid && sig.sid > ourSid) {
+							abandonToAcceptor(p);
+							pc = p.pc;
+						} else {
+							p.ignoreOffer = true;
+							return;
+						}
+					} else if (pc.remoteDescription || pc.signalingState !== 'stable') {
+						// a second offer on a pc that already took one — remote
+						// violated one-offer-ever (reconnect, stale state). Never
+						// answer on a negotiated/pending pc; abandon + fresh
+						// acceptor pc.
+						abandonToAcceptor(p);
+						pc = p.pc;
 					}
+				} else if (sig.sdp.type === 'answer' && (!p.initiator || !p.offered)) {
+					return; // answer we never asked for — protocol violation, drop
 				}
 				await p.pc.setRemoteDescription(sig.sdp);
 				if (sig.sdp.type === 'offer') {
@@ -486,7 +621,7 @@ export async function openWsRoom(
 					const localOp = p.pc.setLocalDescription();
 					p.pendingLocalOp = localOp.catch(() => {});
 					await localOp;
-					if (p.pc.localDescription) send(p, { sid: selfId, sdp: p.pc.localDescription });
+					if (p.pc.localDescription) sendSdp(p, p.pc.localDescription);
 				}
 			} else if (sig.cand) {
 				try {
@@ -542,7 +677,26 @@ export async function openWsRoom(
 				}
 				if (f.t === 'welcome' && f.id) {
 					myBusId = f.id;
-					for (const m of f.members ?? []) if (m !== myBusId) void offerTo(m);
+					// stagger offers: when two peers join ~simultaneously each
+					// can appear in the other's member list, producing a
+					// both-offer collision. A short jitter lets their offer
+					// land first and create the acceptor peer below (byBusId
+					// check), shrinking the collision window to sub-jitter
+					// races — the sid tiebreak in onMsg resolves the rest.
+					for (const m of f.members ?? [])
+						if (m !== myBusId)
+							setTimeout(() => {
+								if (!disposed && !byBusId.has(m)) void offerTo(m);
+							}, Math.random() * 120);
+				} else if (f.t === 'join' && f.id && f.id !== myBusId) {
+					// newcomer arrived after our welcome — for always-initiator
+					// runtimes we can't wait for their offer (we'd have to
+					// answer it to connect), so we initiate ourselves. On other
+					// runtimes the newcomer's own offer is the pair-former.
+					if (alwaysInitiate)
+						setTimeout(() => {
+							if (!disposed && !byBusId.has(f.id!)) void offerTo(f.id!);
+						}, Math.random() * 120);
 				} else if (f.t === 'msg' && f.from && f.data) {
 					void onMsg(f.from, f.data);
 				} else if (f.t === 'leave' && f.id) {
@@ -648,7 +802,12 @@ export async function openWsRoom(
 		leave: async () => {
 			disposed = true;
 			if (reconnectTimer) clearTimeout(reconnectTimer);
-			await Promise.all([...peers.values()].map(safeClose));
+			if (alwaysInitiate) {
+				// never close pcs on this runtime — see dropPeer
+				for (const p of [...peers.values()]) detachPc(p);
+			} else {
+				await Promise.all([...peers.values()].map(safeClose));
+			}
 			peers.clear();
 			ws?.close();
 			ws = null;

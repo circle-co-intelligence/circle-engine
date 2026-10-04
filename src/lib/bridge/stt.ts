@@ -101,6 +101,8 @@ export class CaptionSocket extends LocalSocket {
 	protected onClose() {
 		this.pipeline.dispose(); // release the wasm recognizer — sockets churn
 		this.pipeline = new CaptionPipeline();
+		this.fanout?.dispose();
+		this.fanout = null;
 	}
 }
 
@@ -243,22 +245,33 @@ export class TranslationFanout {
 	private ttsReady: boolean | null = null;
 	private seq = 0;
 	// wllama is a single-session engine — delivery serializes through pump().
-	// Partials are latest-wins (a 135M local model can't chase every partial);
+	// Partials are latest-wins (a small local model can't chase every partial);
 	// finals queue in order and always run. Crucially, pending partials never
 	// accumulate chain nodes — under sustained speech, per-partial enqueues
 	// starve finals (and their TTS work) at the tail of a growing queue.
 	private finals: Job[] = [];
 	private pendingPartial: Job | null = null;
 	private pumping = false;
+	// subscription diffing for replay: segments emitted before a subscriber
+	// declared their language used to drop silently — a late registerer sat
+	// silent until the next utterance. Recent finals are buffered and replayed
+	// into only the newly-added (lang,peer) lanes on each subscription change.
+	private recentFinals: Omit<Job, 'targets'>[] = [];
+	private servedTargets = new Map<string, Set<string>>(); // lang → peerIds
+	private unwatch: () => void;
 
 	constructor(
 		private session: RoomSession,
 		private sink: Emit
-	) {}
+	) {
+		this.unwatch = session.watchTrTargets(() => this.notifyTargets());
+	}
 
-	/** fan a locally-ASR'd segment out to every declared translation lane */
-	emit(seg: { text: string; final: boolean }, generation: string, sourceMeshId: string, sourceProdId: string) {
-		if (!seg.text) return;
+	dispose() {
+		this.unwatch();
+	}
+
+	private computeTargets(): Map<string, string[]> {
 		const s = this.session;
 		const targets = new Map<string, string[]>(); // lang → mesh peerIds
 		for (const [peerId, langs] of Object.entries(s.peerLangs))
@@ -268,6 +281,49 @@ export class TranslationFanout {
 		for (const lang of s.selfLangs)
 			if (lang !== 'none' && lang !== s.selfLang)
 				targets.set(lang, [...(targets.get(lang) ?? []), s.selfId]);
+		return targets;
+	}
+
+	private markServed(targets: Map<string, string[]>) {
+		for (const [lang, peers] of targets) {
+			const known = this.servedTargets.get(lang) ?? new Set<string>();
+			for (const p of peers) known.add(p);
+			this.servedTargets.set(lang, known);
+		}
+	}
+
+	/** subscription set changed — replay buffered finals to newly-added lanes */
+	private notifyTargets() {
+		const targets = this.computeTargets();
+		// prune departed lanes so a rejoining peer counts as new again
+		for (const [lang, known] of this.servedTargets)
+			for (const p of [...known]) if (!targets.get(lang)?.includes(p)) known.delete(p);
+		const added = new Map<string, string[]>();
+		for (const [lang, peers] of targets) {
+			const known = this.servedTargets.get(lang);
+			for (const p of peers)
+				if (!known?.has(p)) added.set(lang, [...(added.get(lang) ?? []), p]);
+		}
+		this.markServed(targets);
+		if (!added.size || !this.recentFinals.length) return;
+		void warmTts();
+		// catch the lane up on the last two finals only — deeper backlog is
+		// the transcript pane's job, not the caption lane's
+		for (const f of this.recentFinals.slice(-2))
+			this.finals.push({ ...f, targets: added });
+		void this.pump();
+	}
+
+	/** fan a locally-ASR'd segment out to every declared translation lane */
+	emit(seg: { text: string; final: boolean }, generation: string, sourceMeshId: string, sourceProdId: string) {
+		if (!seg.text) return;
+		const s = this.session;
+		if (seg.final) {
+			this.recentFinals.push({ seg, generation, sourceMeshId, sourceProdId });
+			if (this.recentFinals.length > 4) this.recentFinals.shift();
+		}
+		const targets = this.computeTargets();
+		this.markServed(targets);
 		if (!targets.size) {
 			console.debug('[stt] fanout: no targets', JSON.stringify({
 				selfLangs: s.selfLangs, selfLang: s.selfLang, peerLangs: s.peerLangs, final: seg.final

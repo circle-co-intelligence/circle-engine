@@ -17,7 +17,7 @@ fetch_pack() { # url dest file?
 }
 
 fetch_pack "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-wasm-simd-v1.13.8-vad.tar.bz2" "models/vad"
-fetch_pack "https://huggingface.co/bartowski/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct-Q4_K_M.gguf" "models/llm" "SmolLM2-135M-Instruct-Q4_K_M.gguf"
+fetch_pack "https://huggingface.co/bartowski/SmolLM2-360M-Instruct-GGUF/resolve/main/SmolLM2-360M-Instruct-Q4_K_M.gguf" "models/llm" "SmolLM2-360M-Instruct-Q4_K_M.gguf"
 
 # heavy packs — opt-in via FETCH_HEAVY=1 (ASR ~175MB, TTS ~85MB)
 if [[ "${FETCH_HEAVY:-0}" == "1" ]]; then

@@ -24,11 +24,11 @@
 		},
 		"llm": {
 			"runtime": "wllama",
-			"url": "https://huggingface.co/bartowski/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct-Q4_K_M.gguf",
+			"url": "https://huggingface.co/bartowski/SmolLM2-360M-Instruct-GGUF/resolve/main/SmolLM2-360M-Instruct-Q4_K_M.gguf",
 			"license": "Apache-2.0",
-			"licenseUrl": "https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct",
+			"licenseUrl": "https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct",
 			"dest": "models/llm",
-			"file": "SmolLM2-135M-Instruct-Q4_K_M.gguf"
+			"file": "SmolLM2-360M-Instruct-Q4_K_M.gguf"
 		}
 	}
 }

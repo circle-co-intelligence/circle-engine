@@ -930,6 +930,8 @@ class RoomBridge {
 		this.captionFailTimer = null;
 		for (const pipe of this.speechStreams.values()) pipe.dispose();
 		this.speechStreams.clear();
+		this.fanout?.dispose();
+		this.fanout = null;
 		// the session belongs to the new bridge — detach so a later socket close
 		// doesn't schedule its teardown
 		this.session = null;
@@ -943,6 +945,8 @@ class RoomBridge {
 		this.captionFailTimer = null;
 		for (const pipe of this.speechStreams.values()) pipe.dispose();
 		this.speechStreams.clear();
+		this.fanout?.dispose();
+		this.fanout = null;
 		if (this.session) {
 			const s = this.session;
 			// drop the targeted-send registration — the socket is gone

@@ -10,7 +10,7 @@ import { Wllama } from '@wllama/wllama';
 import { WLLAMA_WASM } from './translate';
 
 export interface MiloConfig {
-	modelUrl: string; // e.g. /models/llm/SmolLM2-135M-Instruct-Q4_K_M.gguf
+	modelUrl: string; // e.g. /models/llm/SmolLM2-360M-Instruct-Q4_K_M.gguf
 	maxContextTokens: number;
 }
 
@@ -51,7 +51,13 @@ export class Milo {
 				{ role: 'system', content: SYSTEM },
 				{ role: 'user', content: `Transcript window:\n${context}\n\nQuestion: ${prompt}` }
 			],
-			{ nPredict: 96 }
+			{
+				nPredict: 96,
+				// keep the small instruct model grounded: mild temp, tight
+				// nucleus, and a repeat penalty over the context so it can't
+				// loop or echo transcript lines back
+				sampling: { temp: 0.7, top_p: 0.9, top_k: 40, penalty_repeat: 1.15, penalty_last_n: 128 }
+			}
 		);
 		if (gen !== this.generation) return ''; // interrupted while generating
 		// small instruct models often echo the transcript's "Milo:" speaker

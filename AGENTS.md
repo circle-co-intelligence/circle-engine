@@ -78,26 +78,31 @@ silently keep serving the previous frontend snapshot. Force re-embedding by
 touching `src-tauri/src/lib.rs` (or `cargo clean -p circle`) before rebuilding
 whenever `build/` changed.
 
-### Known WebKitGTK caveat: offer-collision (glare) wedge
-`src/lib/net/wsRoom.ts`'s glare handling rebuilds the `RTCPeerConnection` when
-`setLocalDescription({type:'rollback'})` is unsupported (true on the
-WebRTC-enabled WebKitGTK 2.48.7 build from `scripts/setup-webkit-webrtc.sh`).
-Closing the old pc while its `setLocalDescription`/`createAnswer` is still
-in-flight used to crash the whole WebProcess outright; `pendingLocalOp` is now
-awaited (bounded to 500ms) before any `close()`, which reliably prevents the
-crash. However, when the *rebuilt* pc then has to answer a real (non-loopback,
-STUN-routed) remote offer carrying live audio+video m-lines, `setLocalDescription`
-on that answer has been observed to never settle on this WebKit build — the
-pc (and eventually the whole WebProcess's ability to run further webdriver
-scripts) becomes unresponsive, though the process itself keeps running. This
-only reproduces when the native peer is the one that raced an offer first
-(`offerTo`) and then received a colliding remote offer; a peer that joins
-*after* the remote side already holds the floor (no collision) negotiates,
-connects, and reaches `ice: completed` / `sig: stable` normally. Root cause is
-believed to be internal to this patched webrtcbin/GStreamer build, not the
-application protocol — browser↔browser (Chromium) media was re-verified
-end-to-end after every fix in this file (bidirectional `audio:live`+`video:live`
-receivers). A true fix likely requires a WebKitGTK build with native
-`setLocalDescription({type:'rollback'})` support, or redesigning the native
-lane to avoid ever racing an offer (e.g. always wait for `welcome.members`
-ordering to assign polite/impolite roles before offering).
+### Known WebKitGTK caveat: this runtime is not stable (native parked)
+The WebRTC-enabled WebKitGTK 2.48.7 build (`scripts/setup-webkit-webrtc.sh`)
+has multiple webrtcbin failure modes, all outside app code:
+
+- Applying a remote offer can stall webrtcbin's `_set_description_task`
+  (observed both wedging permanently AND succeeding — timing-dependent).
+- `pc.close()` on a PLAYING webrtcbin joins an rtpsession thread that may
+  never exit — deadlocks the main thread; >10s → WebKit IPC watchdog
+  `crashAfter10Seconds` SIGABRTs the whole WebProcess.
+- `addIceCandidate` → `descriptionsFromWebRTCBin` synchronously queries the
+  element and can block the same way.
+- Its offerer path IS healthy: offers negotiate, ICE/DTLS complete, media
+  flows (verified: browser↔native `connected`, inbound audio RTP bytes).
+
+`src/lib/net/wsRoom.ts` therefore carries ALWAYS_INITIATE mode (activated by
+`location.protocol === 'tauri:'` or `VITE_CIC_ALWAYS_INITIATE=1`): native
+emits a `~`-prefixed sid so it always wins the glare tiebreak, ignores
+incoming offers and counter-offers instead (the remote's own tiebreak makes
+IT answer), proactively offers on bus `join` frames, and never calls
+`pc.close()` — peers are detached and parked (bounded `abandoned` ring)
+because closing is itself a crash hazard on this runtime.
+
+Native status: NOT demo-ready. Even with all hazards routed around, the
+WebProcess still intermittently aborts under load. The durable fix is a
+WebKitGTK build with ENABLE_WEB_RTC=ON built against the host's GStreamer
+(or an upstream release that ships it) — the manafishrov image tops out at
+2.48.7. Browser↔browser is unaffected by any of this (all quirks are
+gated on `alwaysInitiate`) and re-verified end-to-end.

@@ -278,6 +278,11 @@ export class RoomSession {
 			// ours, so default-unmuted reporting makes prod's stall monitor read
 			// a locally-muted (silent) track as a transport stall and rejoin
 			this.handle.sendRealtime({ t: 'muted', audio: this.selfMuted, video: this.videoMuted }, peerId);
+			// tr-lang is declared once at subscribe time — a late joiner never
+			// saw it, so a joiner who becomes a caption source wouldn't know
+			// who subscribes to which languages. Re-announce like muted state.
+			if (this.selfLangs.length)
+				this.handle.sendRealtime({ t: 'tr-lang', lang: this.selfLang, langs: this.selfLangs }, peerId);
 			// late joiners never saw our live op broadcasts — replay the signed
 			// log so they learn lobby/password/breakout state (deduped by opId)
 			if (this.oplog.entries.length)
@@ -323,6 +328,7 @@ export class RoomSession {
 			delete this.peerSfuSessions[peerId];
 			delete this.peerSfuTracks[peerId];
 			delete this.peerLangs[peerId];
+			this.notifyTrTargets();
 			delete this.caps[peerId];
 			dropPeerKey(peerId);
 			this.syncSeats();
@@ -591,6 +597,8 @@ export class RoomSession {
 				// same race as op-sync: the onPeerJoin muted announce can beat
 				// the DC open — re-send now that hello proves it live
 				this.handle.sendRealtime({ t: 'muted', audio: this.selfMuted, video: this.videoMuted }, peerId);
+				if (this.selfLangs.length)
+					this.handle.sendRealtime({ t: 'tr-lang', lang: this.selfLang, langs: this.selfLangs }, peerId);
 				if (msg.cap[0]) {
 					registerPeerKey(peerId, msg.cap[0]);
 					// ops whose signatures couldn't verify before this key arrived
@@ -803,6 +811,7 @@ export class RoomSession {
 			case 'tr-lang': {
 				this.peerLangs = { ...this.peerLangs, [peerId]: msg.langs };
 				this.syncTrFanout();
+				this.notifyTrTargets();
 				break;
 			}
 			case 'tr-segment':
@@ -1710,6 +1719,21 @@ export class RoomSession {
 		this.selfLangs = langs;
 		this.handle.sendRealtime({ t: 'tr-lang', lang, langs });
 		this.syncTrFanout();
+		this.notifyTrTargets();
+	}
+
+	// translation-fanout subscribers (stt.ts TranslationFanout) learn every
+	// subscription-set change here — declared langs, a peer's tr-lang, a peer
+	// leaving — so they can replay buffered finals to newly-added lanes
+	private trTargetWatchers = new Set<() => void>();
+	watchTrTargets(fn: () => void): () => void {
+		this.trTargetWatchers.add(fn);
+		return () => {
+			this.trTargetWatchers.delete(fn);
+		};
+	}
+	private notifyTrTargets() {
+		for (const fn of this.trTargetWatchers) fn();
 	}
 
 	/** authority owns the tr-fanout op — lanes = union of all declared langs */

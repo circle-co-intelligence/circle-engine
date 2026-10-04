@@ -165,7 +165,7 @@ async function fetchIceServers(): Promise<RTCConfiguration> {
 	} catch {
 		// no broker configured — STUN/env only
 	}
-	return { iceServers };
+	return { iceServers, bundlePolicy: 'max-bundle' };
 }
 
 interface Lane {
