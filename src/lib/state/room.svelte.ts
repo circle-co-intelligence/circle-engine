@@ -1250,7 +1250,7 @@ export class RoomSession {
 		// adapter URL is dialed by the SFU — wants ws(s)://
 		const base = (
 			(import.meta.env as Record<string, string | undefined>).VITE_CIC_DSP_ENDPOINT ??
-			'https://cic-dsp.terexmaps.workers.dev'
+			'https://cic-dsp.regenleadership.workers.dev'
 		).replace(/^http/, 'ws');
 		const res = await fetch(
 			`${(import.meta.env as Record<string, string | undefined>).VITE_CIC_SFU_ENDPOINT ?? '/api/sfu'}/sessions/${this.sfuSession}/adapters/new`,

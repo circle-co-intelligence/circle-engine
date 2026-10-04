@@ -3,7 +3,7 @@
  * Same-origin so the client needs no cross-origin CSP exception and the
  * worker URL stays an internal detail.
  */
-const UPSTREAM = 'https://cic-ai-gateway.terexmaps.workers.dev';
+const UPSTREAM = 'https://cic-ai-gateway.regenleadership.workers.dev';
 
 interface Ctx {
 	request: Request;

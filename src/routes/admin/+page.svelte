@@ -9,7 +9,7 @@
 	import { onMount } from 'svelte';
 
 	const GW = (import.meta.env.VITE_CIC_AI_ENDPOINT as string | undefined) ??
-		'https://cic-ai-gateway.terexmaps.workers.dev';
+		'https://cic-ai-gateway.regenleadership.workers.dev';
 
 	type Phase = 'loading' | 'unconfigured' | 'denied' | 'ready';
 	interface RoomRow {

@@ -17,11 +17,11 @@ both — only build-time `VITE_CIC_*` env differs.
 | Metering | MeterBus DO on ai-gateway | `METER` binding |
 | Admin console | `/admin/*` on ai-gateway | `CF_ACCESS_TEAM`, `CF_ACCESS_AUD`, `GRANT_SECRET` |
 
-**Verified deployment (terexmaps account, `circle-engine-7n9.pages.dev`):**
+**Verified deployment (regenleadership account, `circle-engine.pages.dev`):**
 all six workers (`cic-signaling`, `cic-sfu`, `cic-ice`, `cic-push`, `cic-dsp`,
 `cic-ai-gateway`) deploy to the same account via `wrangler deploy` from
 `workers/*/`. Pages Functions proxy `/sig`, `/api/ai`, `/api/push` to
-`*.terexmaps.workers.dev`; `/api/ai/pack/llm` serves the on-device LLM
+`*.regenleadership.workers.dev`; `/api/ai/pack/llm` serves the on-device LLM
 (CORS/CORP-safe). Set Pages Function secrets under project → Settings →
 Functions: `TURN_KEY_ID` + `TURN_API_TOKEN` (CF dashboard → Realtime →
 TURN → Create key) and `CALLS_APP_ID` + `CALLS_APP_SECRET` (Realtime →

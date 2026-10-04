@@ -15,7 +15,7 @@
 | D11 | `speakingTimerEveryone`, `heartMode`, `canManageRoom` | confirmed | in roomConfig schema | aligned |
 | D12 | Two-step bypass prevention | not directly observable | structurally impossible in machine def | aligned |
 
-## Browser verification matrix (live Cloudflare deploy, `circle-engine-7n9.pages.dev`)
+## Browser verification matrix (live Cloudflare deploy, `circle-engine-7ny.pages.dev`)
 
 | Engine | Result |
 |---|---|
