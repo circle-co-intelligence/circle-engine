@@ -33,6 +33,45 @@ export async function capture(opts: { video?: boolean; audio?: boolean } = { vid
 	};
 }
 
+/**
+ * The vendored frontend owns getUserMedia — the bridge joins with
+ * capture:false and never holds a MediaStream. install.ts tracks every stream
+ * it hands out so the session can borrow the participant's already-live feed
+ * for ISO recording; a second capture would double-open devices and could
+ * record a camera the user deliberately left off.
+ */
+const grantedStreams = new Set<MediaStream>();
+const feedListeners = new Set<() => void>();
+
+export function trackLocalStream(stream: MediaStream) {
+	grantedStreams.add(stream);
+	for (const t of stream.getTracks())
+		t.addEventListener('ended', () => {
+			if (stream.getTracks().every((x) => x.readyState === 'ended')) grantedStreams.delete(stream);
+		});
+	for (const l of feedListeners) l();
+}
+
+/** richest still-live captured stream (the participant's published feed) */
+export function localFeed(): MediaStream | null {
+	let best: MediaStream | null = null;
+	let bestLive = 0;
+	for (const s of grantedStreams) {
+		const live = s.getTracks().filter((t) => t.readyState === 'live').length;
+		if (live > bestLive) {
+			best = s;
+			bestLive = live;
+		}
+	}
+	return best;
+}
+
+/** fires when the frontend acquires media — lets a pending ISO record start late */
+export function onLocalFeed(fn: () => void): () => void {
+	feedListeners.add(fn);
+	return () => feedListeners.delete(fn);
+}
+
 /** attach E2EE cryptors to all senders/receivers on trystero's peer connections */
 export function wireE2EE(room: RoomHandle, e2ee: E2EESession) {
 	if (!e2ee.supported) return;

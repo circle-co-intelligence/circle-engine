@@ -9,7 +9,7 @@ import { chromium } from '@playwright/test';
 // Host = lexicographic-min Trystero peerId — nondeterministic per run, so the
 // probe detects which page holds host controls and drives host actions there.
 
-const CODE = String(Math.floor(100000 + Math.random() * 900000));
+const CODE = process.env.PROBE_CODE ?? String(Math.floor(100000 + Math.random() * 900000));
 const BASE = process.env.PROBE_BASE ?? 'http://localhost:5173';
 const URL = `${BASE}/room/${CODE}`;
 console.log('room code:', CODE);
@@ -242,14 +242,14 @@ await host.waitForTimeout(2500);
 await guest.waitForTimeout(1500);
 const rNotice = await guest.locator('[aria-label="Recording notice"]').count();
 console.log('  guest recording notice visible:', rNotice > 0);
-await guest.screenshot({ path: '/tmp/shot-rec-guest.png' });
+await guest.screenshot({ path: '/tmp/shot-rec-guest.png' }).catch(() => {});
 if (rNotice) console.log('  guest consent:', await clickText(guest, /stay and continue/i));
 await host.waitForTimeout(4000);
 console.log('  recording-ready received:', hits[hostTag].has('recording-ready'));
 const hostRec = await host.locator('[aria-label="Recording active. View who is recording"]').count();
 const guestRec = await guest.locator('[aria-label="Recording active. View who is recording"]').count();
 console.log('  recording badge — host:', hostRec > 0, '| guest:', guestRec > 0);
-await host.screenshot({ path: '/tmp/shot-rec.png' });
+await host.screenshot({ path: '/tmp/shot-rec.png' }).catch(() => {});
 
 // ---------- C) breakouts ----------
 console.log('--- C: breakouts ---');
@@ -346,8 +346,8 @@ for (let attempt = 0; attempt < 10 && !hits[hostTag].has('breakout-close'); atte
 console.log('  close:', closeBtn);
 await host.waitForTimeout(2500);
 console.log('  breakout-close sent:', hits[hostTag].has('breakout-close'));
-await host.screenshot({ path: '/tmp/shot-breakouts.png' });
-await guest.screenshot({ path: '/tmp/shot-breakouts-guest.png' });
+await host.screenshot({ path: '/tmp/shot-breakouts.png' }).catch(() => {});
+await guest.screenshot({ path: '/tmp/shot-breakouts-guest.png' }).catch(() => {});
 
 const guestTag = hostTag === 'a' ? 'b' : 'a';
 

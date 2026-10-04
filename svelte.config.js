@@ -27,6 +27,9 @@ const config = {
 				'connect-src': [
 					'self',
 					'wss:',
+					// blob: sherpa pack extraction + wllama blob-worker model
+					// fetch — fetch() to blob: URLs is connect-src governed
+					'blob:',
 					'ws://localhost:*',
 					'ws://127.0.0.1:*',
 					'http://localhost:*',

@@ -16,6 +16,7 @@ import { base } from '$app/paths';
 import { RoomSocket } from './roomBridge.svelte';
 import { CaptionSocket } from './stt';
 import { LocalSocket } from './localSocket';
+import { trackLocalStream } from '../media/capture';
 import type { RoomSession } from '../state/room.svelte';
 
 const LS_PREFIX = 'cic.ui.';
@@ -36,6 +37,7 @@ export function installCicShims(roomKey?: string) {
 	seedLocalStorage();
 	patchFetch();
 	patchWebSocket(roomKey);
+	patchGetUserMedia();
 	void import('../ui/capability').then((m) => m.capabilityGate());
 	// test seam: probes inject frames through the same entry path the app's own
 	// ws client uses (JSON → bridge.command) — real dispatch, no DOM flakiness
@@ -138,6 +140,7 @@ function patchFetch() {
 			path === '/api/ice' ||
 			path.startsWith('/api/sfu/') ||
 			path.startsWith('/api/ai/') ||
+			path.startsWith('/api/rec/') ||
 			path.startsWith('/api/push/')
 		)
 			return orig(input, init);
@@ -149,6 +152,24 @@ function patchFetch() {
 
 function json(body: unknown, status = 200): Response {
 	return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+}
+
+// ------------------------------------------------------------- getUserMedia
+
+/**
+ * Track every stream the frontend acquires — the session borrows the live
+ * feed for ISO recording (see capture.ts). Registration-only: the returned
+ * stream object is untouched and still owned by the app.
+ */
+function patchGetUserMedia() {
+	const md = navigator.mediaDevices;
+	if (!md?.getUserMedia) return;
+	const orig = md.getUserMedia.bind(md);
+	md.getUserMedia = async (constraints) => {
+		const stream = await orig(constraints);
+		trackLocalStream(stream);
+		return stream;
+	};
 }
 
 // ------------------------------------------------------------- WebSocket

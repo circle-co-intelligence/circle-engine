@@ -7,7 +7,7 @@ import { OpLog, authorityOf, LEASE_MS } from '../authority/authority';
 import { E2EESession } from '../crypto/e2ee';
 import { denyReasons, initPolicy, policyLoaded, type Actor } from '../policy/engine';
 import { electAll, type Capability, type Role } from '../roles/auction';
-import { capture, wireE2EE, type LocalMedia } from '../media/capture';
+import { capture, localFeed, onLocalFeed, wireE2EE, type LocalMedia } from '../media/capture';
 import { Recorder } from '../rec/recorder';
 import { NotesDoc } from '../notes/notes';
 import { BreakoutSession } from '../net/breakout.svelte';
@@ -483,8 +483,13 @@ export class RoomSession {
 			peers: [...this.peers], waiting: [...this.waiting.map((w) => w.id)],
 			held: [...this.heldPeers], denied: [...this.deniedPeers],
 			selfLang: this.selfLang, selfLangs: this.selfLangs, peerLangs: this.peerLangs,
+			recording: this.recording,
+			isoRunning: !!this.iso?.running,
+			consent: this.consents[this.selfId] ?? null,
 			media: {
-				local: this.localMedia?.stream.getTracks().map((t) => `${t.kind}:${t.readyState}`) ?? [],
+				local:
+					(this.localMedia?.stream ?? localFeed())?.getTracks().map((t) => `${t.kind}:${t.readyState}`) ??
+					[],
 				remote: Object.fromEntries(
 					Object.entries(this.remoteStreams).map(([p, s]) => [
 						p,
@@ -1451,6 +1456,8 @@ export class RoomSession {
 		this.miloStopNotice = { by: byPeerId, eventId: crypto.randomUUID() };
 	}
 
+	private isoFeedUnsub: (() => void) | null = null;
+
 	private async maybeRecord() {
 		// composite (dormant) + any future callers: filter tiles/mix to granters
 		this.recorder.setConsented(this.consentedPeers);
@@ -1459,14 +1466,24 @@ export class RoomSession {
 		}
 		// ISO: every CONSENTING seat records its own raw feed — a peer who
 		// denied or never answered produces no ISO track (fail-closed).
+		// The frontend owns getUserMedia (join runs capture:false), so borrow
+		// its published stream; if it hasn't acquired media yet, retry the
+		// gate once a feed appears.
+		const feed = this.localMedia?.stream ?? localFeed();
+		if (!feed && !this.isoFeedUnsub) {
+			this.isoFeedUnsub = onLocalFeed(() => {
+				this.isoFeedUnsub = null;
+				if (this.recording) void this.maybeRecord();
+			});
+		}
 		if (
-			this.localMedia && !this.witnessOnly && !this.producerOnly && !this.iso?.running &&
+			feed && !this.witnessOnly && !this.producerOnly && !this.iso?.running &&
 			this.consents[this.selfId] === 'granted'
 		) {
 			this.iso = new IsoRecorder(this.roomCode, this.roomSecret, this.selfId, () => this.paid());
 			this.iso.onSegment = (info) =>
 				this.handle.sendRealtime({ t: 'rec-manifest', ...info });
-			await this.iso.start(this.localMedia.stream).catch(() => {});
+			await this.iso.start(feed).catch((e) => console.warn('[iso] start failed', e));
 		}
 	}
 
@@ -1823,6 +1840,8 @@ export class RoomSession {
 		this.meter?.stop();
 		this.sensory?.stop();
 		void this.sipLeg?.stop();
+		this.isoFeedUnsub?.();
+		this.isoFeedUnsub = null;
 		await this.finishRecording();
 		this.notes.destroy();
 		this.localMedia?.stop();
