@@ -5,5 +5,5 @@ workers_dev = true
 
 # Secrets: wrangler secret put CALLS_APP_SECRET
 # Vars:    CALLS_APP_ID — set below once the Realtime app exists
-# [vars]
-# CALLS_APP_ID = "..."
+[vars]
+CALLS_APP_ID = "237632325fc14b780eaadaa47547edf5"
