@@ -1,3 +1,7 @@
 name = "circle-engine"
 pages_build_output_dir = "build"
 compatibility_date = "2025-01-01"
+
+[[r2_buckets]]
+binding = "REC_BUCKET"
+bucket_name = "cic-rec"
