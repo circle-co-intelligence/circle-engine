@@ -42,7 +42,9 @@ function announcementFromJson(s: string): EpochAnnouncement {
 }
 
 export class E2EESession {
-	readonly supported = supportsSFrame();
+	// supportsSFrame() returns {native, fallback} — truthy either way as an
+	// object; unsupported browsers must gate to false or FrameCryptor throws
+	readonly supported = supportsSFrame().native || supportsSFrame().fallback;
 	private ratchet: RoomRatchet;
 	// keyed per sender/receiver instance, not per peer — a pc carries several
 	// pooled senders+receivers per peer and per-role keys would orphan every
@@ -142,13 +144,21 @@ export class E2EESession {
 	private makeCryptor(role: 'sender' | 'receiver', peerId: string): FrameCryptor | null {
 		if (!this.supported || !this.worker) return null;
 		const myIndex = this.ratchet.selfPeerIndex ?? 0;
-		const c = new FrameCryptor({
-			worker: this.worker,
-			role,
-			peerId,
-			peerIndex: role === 'sender' ? myIndex : (this.peerIndexOf(peerId) ?? 0),
-			onWorkerError: (d) => console.warn('[sframe]', d)
-		});
+		// a browser that lies about insertable-streams support must degrade to
+		// unencrypted media, not crash — FrameCryptor throws on transit-only
+		let c: FrameCryptor;
+		try {
+			c = new FrameCryptor({
+				worker: this.worker,
+				role,
+				peerId,
+				peerIndex: role === 'sender' ? myIndex : (this.peerIndexOf(peerId) ?? 0),
+				onWorkerError: (d) => console.warn('[sframe]', d)
+			});
+		} catch (e) {
+			console.warn('[sframe] cryptor unavailable:', e);
+			return null;
+		}
 		const params = this.epochParams();
 		if (params && (role === 'sender' || peerId in params.peerIndexMap))
 			void c.setEpoch(params).catch(() => {});

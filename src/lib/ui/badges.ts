@@ -46,6 +46,17 @@ export function mountBadges(session: RoomSession): () => void {
 		'letter-spacing:.02em;box-shadow:0 2px 8px #0006';
 	root.appendChild(netpill);
 
+	// E2EE disclosure — REQUIRED when this browser can't do SFrame (no
+	// insertable streams): media flows DTLS-only, and saying nothing would
+	// silently overpromise the encryption posture
+	const e2eepill = document.createElement('div');
+	e2eepill.textContent = 'not end-to-end encrypted — browser lacks insertable streams';
+	e2eepill.title = 'Media is transport-encrypted (DTLS) but not end-to-end SFrame encrypted';
+	e2eepill.style.cssText =
+		'display:none;background:#b91c1c;color:#fff;padding:4px 10px;border-radius:999px;' +
+		'letter-spacing:.02em;box-shadow:0 2px 8px #0006';
+	root.appendChild(e2eepill);
+
 	document.body.appendChild(root);
 	const COLORS = ['#4a5568', '#e53e3e', '#d69e2e', '#38a169'];
 	const tick = window.setInterval(() => {
@@ -54,6 +65,7 @@ export function mountBadges(session: RoomSession): () => void {
 		for (let i = 0; i < bars.length; i++)
 			(bars[i] as HTMLElement).style.background = i <= level ? COLORS[level] || '#38a169' : '#4a556866';
 		pill.style.display = session.edgeProcessed ? 'block' : 'none';
+		e2eepill.style.display = session.e2ee.supported ? 'none' : 'block';
 		if (session.signalState === 'down') {
 			netpill.textContent = 'signaling unreachable — check connection, reload to retry';
 			netpill.style.background = '#b91c1c';
