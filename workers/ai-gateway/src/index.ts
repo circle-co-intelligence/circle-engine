@@ -437,9 +437,9 @@ async function pack(kind: string): Promise<Response> {
 	if (!up.ok || !up.body) return json({ error: `upstream ${up.status}` }, 502);
 	return new Response(up.body, {
 		headers: {
+			...cors,
 			'content-type': kind === 'llm' ? 'application/octet-stream' : 'application/x-bzip2',
-			'cache-control': 'public, max-age=2592000, immutable',
-			...cors
+			'cache-control': 'public, max-age=2592000, immutable'
 		}
 	});
 }
