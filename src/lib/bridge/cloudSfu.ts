@@ -15,6 +15,7 @@
  * Worker proxy holding the app credentials; the client never sees them.
  */
 import type { RoomSession } from '../state/room.svelte';
+import { localAccount } from './account';
 
 type Frame = Record<string, unknown>;
 interface BridgeLike {
@@ -56,11 +57,16 @@ function parseMids(sdp: string): SdpSection[] {
 async function api<T = Record<string, unknown>>(
 	path: string,
 	body?: unknown,
-	method?: string
+	method?: string,
+	auth?: { room?: string; account?: string }
 ): Promise<T> {
 	const res = await fetch(`${endpoint()}${path}`, {
 		method: method ?? (body === undefined ? 'GET' : 'POST'),
-		headers: { 'content-type': 'application/json' },
+		headers: {
+			'content-type': 'application/json',
+			...(auth?.room ? { 'x-cic-room': auth.room } : {}),
+			...(auth?.account ? { 'x-cic-account': auth.account } : {})
+		},
 		body: body === undefined ? undefined : JSON.stringify(body)
 	});
 	if (!res.ok) throw new Error(`sfu ${path} → ${res.status}`);
@@ -116,7 +122,10 @@ export class CloudSfu {
 			// also describes the recvonly sections SFU pulls created, and
 			// those must not be (re)registered as local publications.
 			if (!this.sfuSessionId) {
-				const created = await api<{ sessionId: string }>('/sessions/new', undefined, 'POST');
+				const created = await api<{ sessionId: string }>('/sessions/new', undefined, 'POST', {
+					room: this.session?.roomCode,
+					account: localAccount()?.accountId
+				});
 				this.sfuSessionId = created.sessionId;
 			}
 			const fresh = parseMids(sdpOffer).filter(
@@ -180,7 +189,10 @@ export class CloudSfu {
 				if (this.session?.witnessOnly) {
 					// audience lane: receive-only — create the session for pulls
 					// without ever publishing (quadratic→linear egress at scale)
-					const created = await api<{ sessionId: string }>('/sessions/new', undefined, 'POST');
+					const created = await api<{ sessionId: string }>('/sessions/new', undefined, 'POST', {
+						room: this.session?.roomCode,
+						account: localAccount()?.accountId
+					});
 					this.sfuSessionId = created.sessionId;
 				} else {
 					// no Calls session until our first publish — stash the want

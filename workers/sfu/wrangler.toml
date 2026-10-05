@@ -3,6 +3,14 @@ main = "src/index.ts"
 compatibility_date = "2025-01-01"
 # pinned: all circle-engine resources live on the regenleadership account
 account_id = "cf1f279501abeda01c1260a60cf95f5f"
+
+# MeterBus DO (defined in cic-ai-gateway) — funding gate on sessions/new:
+# paid lanes need a covering pool (sponsor → account → room). Unbound →
+# gate off (self-host default).
+[[durable_objects.bindings]]
+name = "METER"
+class_name = "MeterBus"
+script_name = "cic-ai-gateway"
 workers_dev = true
 
 # Secrets: wrangler secret put CALLS_APP_SECRET
