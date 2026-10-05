@@ -22,6 +22,18 @@ const browser = await chromium.launch({
 
 const joinAs = async (name, witness = false) => {
 	const p = await (await browser.newContext({ permissions: ['microphone', 'camera'] })).newPage();
+	await p.addInitScript(() => {
+		window.__srdFails = 0;
+		const o = RTCPeerConnection.prototype.setRemoteDescription;
+		RTCPeerConnection.prototype.setRemoteDescription = function (d) {
+			return o.call(this, d).catch((e) => {
+				window.__srdFails++;
+				console.log(`[srd-fail] ${e.message.slice(0, 140)}`);
+				throw e;
+			});
+		};
+	});
+	p.on('console', (m) => { if (/srd-fail/.test(m.text())) console.log(`  [${name}]`, m.text().slice(0, 160)); });
 	await p.goto(`${BASE}/room/${CODE}${witness ? '?witness=1' : ''}`);
 	const inp = p.locator('input').first();
 	await inp.waitFor({ state: 'visible', timeout: 60000 });
@@ -80,7 +92,8 @@ const dump = async (p, tag) => {
 		peers: d ? d.peers?.length ?? -1 : -2,
 		feeds: Object.keys(rem).length,
 		live,
-		local: d?.media?.local?.length ?? 0
+		local: d?.media?.local?.length ?? 0,
+		srdFails: await p.evaluate(() => window.__srdFails ?? -1)
 	};
 };
 
@@ -90,14 +103,14 @@ for (const [i, p] of speakers.entries()) {
 	// speakers see all participants; remote feeds only from publishers
 	const ok = r.peers === TOTAL - 1 && r.feeds >= N - 1;
 	if (!ok) allOk = false;
-	console.log(`  s${i}: peers=${r.peers} remoteFeeds=${r.feeds} liveTracks=${r.live} localTracks=${r.local}${ok ? '' : '  ← MISS'}`);
+	console.log(`  s${i}: peers=${r.peers} remoteFeeds=${r.feeds} liveTracks=${r.live} localTracks=${r.local} srdFails=${r.srdFails}${ok ? '' : '  ← MISS'}`);
 }
 for (const [i, p] of witnesses.entries()) {
 	const r = await dump(p, `w${i}`);
 	// witnesses see everyone, pull every speaker's feeds, publish nothing
 	const ok = r.peers === TOTAL - 1 && r.feeds >= N && r.local === 0;
 	if (!ok) allOk = false;
-	console.log(`  w${i}: peers=${r.peers} remoteFeeds=${r.feeds} liveTracks=${r.live} localTracks=${r.local}${ok ? '' : '  ← MISS'}`);
+	console.log(`  w${i}: peers=${r.peers} remoteFeeds=${r.feeds} liveTracks=${r.live} localTracks=${r.local} srdFails=${r.srdFails}${ok ? '' : '  ← MISS'}`);
 }
 
 // zombie check: hard-close two speakers, survivors must drop them
