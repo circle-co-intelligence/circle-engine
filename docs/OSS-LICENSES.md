@@ -48,8 +48,8 @@ Required license texts ship in `static/licenses/`.
 | `nanoid` | 5.1.16 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | ai/nanoid |
 | `qr-code-styling` | 1.9.2 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/kozakdenys/qr-code-styling |
 | `qr-scanner` | 1.4.2 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/nimiq/qr-scanner |
-| `react` | 19.3.0 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/react/react |
-| `react-dom` | 19.3.0 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/react/react |
+| `react` | 18.3.1 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/facebook/react |
+| `react-dom` | 18.3.1 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/facebook/react |
 | `sframe-ratchet` | 0.5.8 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/anatolykoptev/sframe-ratchet |
 | `sip.js` | 0.21.2 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/onsip/SIP.js |
 | `streamsaver` | 2.0.6 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://jimmywarting@github.com/jimmywarting/StreamSaver.js |
@@ -68,7 +68,7 @@ Required license texts ship in `static/licenses/`.
 
 | License | Package count |
 |---|---|
-| MIT | 375 |
+| MIT | 377 |
 | Apache-2.0 | 88 |
 | Apache-2.0 OR MIT | 66 |
 | ISC | 23 |
@@ -94,8 +94,8 @@ Required license texts ship in `static/licenses/`.
 | `@sveltejs/kit` | 2.70.3 | MIT |
 | `@sveltejs/vite-plugin-svelte` | 5.1.1 | MIT |
 | `@tauri-apps/cli` | 2.12.1 | Apache-2.0 OR MIT |
-| `@types/react` | 19.3.0 | MIT |
-| `@types/react-dom` | 19.3.0 | MIT |
+| `@types/react` | 18.3.31 | MIT |
+| `@types/react-dom` | 18.3.7 | MIT |
 | `browserslist` | 4.29.3 | MIT |
 | `eslint` | 10.11.0 | MIT |
 | `eslint-plugin-compat` | 7.0.2 | MIT |
@@ -146,6 +146,7 @@ linking to an unmodified system library is compliant; no source offer owed.
 | `static/wllama/` wasm | MIT | github.com/ngxson/wllama | text at /licenses/MIT.txt |
 | `static/dotlottie-player.wasm` | MIT | github.com/LottieFiles/dotlottie-web | text at /licenses/MIT.txt |
 | `static/libarchive/` wasm | BSD-2-Clause (libarchive core) + MIT (JS glue) | github.com/libarchive/libarchive + nika-begiashvili/libarchivejs | text at /licenses/BSD-2-Clause.txt |
+| `static/excalidraw-assets/` (fonts + vendor chunk for the UMD build) | MIT | github.com/excalidraw/excalidraw (from @excalidraw/excalidraw dist) | text at /licenses/MIT.txt |
 | `caption-capture-worklet.js`, `dg-capture-worklet.js`, `sw/`, `coi-serviceworker.js` | AGPL-3.0-only (own code) | this repo | — |
 | MediaPipe selfie-segmentation tflite (inside @twilio/video-processors) | Apache-2.0 | Google | NOTICE attribution |
 

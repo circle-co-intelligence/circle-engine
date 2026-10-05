@@ -150,6 +150,7 @@ ${modelRows.join('\n')}
 | \`static/wllama/\` wasm | MIT | github.com/ngxson/wllama | text at /licenses/MIT.txt |
 | \`static/dotlottie-player.wasm\` | MIT | github.com/LottieFiles/dotlottie-web | text at /licenses/MIT.txt |
 | \`static/libarchive/\` wasm | BSD-2-Clause (libarchive core) + MIT (JS glue) | github.com/libarchive/libarchive + nika-begiashvili/libarchivejs | text at /licenses/BSD-2-Clause.txt |
+| \`static/excalidraw-assets/\` (fonts + vendor chunk for the UMD build) | MIT | github.com/excalidraw/excalidraw (from @excalidraw/excalidraw dist) | text at /licenses/MIT.txt |
 | \`caption-capture-worklet.js\`, \`dg-capture-worklet.js\`, \`sw/\`, \`coi-serviceworker.js\` | AGPL-3.0-only (own code) | this repo | — |
 | MediaPipe selfie-segmentation tflite (inside @twilio/video-processors) | Apache-2.0 | Google | NOTICE attribution |
 

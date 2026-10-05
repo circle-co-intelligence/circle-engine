@@ -6,13 +6,36 @@
  * island mounts — the bundle stays untouched for rooms that never draw.
  */
 import type * as Y from 'yjs';
+import { base } from '$app/paths';
+
+// @excalidraw/excalidraw ships no ESM entry — main.js reads process.env at
+// require time and dies in the browser. The production UMD dist is
+// process-free; its webpack publicPath (fonts + vendor chunk) is
+// EXCALIDRAW_ASSET_PATH || unpkg — we vendor the assets locally so nothing
+// leaves the origin.
+declare global {
+	interface Window { EXCALIDRAW_ASSET_PATH?: string; React?: unknown; ReactDOM?: unknown; ExcalidrawLib?: Record<string, unknown> }
+}
 
 export async function mountWhiteboard(el: HTMLElement, doc: Y.Doc): Promise<() => void> {
-	const [{ createElement }, { createRoot }, { Excalidraw }] = await Promise.all([
+	window.EXCALIDRAW_ASSET_PATH ??= `${location.origin}${base}/`;
+	const [React, ReactDOM, { createRoot }] = await Promise.all([
 		import('react'),
-		import('react-dom/client'),
-		import('@excalidraw/excalidraw')
+		import('react-dom'),
+		import('react-dom/client')
 	]);
+	// the UMD sniffs its environment: dev serves it raw → it reads
+	// window.React/ReactDOM; the prod build wraps it as CJS → module.exports.
+	// It also digs into React internals (ReactCurrentOwner) which live on the
+	// default export, not the ESM namespace — hand it the real object.
+	const w = window as { React?: unknown; ReactDOM?: unknown };
+	w.React ??= (React as { default?: unknown }).default ?? React;
+	w.ReactDOM ??= (ReactDOM as { default?: unknown }).default ?? ReactDOM;
+	// @ts-expect-error UMD bundle — no type declarations on the subpath
+	const excalidraw = await import('@excalidraw/excalidraw/dist/excalidraw.production.min.js');
+	const lib = excalidraw.Excalidraw ? excalidraw : window.ExcalidrawLib;
+	const Excalidraw = lib?.Excalidraw as never;
+	const { createElement } = React;
 	const map = doc.getMap<unknown>('whiteboard');
 	let applying = false;
 

@@ -325,6 +325,21 @@ class RoomBridge {
 		return next ? this.prodId(next) : null;
 	}
 
+	/** prod's Milo seat is a participant like any other — one builder for
+	 *  the initial snapshot and the join op emitted when ai flips on */
+	private aiParticipant() {
+		const s = this.session!;
+		return {
+			id: 'ai',
+			name: s.ai.name ?? 'Milo',
+			kind: 'ai' as const,
+			joinedAt: this.sessionStartedAt - 1,
+			connected: true,
+			muted: { audio: false, video: true },
+			tracks: [] as never[]
+		};
+	}
+
 	private snapshot() {
 		const s = this.session!;
 		// lobby: while we wait (lobby-wait confirmed, not yet admitted) our own
@@ -334,17 +349,7 @@ class RoomBridge {
 			.filter((p) => !(p === s.selfId && selfWaiting) && !s.waiting.some((w) => w.id === p))
 			.map((p) => this.participantOf(p))
 			.sort((a, b) => a.joinedAt - b.joinedAt);
-		if (s.ai.enabled !== false) {
-			participants.push({
-				id: 'ai',
-				name: s.ai.name ?? 'Milo',
-				kind: 'ai',
-				joinedAt: this.sessionStartedAt - 1,
-				connected: true,
-				muted: { audio: false, video: true },
-				tracks: []
-			});
-		}
+		if (s.ai.enabled !== false) participants.push(this.aiParticipant());
 		return {
 			code: this.code,
 			sessionId: `local-${this.code}`,
@@ -1004,9 +1009,18 @@ class RoomBridge {
 			});
 			// participants: join/leave/rename/mute/hand/away/sharing diffs
 			let prevIds = new Set<string>();
+			let prevAi = s.ai.enabled !== false;
 			$effect(() => {
 				const ids = new Set([s.selfId, ...s.activePeers]);
 				const ops: Record<string, unknown>[] = [];
+				// Milo joins/leaves the seat ring like a human — prod renders the
+				// ai tile from participants, so ai.enabled alone shows the
+				// "In the circle" settings row but no seat without this join
+				const aiOn = s.ai.enabled !== false;
+				if (aiOn !== prevAi) {
+					ops.push(aiOn ? { op: 'join', participant: this.aiParticipant() } : { op: 'leave', id: 'ai' });
+					prevAi = aiOn;
+				}
 				for (const id of ids) if (!prevIds.has(id) && id !== s.selfId) ops.push({ op: 'join', participant: this.participantOf(id) });
 				for (const id of prevIds) if (!ids.has(id)) { ops.push({ op: 'leave', id: this.prodId(id) }); this.prevTracks.delete(id); }
 				for (const id of ids) {

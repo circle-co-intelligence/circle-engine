@@ -110,8 +110,9 @@ export function mountBadges(session: RoomSession): () => void {
 		try {
 			const { mountWhiteboard } = await import('../whiteboard/island');
 			unmountWb = await mountWhiteboard(panel, session.notes.doc);
-		} catch {
-			panel.textContent = 'whiteboard unavailable';
+		} catch (e) {
+			console.error('[whiteboard] mount failed', e);
+			panel.textContent = `whiteboard unavailable — ${e instanceof Error ? e.message : e}`;
 		}
 	};
 
