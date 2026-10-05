@@ -49,6 +49,7 @@ or `on_table`.
 | Pass (open round) | `pass` | `stick-table` | returns the stick to the table |
 | Place the stick down | `place-down` | `stick-table` | holder or manager only (policy-enforced) |
 | Hand to a chosen seat | `give-stick{id}` / `host-set-current{id}` | `stick-give{to}` | holder or manager (policy-enforced); target must be seated |
+| Ask the holder a question | *(engine API `askQuestion()` — no prod UI frame yet)* | `stick-request{question:true}` | moments on, asker seated, asker ≠ holder (machine-guarded) |
 | End a question moment | `question-end` | `stick-resume` | holder, asker (`atSeatOf`), or manager (policy-enforced) |
 
 Structural guarantees (these are machine-level, not convention):
@@ -114,8 +115,8 @@ compiled wasm in `src/lib/policy/cic.policy.test.ts`.
 | `mode-set`, `direction-set`, `config-set`, `turn-timer-set`, `heart-set`, `lobby-set`, `co-host-set`, `started-set`, `host-locks-set`, `appearance-set`, `ai-set`, `milo-wake-set`, `tr-fanout-set`, `password-set`, `breakout-open`, `breakout-close`, `mute-set`, `peer-remove` | manager only (`canManageRoom` = authority or co-host) |
 | `peer-remove` of self | denied — you cannot kick yourself |
 | `mute-set{on:false}` | denied **unconditionally** — remote unmute is impossible even for the keeper |
-| `seat-claim` on an occupied seat | denied |
-| `erasure{scope:'participant'}` | authority only; `scope:'self'` is free |
+| `consent` | any participant — self-attributed by Ed25519 signature, never forgeable for another |
+| `erasure{scope:'participant'}` | authority only; `scope:'self'` is free and must target the actor |
 | `recording-stop` | starter or manager |
 
 ### Consent is exclusion, not a vote to start
@@ -123,10 +124,24 @@ compiled wasm in `src/lib/policy/cic.policy.test.ts`.
 Recording is **consent-scoped**: once started, the record contains only
 participants whose `recordingConsent` is `granted` — the recorder composes
 `consentedPeers` only, silence counts as not-granted (fail-closed), and
-heart mode forces all capture off at apply time. Policy's part is the
-hard veto: a `recording-start` op is denied if *any* occupant explicitly
-denied. The realtime `recording-consent` gather runs before the op; the
-denial veto runs at apply time, on every client.
+heart mode forces all capture off at apply time. Consent is durable: each
+`answerConsent` also emits a signed `consent` op into the op-log, so late
+joiners replay every participant's grant/denial — and because the op is
+signed by its sender, consent for another participant is unforgeable. A
+denial is an *exclusion marker*, not a veto on the room recording: deniers
+are simply absent from the record (their audio/video never enters a sealed
+segment), while consenting participants still record.
+
+### Erasure
+
+`erasure{scope:'self'}` (any participant, target must be self) and
+`erasure{scope:'participant', target}` (authority only) purge a
+participant's contributions on every replica: captions, chat lines,
+transcript context lines attributed to them, their consent record (which
+also excludes them from any active record going forward), and talk-time
+accounting. Media already sealed into encrypted segments is ciphertext
+addressed to the host-side assembler — the op cannot reach it, and the
+op-log keeps the erasure as a signed record that the request was honored.
 
 ## 7. Authority (the circle's keeper is a protocol role, not a server)
 
@@ -155,11 +170,14 @@ denial veto runs at apply time, on every client.
 - **Talk-time equity**: every client accumulates each holder's wall-clock
   time (`talkMs`) from stick snapshots → the notes doc's *Talk time*
   section — the circle can see whether the floor has been shared fairly.
-- **Question moments**: the machine supports a brief floor loan
-  (`atSeatOf` the asker, `resumeTo` the holder) and the `question-end`
-  frame resumes. No current production frame *opens* a question — that
-  transition is reserved in the machine, not yet wired, and is documented
-  as such in `PROTOCOL.md` (`question` is a phantom frame).
+- **Question moments**: `stick-request{question:true}` opens a brief floor
+  loan — the machine guards it (`canQuestion`: moments enabled, asker
+  seated, asker ≠ holder), parks the stick `atSeatOf` the asker with
+  `resumeTo` the holder, and `stick-resume` (`question-end`) returns the
+  floor to the holder. Engine API: `session.askQuestion()` /
+  `session.endQuestion()`. No current *production UI frame* opens a
+  question — the lane is engine-level, ready for a client surface; the
+  vendored UI renders the `question` state correctly when it occurs.
 - **Circle opening/closing**: `started-set{on}` is the host's formal
   open/close marker; `room-end` terminates the session.
 

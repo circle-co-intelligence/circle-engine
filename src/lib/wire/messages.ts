@@ -13,7 +13,6 @@ import { z } from 'zod';
 export const PROTOCOL_VERSION = 1 as const;
 
 export const participantId = z.string().min(8).max(64); // opaque, random per room
-export const seatIndex = z.number().int().min(0).max(63);
 export const epoch = z.number().int().nonnegative();
 export const opId = z.string().min(16);
 
@@ -37,8 +36,6 @@ export const roomConfig = z.object({
 
 /** ops admitted to the signed op-log (authoritative room state transitions) */
 export const op = z.discriminatedUnion('t', [
-	z.object({ t: z.literal('seat-claim'), seat: seatIndex }),
-	z.object({ t: z.literal('seat-release') }),
 	z.object({ t: z.literal('stick-request'), question: z.boolean().optional() }),
 	z.object({ t: z.literal('stick-grant'), to: participantId }),
 	z.object({ t: z.literal('stick-give'), to: participantId }), // prod: give-stick — holder hands to a specific seat
@@ -131,20 +128,13 @@ export const realtimeMessage = z.discriminatedUnion('t', [
 			])
 			.optional()
 	}),
-	z.object({ t: z.literal('welcome'), roomEpoch: epoch, yourId: participantId }),
-	z.object({ t: z.literal('snapshot'), state: z.string() }), // encrypted checkpoint blob ref
-	z.object({ t: z.literal('delta') }),
-	z.object({ t: z.literal('lobby-request'), name: z.string().max(80), proof: z.string().optional() }),
 	z.object({ t: z.literal('admit'), to: participantId }),
 	z.object({ t: z.literal('hand-raise') }),
 	z.object({ t: z.literal('hand-lower') }),
-	z.object({ t: z.literal('mute-state'), muted: z.boolean() }),
 	z.object({ t: z.literal('reaction'), emoji: z.string().max(8) }),
 	z.object({ t: z.literal('chat'), text: z.string().max(4000), whisperTo: participantId.optional() }),
 	z.object({ t: z.literal('caption-update'), text: z.string().max(500), final: z.boolean(), lang: z.string().max(12) }),
 	z.object({ t: z.literal('caption-sections'), update: z.record(z.string(), z.any()) }), // prod-shaped personal-caption update (sourceId/generation/sections)
-	z.object({ t: z.literal('transcript-line'), seq: z.number().int(), hash: z.string(), scope: transcriptScope }),
-	z.object({ t: z.literal('recorder-heartbeat'), role: z.enum(['primary', 'standby']) }),
 	z.object({ t: z.literal('recording-consent'), state: recordingConsent }), // prod-verbatim name
 	z.object({ t: z.literal('recording-state'), active: z.boolean() }),
 	z.object({ t: z.literal('authority-heartbeat'), leaseUntil: z.number().int() }),
@@ -191,7 +181,6 @@ export const realtimeMessage = z.discriminatedUnion('t', [
 		original: z.string().max(2000).optional()
 	}),
 	z.object({ t: z.literal('e2ee-key'), epoch, data: z.string() }), // wrapped EpochAnnouncement (JSON)
-	z.object({ t: z.literal('sas'), emoji: z.string().max(16) }), // emoji fingerprint verify
 	// beyond-GCC bandwidth broker: peers report link stats to the elected
 	// bw-allocator; it broadcasts a per-peer sender budget — cross-flow
 	// coordination libwebrtc's per-flow congestion control can't do

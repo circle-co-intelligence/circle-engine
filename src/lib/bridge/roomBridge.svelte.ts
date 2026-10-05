@@ -349,6 +349,24 @@ class RoomBridge {
 		};
 	}
 
+	/** webinar witness seat: the HLS captureStream renders as a normal tile.
+	 *  track sessionIds use the `live-stream:<kind>` convention so the SFU
+	 *  shim resolves them against remoteStreams['live-stream'] */
+	private streamParticipant() {
+		return {
+			id: 'live-stream',
+			name: 'Live stream',
+			kind: 'ai' as const,
+			joinedAt: this.sessionStartedAt - 1,
+			connected: true,
+			muted: { audio: false, video: false },
+			tracks: [
+				{ sessionId: 'live-stream:audio', kind: 'audio' },
+				{ sessionId: 'live-stream:video', kind: 'video' }
+			] as { sessionId: string; kind: string }[]
+		};
+	}
+
 	private snapshot() {
 		const s = this.session!;
 		// lobby: while we wait (lobby-wait confirmed, not yet admitted) our own
@@ -359,6 +377,7 @@ class RoomBridge {
 			.map((p) => this.participantOf(p))
 			.sort((a, b) => a.joinedAt - b.joinedAt);
 		if (s.ai.enabled !== false) participants.push(this.aiParticipant());
+		if (s.remoteStreams['live-stream']) participants.push(this.streamParticipant());
 		return {
 			code: this.code,
 			sessionId: `local-${this.code}`,
@@ -1030,6 +1049,7 @@ class RoomBridge {
 			// participants: join/leave/rename/mute/hand/away/sharing diffs
 			let prevIds = new Set<string>();
 			let prevAi = s.ai.enabled !== false;
+			let prevStream = !!s.remoteStreams['live-stream'];
 			$effect(() => {
 				const ids = new Set([s.selfId, ...s.activePeers]);
 				const ops: Record<string, unknown>[] = [];
@@ -1040,6 +1060,17 @@ class RoomBridge {
 				if (aiOn !== prevAi) {
 					ops.push(aiOn ? { op: 'join', participant: this.aiParticipant() } : { op: 'leave', id: 'ai' });
 					prevAi = aiOn;
+				}
+				// same for the witness HLS lane — a synthetic live-stream seat
+				// appears while a manifest is playing, leaves when it clears
+				const streamOn = !!s.remoteStreams['live-stream'];
+				if (streamOn !== prevStream) {
+					ops.push(
+						streamOn
+							? { op: 'join', participant: this.streamParticipant() }
+							: { op: 'leave', id: 'live-stream' }
+					);
+					prevStream = streamOn;
 				}
 				for (const id of ids) if (!prevIds.has(id) && id !== s.selfId) ops.push({ op: 'join', participant: this.participantOf(id) });
 				for (const id of prevIds) if (!ids.has(id)) { ops.push({ op: 'leave', id: this.prodId(id) }); this.prevTracks.delete(id); }

@@ -84,7 +84,7 @@ export class RoomSession {
 	captions = $state<{ from: string; text: string; final: boolean }[]>([]);
 	raisedHands = $state<Set<string>>(new Set());
 	consentAsked = $state(false); // someone proposed recording — dialog shown
-	consents = $state<Record<string, 'granted' | 'denied'>>({});
+	consents = $state<Record<string, 'pending' | 'granted' | 'denied'>>({});
 	recordingProposer = $state<string | null>(null); // mesh peerId that proposed
 	recording = $state(false);
 	recordingStartedBy = $state<string | null>(null); // recording-start op author — policy gate for recording-stop
@@ -761,9 +761,6 @@ export class RoomSession {
 				this.raisedHands.delete(peerId);
 				this.raisedHands = new Set(this.raisedHands);
 				break;
-			case 'recorder-heartbeat':
-				// standby promotion: if primary heartbeats stop >2 leases, re-elect
-				break;
 			case 'e2ee-key':
 				void this.e2ee.consumeAnnouncement(msg.data);
 				break;
@@ -829,6 +826,8 @@ export class RoomSession {
 			case 'stream-manifest':
 				// webinar fanout live — witnesses beyond mesh scale play HLS
 				this.streamHls = msg.hls;
+				if (msg.hls) void this.attachStreamHls(msg.hls);
+				else this.detachStreamHls();
 				break;
 			case 'rec-manifest':
 				// a peer's ISO recorder announced a sealed segment — collect for
@@ -977,7 +976,14 @@ export class RoomSession {
 
 	private applyOp(env: OpEnvelope, replay = false) {
 		switch (env.op.t) {
-			case 'stick-request': this.sendStick({ type: 'REQUEST', by: env.senderId }); break;
+			case 'stick-request':
+				// question:true opens a question moment (floor loan to the
+				// asker, stick stays reserved for the holder); otherwise it's
+				// the normal take-the-stick request
+				this.sendStick(env.op.question
+					? { type: 'QUESTION_ASK', by: env.senderId, to: this.stickCtx.holderId ?? '' }
+					: { type: 'REQUEST', by: env.senderId });
+				break;
 			case 'stick-pass':
 				this.sendStick({ type: 'PASS' });
 				// circle_round parks in `offered` pending GRANT — pass is a
@@ -1063,10 +1069,27 @@ export class RoomSession {
 					this.transcriptScope = p.transcriptScope;
 					if (p.transcriptScope === 'off') this.captionsAvailable = false;
 				}
+				if (p.questionMoments !== undefined)
+					this.sendStick({ type: 'QUESTION_MOMENTS_SET', on: p.questionMoments });
 				if (p.recording === false && this.recording) { this.recording = false; void this.finishRecording(); }
 				break;
 			}
 			case 'recording-start': this.recording = true; this.recordingStartedBy = env.senderId; this.consentAsked = false; void this.maybeRecord(); break;
+			case 'consent':
+				// self-attributed: the op is signed by senderId — consent can
+				// never be forged for another participant
+				if (env.op.kind === 'recording')
+					this.consents[env.senderId] = env.op.state;
+				break;
+			case 'erasure': {
+				// self: purge own contributions; participant: authority purges
+				// target's. Consent removal also excludes them from any active
+				// record going forward (already-sealed segments are ciphertext
+				// blobs addressed to the host — out of this op's reach).
+				const target = env.op.scope === 'self' ? env.senderId : env.op.target;
+				this.purgeContributions(target);
+				break;
+			}
 			case 'recording-stop':
 				this.recording = false;
 				this.recordingStartedBy = null;
@@ -1263,12 +1286,44 @@ export class RoomSession {
 
 	/** webinar fanout — set when the authority broadcasts a CF Stream HLS manifest */
 	streamHls = $state<string | null>(null);
+	private streamHlsStop: (() => void) | null = null;
+	private streamVideo: HTMLVideoElement | null = null;
 
 	/** host announces a live HLS manifest (Cloudflare Stream) to witnesses */
 	announceStream(hls: string) {
 		if (!this.canManage(this.selfId)) return;
 		this.streamHls = hls;
+		void this.attachStreamHls(hls);
 		this.handle.sendRealtime({ t: 'stream-manifest', hls });
+	}
+
+	/**
+	 * Witness-side HLS playback: play the manifest into a hidden video and
+	 * surface its captureStream() as a `live-stream` remote stream — the
+	 * bridge emits it as a synthetic participant, so the vendored UI renders
+	 * the live feed in a normal seat tile with zero DOM surgery.
+	 */
+	private async attachStreamHls(hls: string) {
+		this.detachStreamHls();
+		const video = document.createElement('video');
+		video.playsInline = true;
+		const { attachHls } = await import('../media/hlsPlay');
+		this.streamHlsStop = await attachHls(video, hls);
+		this.streamVideo = video;
+		const cap = (video as HTMLVideoElement & { captureStream?: () => MediaStream; mozCaptureStream?: () => MediaStream });
+		const stream = cap.captureStream?.() ?? cap.mozCaptureStream?.();
+		if (stream) this.remoteStreams = { ...this.remoteStreams, 'live-stream': stream };
+	}
+
+	private detachStreamHls() {
+		this.streamHlsStop?.();
+		this.streamHlsStop = null;
+		this.streamVideo = null;
+		if (this.remoteStreams['live-stream']) {
+			const next = { ...this.remoteStreams };
+			delete next['live-stream'];
+			this.remoteStreams = next;
+		}
 	}
 
 	/** opt-in media enhancements (enhance.ts): all default-off, fail-open */
@@ -1602,6 +1657,11 @@ export class RoomSession {
 	}
 
 	requestStick() { this.emitOp({ t: 'stick-request' }); }
+	/** ask the holder a question — opens a question moment (floor loans to
+	 *  the asker, stick stays reserved for the holder to resume) */
+	askQuestion() { this.emitOp({ t: 'stick-request', question: true }); }
+	/** end the active question moment — holder resumes the floor */
+	endQuestion() { this.emitOp({ t: 'stick-resume' }); }
 	passStick() {
 		this.emitOp(this.stick.getSnapshot().context.mode === 'circle_round'
 			? { t: 'stick-pass' }
@@ -1613,12 +1673,43 @@ export class RoomSession {
 		if (up) this.raisedHands = new Set([...this.raisedHands, this.selfId]);
 		else { this.raisedHands.delete(this.selfId); this.raisedHands = new Set(this.raisedHands); }
 	}
+	/**
+	 * Forget a participant's contributions: captions, chat lines, transcript
+	 * context lines attributed to them, their consent record (withdrawing
+	 * consent mid-record excludes them via the next setConsented), and their
+	 * talk-time accounting. Media already sealed into segments is ciphertext
+	 * owned by the host-side assembler — erasure cannot reach it.
+	 */
+	private purgeContributions(peerId: string) {
+		const name = this.names[peerId] ?? (peerId === this.selfId ? this.displayName : null);
+		this.captions = this.captions.filter((c) => c.from !== peerId);
+		this.chatLog = this.chatLog.filter((c) => c.from !== peerId);
+		if (name) this.transcriptWindow = this.transcriptWindow.filter((l) => !l.startsWith(`[${name}]`));
+		if (peerId in this.consents) {
+			delete this.consents[peerId];
+			if (this.recording) this.recorder.setConsented(this.consentedPeers);
+		}
+		this.talkMs.delete(peerId);
+	}
+
+	/** signed self-erasure op — every replica purges this peer's contributions */
+	eraseSelf() {
+		this.emitOp({ t: 'erasure', scope: 'self', target: this.selfId });
+	}
+
+	/** authority-side purge of a participant's contributions */
+	eraseParticipant(id: string) {
+		if (!this.canManage(this.selfId)) return;
+		this.emitOp({ t: 'erasure', scope: 'participant', target: id });
+	}
+
 	/** recording requires universal consent — propose first, start when all grant */
 	proposeRecording() {
 		this.handle.sendRealtime({ t: 'recording-consent', state: 'pending' });
 		this.consentAsked = true;
 		this.recordingProposer = this.selfId;
 		this.consents[this.selfId] = 'granted';
+		this.emitOp({ t: 'consent', kind: 'recording', state: 'granted' });
 		this.consentPromptAt = Date.now();
 		// silent peers are excluded (fail-closed) — don't wait forever for
 		// answers; start once everyone answered or the window closes
@@ -1627,6 +1718,7 @@ export class RoomSession {
 	answerConsent(granted: boolean) {
 		this.consents[this.selfId] = granted ? 'granted' : 'denied';
 		this.handle.sendRealtime({ t: 'recording-consent', state: granted ? 'granted' : 'denied' });
+		this.emitOp({ t: 'consent', kind: 'recording', state: granted ? 'granted' : 'denied' });
 		this.consentAsked = false;
 		// exclusion reacts live: granted mid-record → join the ISO record;
 		// denied mid-record → stop ours and purge our pending segments
@@ -1919,6 +2011,7 @@ export class RoomSession {
 		this.meter?.stop();
 		this.sensory?.stop();
 		void this.sipLeg?.stop();
+		this.detachStreamHls();
 		this.isoFeedUnsub?.();
 		this.isoFeedUnsub = null;
 		await this.finishRecording();

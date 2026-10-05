@@ -114,13 +114,14 @@ describe('mute sovereignty', () => {
 });
 
 describe('consent + recording', () => {
-	it('recording-start is vetoed when any occupant denied', () => {
+	it('recording-start is not vetoed by a denier — denial excludes, not blocks', () => {
 		const denied = STATE();
 		denied.occupants['cccccccc'].recordingConsent = 'denied';
-		expect(deny({ t: 'recording-start' }, HOLDER, denied)).not.toHaveLength(0);
+		expect(deny({ t: 'recording-start' }, HOLDER, denied)).toHaveLength(0);
 	});
-	it('recording-start allowed when nobody denied (pending = excluded, not blocking)', () => {
-		expect(deny({ t: 'recording-start' }, HOLDER)).toHaveLength(0);
+	it('consent ops are open to any participant (self-attributed by signature)', () => {
+		expect(deny({ t: 'consent', kind: 'recording', state: 'granted' })).toHaveLength(0);
+		expect(deny({ t: 'consent', kind: 'recording', state: 'denied' })).toHaveLength(0);
 	});
 	it('recording-stop allowed for starter or manager only', () => {
 		expect(deny({ t: 'recording-stop' }, { id: 'dddddddd', canManageRoom: false })).toHaveLength(0);
@@ -130,18 +131,15 @@ describe('consent + recording', () => {
 });
 
 describe('admission + erasure', () => {
-	it('seat-claim on an occupied seat is denied', () => {
-		expect(deny({ t: 'seat-claim', seat: 1 }, MEMBER)).not.toHaveLength(0);
-	});
-	it('seat-claim on a free seat is allowed', () => {
-		expect(deny({ t: 'seat-claim', seat: 5 }, MEMBER)).toHaveLength(0);
-	});
 	it('peer-remove of self is denied even for manager', () => {
 		expect(deny({ t: 'peer-remove', id: 'aaaaaaaa' }, HOLDER)).not.toHaveLength(0);
 	});
 	it('participant erasure is authority-only; self erasure is free', () => {
 		expect(deny({ t: 'erasure', scope: 'participant', target: 'bbbbbbbb' }, MEMBER)).not.toHaveLength(0);
 		expect(deny({ t: 'erasure', scope: 'participant', target: 'bbbbbbbb' }, HOLDER)).toHaveLength(0);
+	});
+	it('self erasure must target the actor — mismatched target is denied', () => {
 		expect(deny({ t: 'erasure', scope: 'self', target: 'bbbbbbbb' }, MEMBER)).toHaveLength(0);
+		expect(deny({ t: 'erasure', scope: 'self', target: 'aaaaaaaa' }, MEMBER)).not.toHaveLength(0);
 	});
 });

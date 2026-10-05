@@ -61,12 +61,6 @@ deny contains "peer cannot remove self" if {
 	input.op.id == input.actor.id
 }
 
-# --- seating ----------------------------------------------------------------
-deny contains "seat already occupied" if {
-	input.op.t == "seat-claim"
-	input.state.seats[sprintf("%d", [input.op.seat])] != null
-}
-
 # --- stick sovereignty ------------------------------------------------------
 # Only the holder may pass — the floor is theirs to yield.
 deny contains "holder only" if {
@@ -100,13 +94,11 @@ deny contains "resume requires holder, asker, or manager" if {
 # --- consent ----------------------------------------------------------------
 # Recording is consent-scoped exclusion, not a block: the record contains
 # only granting participants and silence counts as not-granted (the recorder
-# composes consentedPeers only). Policy's part is the hard veto — nobody who
-# explicitly denied may appear in a started record.
-deny contains "recording includes a denying participant" if {
-	input.op.t == "recording-start"
-	some p in input.state.occupants
-	p.recordingConsent == "denied"
-}
+# composes consentedPeers only). The policy-level guarantee is attribution:
+# consent ops are signed by their sender — nobody can forge another
+# participant's grant, so a peer's speech can never enter a record they
+# didn't opt into. A denial is therefore an exclusion marker, not a veto on
+# the room recording (deniers are simply absent from it).
 
 # Stopping a recording belongs to its starter or the keeper.
 deny contains "recording stop requires starter or manager" if {
@@ -120,6 +112,14 @@ deny contains "erasure only self or authority" if {
 	input.op.t == "erasure"
 	input.op.scope == "participant"
 	input.actor.id != input.state.authorityId
+}
+
+# Self-erasure may only carry the actor's own id — apply resolves scope:'self'
+# to the sender, so a mismatched target would lie in the log about who erased.
+deny contains "self erasure target must be the actor" if {
+	input.op.t == "erasure"
+	input.op.scope == "self"
+	input.op.target != input.actor.id
 }
 
 # verdict: no deny rules fired

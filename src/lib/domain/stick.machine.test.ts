@@ -63,6 +63,23 @@ describe('stick machine', () => {
 		expect(a.getSnapshot().context.atSeatOf).toBeNull();
 	});
 
+	it('question moment: holder cannot question themselves, unseated cannot ask', () => {
+		const a = make();
+		a.send({ type: 'REQUEST', by: 'a' });
+		a.send({ type: 'QUESTION_ASK', by: 'a', to: 'a' });
+		expect(a.getSnapshot().value).toBe('held'); // self-question rejected
+		a.send({ type: 'QUESTION_ASK', by: 'intruder', to: 'a' });
+		expect(a.getSnapshot().value).toBe('held'); // unseated asker rejected
+	});
+
+	it('question moment: moments disabled blocks QUESTION_ASK', () => {
+		const a = make();
+		a.send({ type: 'QUESTION_MOMENTS_SET', on: false });
+		a.send({ type: 'REQUEST', by: 'a' });
+		a.send({ type: 'QUESTION_ASK', by: 'b', to: 'a' });
+		expect(a.getSnapshot().value).toBe('held');
+	});
+
 	it('HOLDER_LOST returns stick to table (orphan deadline)', () => {
 		const a = make();
 		a.send({ type: 'REQUEST', by: 'a' });

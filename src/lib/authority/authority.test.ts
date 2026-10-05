@@ -7,7 +7,7 @@ function signedOp(id: ReturnType<typeof createIdentity>, epoch = 0, opId = crypt
 	const base = {
 		v: 1 as const, t: 'op' as const, opId, roomEpoch: epoch,
 		senderId: id.peerId || 'peer-a', sentAt: 0,
-		op: { t: 'seat-claim' as const, seat: 0 }
+		op: { t: 'stick-table' as const }
 	};
 	const sig = id.sign(canonicalBytes(base));
 	return { ...base, sig };

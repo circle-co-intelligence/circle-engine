@@ -37,7 +37,8 @@ type StickEvent =
 	| { type: 'HOLDER_LOST' } // seat emptied / peer gone (authority emits on deadline)
 	| { type: 'MODE_SET'; mode: 'open_round' | 'circle_round' }
 	| { type: 'DIRECTION_SET'; direction: 'sunwise' | 'earthwise' }
-	| { type: 'SEATS_SET'; seats: string[] };
+	| { type: 'SEATS_SET'; seats: string[] }
+	| { type: 'QUESTION_MOMENTS_SET'; on: boolean };
 
 function nextSeat(ctx: StickContext, fromSeatOf: string | null): string | null {
 	const order = ctx.direction === 'sunwise' ? ctx.seats : [...ctx.seats].reverse();
@@ -60,6 +61,10 @@ export const stickMachine = setup({
 		openRound: ({ context }) => context.mode === 'open_round',
 		circleRound: ({ context }) => context.mode === 'circle_round',
 		questionsEnabled: ({ context }) => context.questionMoments,
+		// a question moment: moments on, asker seated, and not the holder
+		// (the holder asking themselves a question is nonsense)
+		canQuestion: ({ context }, params: { by: string }) =>
+			context.questionMoments && context.seats.includes(params.by) && context.holderId !== params.by,
 		targetSeated: ({ context }, params: { to: string }) => context.seats.includes(params.to)
 	}
 }).createMachine({
@@ -76,6 +81,7 @@ export const stickMachine = setup({
 	},
 	on: {
 		SEATS_SET: { actions: assign({ seats: ({ event }) => event.seats }) },
+		QUESTION_MOMENTS_SET: { actions: assign({ questionMoments: ({ event }) => event.on }) },
 		MODE_SET: { actions: assign({ mode: ({ event }) => event.mode }) },
 		DIRECTION_SET: { actions: assign({ direction: ({ event }) => event.direction }) },
 		HOLDER_LOST: '.on_table' // emitted on holder peer-leave — always safe
@@ -137,7 +143,7 @@ export const stickMachine = setup({
 				},
 				TABLE: 'on_table',
 				QUESTION_ASK: {
-					guard: 'questionsEnabled',
+					guard: { type: 'canQuestion', params: ({ event }) => ({ by: event.by }) },
 					target: 'question',
 					actions: assign(({ context, event }) => ({
 						atSeatOf: event.by, // the asker conceptually takes the floor

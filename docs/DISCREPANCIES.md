@@ -11,7 +11,7 @@
 | D7 | Lobby/`admit` flow | confirmed | authority approval queue (`lobby-wait`/`lobby-join`/`admit`), probe-verified | aligned |
 | D8 | `whisper` channel | confirmed | `chat.whisperTo` — targeted data-channel delivery: only the recipient ever receives the frame (DTLS pairwise). Room-key scope is irrelevant at the wire level; no separate key needed | aligned |
 | D9 | `milo-wake` | confirmed | transcript-driven wake: `hey_milo` mode widens the Milo trigger to "hey milo" mid-utterance across ASR finals (self + peers). No separate KWS model — the sherpa ASR already streams the room's speech | aligned |
-| D10 | `recording-purchase`/`recording-budget` | confirmed — paid path exists in prod | cic-cloud metering (B.14) | planned |
+| D10 | `recording-purchase`/`recording-budget` | confirmed — paid path exists in prod | `src/lib/ledger/credits.ts` Dexie wallet→room-pool ledger — `budget`/`quote`/`confirm`/`balance`; bridge answers both prod frames end-to-end | aligned |
 | D11 | `speakingTimerEveryone`, `heartMode`, `canManageRoom` | confirmed | in roomConfig schema | aligned |
 | D12 | Two-step bypass prevention | not directly observable | structurally impossible in machine def | aligned |
 

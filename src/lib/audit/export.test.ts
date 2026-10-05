@@ -8,7 +8,7 @@ function signedOp(id: ReturnType<typeof createIdentity>, opId: string): OpEnvelo
 	const base = {
 		v: 1 as const, t: 'op' as const, opId, roomEpoch: 0,
 		senderId: 'peer-a', sentAt: 0,
-		op: { t: 'seat-claim' as const, seat: 0 }
+		op: { t: 'stick-table' as const }
 	};
 	return { ...base, sig: id.sign(canonicalBytes(base)) };
 }
