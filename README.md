@@ -388,4 +388,4 @@ Commercial/proprietary licensing is available separately — contact
 hello@co-intelligence.online.
 
 Vendored and upstream components carry their own licenses — see `NOTICE.md`,
-`LICENSES.md`, and `pnpm licenses` for the generated report.
+`docs/OSS-LICENSES.md` (canonical inventory), and `pnpm licenses:gen` to regenerate it.

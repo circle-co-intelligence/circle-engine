@@ -115,4 +115,4 @@ not missing features.
 All runtime deps commercially usable (MIT/Apache/BSD/ISC/OFL + MPL-2.0
 weak-copyleft). Non-OSS flags: Speechmatics On-Device SDK (commercial),
 pyannote model weights (HF-gated), vendored production bundle (proprietary,
-noticed). See LICENSES.md / NOTICE.md.
+noticed). See docs/OSS-LICENSES.md / NOTICE.md.

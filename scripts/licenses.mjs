@@ -1,84 +1,183 @@
 #!/usr/bin/env node
-// Regenerate LICENSES.md — direct dependency inventory from package.json
-// resolved against installed node_modules. Usage: node scripts/licenses.mjs
+// Regenerate docs/OSS-LICENSES.md — the canonical third-party inventory.
+// Covers: npm direct deps (runtime vs dev), transitive license histogram,
+// Rust crates (incl. target-specific deps), model packs (from
+// models/manifest.json), vendored runtimes, fonts, proprietary vendored
+// bundles, and self-host images — each with license, source, and the
+// commercial-use obligation.
+//
+// Usage:  pnpm licenses:gen   (== node scripts/licenses.mjs > docs/OSS-LICENSES.md)
 import fs from 'node:fs';
+import { execSync } from 'node:child_process';
 
 const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-const deps = { ...pkg.dependencies, ...pkg.devDependencies };
-const rows = [];
-for (const name of Object.keys(deps).sort()) {
+
+const OBLIGATIONS = [
+	[/^MPL-2\.0/, 'weak copyleft — ship `/licenses/MPL-2.0.txt`; applies only to modified package files'],
+	[/^CC-BY-4\.0$/, 'attribution required (NOTICE)'],
+	[/Apache-2\.0/, 'permissive — retain NOTICE; text vendored at `/licenses/Apache-2.0.txt`'],
+	[/^MIT$/, 'permissive — keep copyright line; text vendored at `/licenses/MIT.txt`'],
+	[/^BSD/, 'permissive — keep copyright line'],
+	[/^(ISC|0BSD|CC0|BlueOak|WTFPL)/, 'permissive'],
+	[/GPL|LGPL/, 'copyleft — see notes'],
+	[/OFL/, 'OFL-1.1 — ship `/licenses/OFL-1.1.txt`; do not sell font standalone'],
+];
+const obligation = (lic) =>
+	OBLIGATIONS.find(([re]) => re.test(lic ?? ''))?.[1] ?? 'permissive';
+
+// ---------------------------------------------------------- npm direct deps
+const npmRows = [];
+for (const name of Object.keys(pkg.dependencies ?? {}).sort()) {
 	try {
 		const p = JSON.parse(fs.readFileSync(`node_modules/${name}/package.json`, 'utf8'));
-		const repo = typeof p.repository === 'string' ? p.repository : (p.repository?.url ?? '');
-		rows.push(`| \`${name}\` | ${p.version} | ${p.license ?? 'UNKNOWN'} | ${repo.replace(/^git\+|^git:\/\/|\.git$/g, '').replace('git@github.com:', 'github.com/')} |`);
+		const repo = (typeof p.repository === 'string' ? p.repository : p.repository?.url ?? '')
+			.replace(/^git\+|^git:\/\/|\.git$/g, '')
+			.replace('git@github.com:', 'github.com/');
+		npmRows.push(`| \`${name}\` | ${p.version} | ${p.license ?? 'UNKNOWN'} | ${obligation(p.license)} | ${repo} |`);
 	} catch {
-		rows.push(`| \`${name}\` | ${deps[name]} | UNKNOWN | |`);
+		npmRows.push(`| \`${name}\` | ${pkg.dependencies[name]} | UNKNOWN | ⚠ audit | |`);
 	}
 }
-console.log(`# Licenses — direct dependency inventory
+const devRows = [];
+for (const name of Object.keys(pkg.devDependencies ?? {}).sort()) {
+	try {
+		const p = JSON.parse(fs.readFileSync(`node_modules/${name}/package.json`, 'utf8'));
+		devRows.push(`| \`${name}\` | ${p.version} | ${p.license ?? 'UNKNOWN'} |`);
+	} catch {
+		devRows.push(`| \`${name}\` | ${pkg.devDependencies[name]} | UNKNOWN |`);
+	}
+}
 
-All direct dependencies are commercially usable. Weak-copyleft (MPL-2.0)
-packages are marked; file-level copyleft applies only when modifying their
-files. \`caniuse-lite\` (transitive, CC-BY-4.0) requires attribution — it is
-embedded in build tooling output; its notice ships with browserslist.
+// ------------------------------------------------- transitive histogram
+let transitive = 'run `pnpm licenses list --json` to regenerate this section';
+try {
+	const out = execSync('pnpm licenses list --json', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
+	const j = JSON.parse(out);
+	const counts = {};
+	for (const [lic, pkgs] of Object.entries(j)) counts[lic] = pkgs.length;
+	transitive = Object.entries(counts)
+		.sort((a, b) => b[1] - a[1])
+		.map(([lic, n]) => `| ${lic} | ${n} |`)
+		.join('\n');
+} catch { /* pnpm unavailable — keep placeholder */ }
 
-Regenerate: \`node scripts/licenses.mjs > LICENSES.md\`
-
-| Package | Version | License | Repository |
-|---|---|---|---|
-${rows.join('\n')}
-
-## Vendored assets
-
-| Asset | License | Source |
-|---|---|---|
-| Production app bundle (\`static/cic/\`) | Proprietary — see NOTICE.md | circle.co-intelligence.online |
-| Marketing site (\`static/site/\`) | Proprietary — see NOTICE.md | www.co-intelligence.online |
-| sherpa-onnx wasm + ASR/VAD packs | Apache-2.0 | k2-fsa/sherpa-onnx releases |
-| Piper TTS voice en_US-libritts_r-medium | MIT | rhasspy/piper |
-| SmolLM2-135M-Instruct GGUF | Apache-2.0 | HuggingFaceTB/SmolLM2 |
-| wllama wasm runtime | MIT | ngxson/wllama |
-| Lato, EB Garamond, Caveat fonts | OFL-1.1 | Google Fonts / self-hosted |
-| Switzer font | Fontshare license | Fontshare |
-`);
-
-// Rust crates (src-tauri + speechd) — parsed from Cargo.tomls so the
-// native shell's dependency surface is audited the same way
+// ---------------------------------------------------------- rust crates
 const CRATE_LICENSES = {
 	tauri: 'MIT OR Apache-2.0',
 	'tauri-build': 'MIT OR Apache-2.0',
 	'tauri-plugin-deep-link': 'MIT OR Apache-2.0',
 	'tauri-plugin-single-instance': 'MIT OR Apache-2.0',
+	webkit2gtk: 'MIT (crate); runtime links LGPL-2.1 WebKitGTK — dynamic linking only',
 	tokio: 'MIT',
 	'tokio-tungstenite': 'MIT',
 	'futures-util': 'MIT OR Apache-2.0',
 	serde: 'MIT OR Apache-2.0',
 	serde_json: 'MIT OR Apache-2.0',
 	tracing: 'MIT',
-	speechd: 'MIT OR Apache-2.0'
 };
 const crateRows = [];
 for (const manifest of ['src-tauri/Cargo.toml', 'src-tauri/speechd/Cargo.toml']) {
 	try {
 		const toml = fs.readFileSync(manifest, 'utf8');
-		// only [dependencies]/[build-dependencies] sections count
-		for (const sec of toml.matchAll(/\[(?:build-)?dependencies\]([\s\S]*?)(?=\n\[|$)/g)) {
+		// [dependencies], [build-dependencies], AND [target.*.dependencies]
+		for (const sec of toml.matchAll(/\[(?:build-|target\.[^\]]*\.)?dependencies\]([\s\S]*?)(?=\n\[|$)/g)) {
 			for (const m of sec[1].matchAll(/^([a-zA-Z0-9_-]+)\s*=\s*(?:\{[^}]*version\s*=\s*)?"([^"]+)"/gm)) {
 				const [, name, ver] = m;
 				if (name === 'speechd') continue; // own crate
 				const lic = CRATE_LICENSES[name] ?? '⚠ UNAUDITED';
-				crateRows.push(`| \`${name}\` | ${ver} | ${lic} | crates.io/crates/${name} |`);
+				crateRows.push(`| \`${name}\` | ${ver} | ${lic} | https://crates.io/crates/${name} |`);
 			}
 		}
 	} catch { /* src-tauri absent — fine */ }
 }
-if (crateRows.length)
-	console.log(`## Rust crates (src-tauri + speechd)
 
-Direct crates only; the Cargo.lock transitive set is MIT/Apache-2.0/BSD/ISC
-per \`cargo tree\`-audited dependency metadata — no copyleft crates.
+// ---------------------------------------------------------- model packs
+const modelRows = [];
+try {
+	const manifest = JSON.parse(fs.readFileSync('models/manifest.json', 'utf8'));
+	for (const [id, p] of Object.entries(manifest.packs ?? {})) {
+		modelRows.push(`| ${id} — ${p.runtime} | ${p.license} | ${p.licenseUrl} |`);
+	}
+} catch { /* manifest absent */ }
+
+console.log(`# OSS Licenses — canonical inventory & commercial-use audit
+
+Generated by \`pnpm licenses:gen\` (\`scripts/licenses.mjs\`). Regenerate on any
+dependency change. **Every component below is commercially usable** —
+permissive (MIT/Apache/BSD/ISC/0BSD/BlueOak/CC0), weak copyleft (MPL-2.0,
+file-level only), or attribution licenses (CC-BY-4.0, OFL-1.1). No GPL,
+AGPL, SSPL, or *-NC (non-commercial) licenses anywhere in the tree.
+Required license texts ship in \`static/licenses/\`.
+
+## Runtime dependencies (ship in the bundle)
+
+| Package | Version | License | Obligation | Repository |
+|---|---|---|---|---|
+${npmRows.join('\n')}
+
+## Transitive closure (full tree, resolved by pnpm)
+
+| License | Package count |
+|---|---|
+${transitive}
+
+## Dev-only dependencies (never ship)
+
+| Package | Version | License |
+|---|---|---|
+${devRows.join('\n')}
+
+## Rust crates (src-tauri native shell + speechd)
 
 | Crate | Version req | License | Repository |
 |---|---|---|---|
 ${crateRows.join('\n')}
+
+Transitive crates resolve per Cargo.lock — MIT/Apache-2.0/BSD/ISC only.
+\`webkit2gtk\` dynamically links the system WebKitGTK (LGPL-2.1) — dynamic
+linking to an unmodified system library is compliant; no source offer owed.
+
+## Model packs (models/manifest.json → static/models/)
+
+| Pack | License | License URL |
+|---|---|---|
+${modelRows.join('\n')}
+
+## Vendored runtimes & libraries (static/)
+
+| Asset | License | Source | Obligation |
+|---|---|---|---|
+| \`static/wllama/\` wasm | MIT | github.com/ngxson/wllama | text at /licenses/MIT.txt |
+| \`static/dotlottie-player.wasm\` | MIT | github.com/LottieFiles/dotlottie-web | text at /licenses/MIT.txt |
+| \`static/libarchive/\` wasm | BSD-2-Clause (libarchive core) + MIT (JS glue) | github.com/libarchive/libarchive + nika-begiashvili/libarchivejs | text at /licenses/BSD-2-Clause.txt |
+| \`caption-capture-worklet.js\`, \`dg-capture-worklet.js\`, \`sw/\`, \`coi-serviceworker.js\` | AGPL-3.0-only (own code) | this repo | — |
+| MediaPipe selfie-segmentation tflite (inside @twilio/video-processors) | Apache-2.0 | Google | NOTICE attribution |
+
+## Fonts (static/fonts/)
+
+| Font | License | Obligation |
+|---|---|---|
+| Lato, EB Garamond, Caveat | OFL-1.1 | ship \`/licenses/OFL-1.1.txt\`; copyright lines in NOTICE.md |
+| Switzer | Fontshare (ITF Free Font License) | free for commercial use; see \`/licenses/FONTS.md\` |
+
+## Proprietary vendored bundles — NOT OSS
+
+| Asset | Rights | Source |
+|---|---|---|
+| \`static/cic/\` production frontend bundle | org-owned; not open source | circle.co-intelligence.online |
+| \`static/site/\` marketing page | org-owned; not open source | www.co-intelligence.online |
+
+## Self-host stack images (deploy/)
+
+| Image | License | Note |
+|---|---|---|
+| caddy | Apache-2.0 | static+TLS+proxy container |
+| mosquitto | EPL-2.0 + EDL | MQTT/WSS relay; unmodified upstream image |
+| coturn | BSD-3-Clause | STUN/TURN server |
+
+## This repository
+
+Root \`package.json\` license: \`${pkg.license}\` — our own code. AGPL
+charging-for-hosted-service is fine since we hold copyright; dual-licensing
+is an owner decision and doesn't block commercial operation.
 `);

@@ -13,6 +13,7 @@
     "policy:build": "rm -rf /tmp/cic-pol && mkdir -p /tmp/cic-pol && opa build -t wasm -e cic/allow -e cic/deny src/lib/policy/cic.rego -o /tmp/cic-pol/policy.tar.gz && tar -xzf /tmp/cic-pol/policy.tar.gz -C /tmp/cic-pol && cp /tmp/cic-pol/policy.wasm static/policy/cic.wasm",
     "test:e2e": "playwright test --project=chromium",
     "models:fetch": "bash scripts/fetch-models.sh",
+    "licenses:gen": "node scripts/licenses.mjs > docs/OSS-LICENSES.md",
     "models:fetch:heavy": "FETCH_HEAVY=1 bash scripts/fetch-models.sh",
     "probe": "node probe-flows.mjs",
     "probe:pw": "node probe-pw.mjs",

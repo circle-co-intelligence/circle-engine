@@ -50,9 +50,11 @@ actually reads. It maps what the system *does* to what auditors ask.
 
 ## Supply chain
 
-- `scripts/licenses.mjs` regenerates NOTICE.md from the dependency tree —
-  run it on every dependency change (verification gate).
-- New dependencies require a license in NOTICE and ≥7-day-published versions.
+- `pnpm licenses:gen` regenerates `docs/OSS-LICENSES.md` (the canonical
+  inventory) from the dependency tree — run it on every dependency change
+  (verification gate).
+- New dependencies require a commercially-usable license listed in
+  `docs/OSS-LICENSES.md` and ≥7-day-published versions.
 
 ## Remaining gaps (honest)
 
