@@ -1,0 +1,87 @@
+name: native-build
+
+# Desktop bundles for all three platforms. The shell loads the deployed
+# site (frontendDist is a remote URL), so no frontend build happens here —
+# bundles only change when src-tauri/ does. Tag pushes (v*) additionally
+# draft a GitHub Release with the bundles attached.
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+    branches: [main, local-backend-parity]
+    paths:
+      - 'src-tauri/**'
+      - '.github/workflows/native-build.yml'
+
+permissions:
+  contents: write # release drafts on tag pushes
+
+jobs:
+  bundle:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-22.04, platform: linux, target: '' }
+          - { os: windows-latest, platform: windows, target: '' }
+          # universal macOS binary — arm64 + x86_64 in one bundle; avoids
+          # the retiring macos-13 Intel runner
+          - { os: macos-latest, platform: macos, target: 'universal-apple-darwin' }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Linux GTK/WebKit build deps
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev \
+            libsoup-3.0-dev libayatana-appindicator3-dev librsvg2-dev \
+            libdbus-1-dev libssl-dev pkg-config
+
+      - name: macOS universal targets
+        if: matrix.platform == 'macos'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install JS deps (tauri CLI)
+        run: pnpm install --frozen-lockfile
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: ${{ matrix.target != '' && format('--target {0}', matrix.target) || '' }}
+          tagName: v__VERSION__ # __VERSION__ resolves from tauri.conf.json
+          releaseName: 'Circle v__VERSION__'
+          releaseBody: 'Desktop builds — the shell loads the live site; native layer only.'
+          releaseDraft: true
+
+      # branch/manual runs don't produce a release — keep bundles as
+      # workflow artifacts so they're testable without tagging
+      - uses: actions/upload-artifact@v4
+        if: github.ref_type != 'tag'
+        with:
+          name: circle-${{ matrix.platform }}
+          path: |
+            src-tauri/target/**/release/bundle/**/*.deb
+            src-tauri/target/**/release/bundle/**/*.AppImage
+            src-tauri/target/**/release/bundle/**/*.msi
+            src-tauri/target/**/release/bundle/**/*.exe
+            src-tauri/target/**/release/bundle/**/*.dmg
+            src-tauri/target/**/release/bundle/**/*.app.tar.gz
+          if-no-files-found: warn
+          retention-days: 30
