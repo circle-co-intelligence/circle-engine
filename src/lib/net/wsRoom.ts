@@ -57,6 +57,7 @@
  */
 import { selfId } from 'trystero/mqtt';
 import type { Room } from 'trystero';
+import { normalizeExtmaps } from './sdp';
 
 interface BusFrame {
 	t: 'welcome' | 'join' | 'leave' | 'msg';
@@ -608,7 +609,14 @@ export async function openWsRoom(
 				} else if (sig.sdp.type === 'answer' && (!p.initiator || !p.offered)) {
 					return; // answer we never asked for — protocol violation, drop
 				}
-				await p.pc.setRemoteDescription(sig.sdp);
+				// Firefox numbers extmap ids per m-line; under BUNDLE the same id
+				// can map different URIs across m-lines and Chromium then rejects
+				// the whole description ("RTP extension ID reassignment not
+				// supported") — killing every Cr↔Fx pair. Canonicalize first.
+				await p.pc.setRemoteDescription({
+					...sig.sdp,
+					sdp: normalizeExtmaps(sig.sdp.sdp ?? '')
+				});
 				if (sig.sdp.type === 'offer') {
 					// the offer's pool transceivers arrive here as 'recvonly'
 					// (created by setRemoteDescription); flip them to 'sendrecv'

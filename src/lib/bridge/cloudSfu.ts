@@ -257,6 +257,10 @@ export class CloudSfu {
 					);
 					if (peerEntry) this.pullTries.delete(`${peerEntry[0]}:${t.trackName}`);
 				}
+			// remember each bound pull's receiving mid — tracks/update (clamps)
+			// reuses transceivers and REQUIRES the mid; without it CF 406s
+			for (const t of res.tracks ?? [])
+				if (!t.errorCode && t.mid) this.boundPulls.set(`${t.sessionId}:${t.trackName}`, t.mid);
 			if (res.sessionDescription?.sdp) {
 				// CF returns the receiving mid per bound remote track — prod maps
 				// ontrack transceivers to seats by mid, exactly like the loopback's
@@ -289,6 +293,8 @@ export class CloudSfu {
 	}
 
 	private pullTries = new Map<string, number>(); // prod sessionId → attempts
+	/** remote `${sessionId}:${trackName}` → bound receiving mid */
+	private boundPulls = new Map<string, string>();
 	private retryTimer: number | null = null;
 	private scheduleRetry() {
 		if (this.retryTimer !== null) return;
@@ -318,13 +324,20 @@ export class CloudSfu {
 			const names = this.session?.peerSfuTracks[peerId] ?? ['audio', 'video'];
 			for (const trackName of names.filter((n) => n.split('-')[0] === 'video')) {
 				const key = `${peerId}:${trackName}`;
-				if (this.pullClamps.get(key) === (maxBitrate ?? -1)) continue;
-				if (maxBitrate === null) this.pullClamps.delete(key);
-				else this.pullClamps.set(key, maxBitrate);
+				const mid = this.boundPulls.get(`${peerSfu}:${trackName}`);
+				if (!mid) continue; // pull never bound — no transceiver to update
+				if (maxBitrate === null) {
+					if (!this.pullClamps.has(key)) continue; // nothing clamped — skip, don't spam
+					this.pullClamps.delete(key);
+				} else {
+					if (this.pullClamps.get(key) === maxBitrate) continue;
+					this.pullClamps.set(key, maxBitrate);
+				}
 				targets.push({
 					location: 'remote',
 					sessionId: peerSfu,
 					trackName,
+					mid,
 					...(maxBitrate === null ? {} : { bandwidthLimiter: { maxBitrate } })
 				});
 			}

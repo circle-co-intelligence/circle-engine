@@ -17,6 +17,7 @@ import { RoomSocket } from './roomBridge.svelte';
 import { CaptionSocket } from './stt';
 import { LocalSocket } from './localSocket';
 import { trackLocalStream } from '../media/capture';
+import { normalizeExtmaps } from '../net/sdp';
 import type { RoomSession } from '../state/room.svelte';
 
 const LS_PREFIX = 'cic.ui.';
@@ -38,6 +39,7 @@ export function installCicShims(roomKey?: string) {
 	patchFetch();
 	patchWebSocket(roomKey);
 	patchGetUserMedia();
+	patchPeerConnection();
 	void import('../ui/capability').then((m) => m.capabilityGate());
 	// test seam: probes inject frames through the same entry path the app's own
 	// ws client uses (JSON → bridge.command) — real dispatch, no DOM flakiness
@@ -170,6 +172,85 @@ function patchGetUserMedia() {
 		trackLocalStream(stream);
 		return stream;
 	};
+}
+
+// ------------------------------------------------------------- RTCPeerConnection
+
+/**
+ * Cross-engine SDP hygiene: Firefox numbers RTP extmap ids per m-line, so a
+ * bundled offer can map the same id to different URIs across sections —
+ * Chromium rejects it outright ("RTP extension ID reassignment not
+ * supported") and the whole pc dies. Normalize EVERY remote description
+ * applied by ANY pc in the page (our wsRoom/sfu pcs do it at their own call
+ * sites too; this covers trystero's internal lane pcs and the vendored
+ * frontend's, which we can't reach). No-op when ids are already consistent.
+ */
+function patchPeerConnection() {
+	// Derive the prototype from a real instance — not
+	// window.RTCPeerConnection.prototype, which is a fresh object whenever
+	// anything has shadowed the constructor (instrumentation, wrappers) and
+	// would silently leave real pcs unpatched.
+	const Ctor = window.RTCPeerConnection;
+	if (!Ctor) return;
+	const probe = new Ctor();
+	const proto = Object.getPrototypeOf(probe) as typeof RTCPeerConnection.prototype;
+	probe.close();
+	if (!proto?.setLocalDescription) return;
+	// One canonical extmap map per pc, covering BOTH directions: ids must be
+	// stable across every description the pc ever sees — including our own
+	// local offers/answers, which seed the negotiated table Chrome compares
+	// against. Local descriptions are normalized at create* time so both the
+	// applied state and the wire text share the canonical numbering
+	// (Firefox-generated local SDP is Chromium-unsafe otherwise).
+	const pending = new WeakMap<RTCPeerConnection, RTCSessionDescriptionInit>();
+
+	type CreateFn = (opts?: RTCOfferOptions) => Promise<RTCSessionDescriptionInit>;
+	const origOffer = proto.createOffer as unknown as CreateFn;
+	proto.createOffer = async function (this: RTCPeerConnection, opts?: RTCOfferOptions) {
+		const d = await origOffer.call(this, opts);
+		const nd = { ...d, sdp: normalizeExtmaps(d.sdp ?? '') };
+		pending.set(this, nd);
+		return nd;
+	} as unknown as typeof proto.createOffer;
+	const origAnswer = proto.createAnswer as unknown as () => Promise<RTCSessionDescriptionInit>;
+	proto.createAnswer = async function (this: RTCPeerConnection) {
+		const d = await origAnswer.call(this);
+		const nd = { ...d, sdp: normalizeExtmaps(d.sdp ?? '') };
+		pending.set(this, nd);
+		return nd;
+	} as unknown as typeof proto.createAnswer;
+
+	type SetFn = (desc?: RTCSessionDescriptionInit) => Promise<void>;
+	const origLocal = proto.setLocalDescription as unknown as SetFn;
+	proto.setLocalDescription = async function (this: RTCPeerConnection, desc?: RTCSessionDescriptionInit) {
+		if (desc?.type === 'rollback' || desc?.type === 'pranswer')
+			return origLocal.call(this, desc);
+		let d = desc;
+		if (!d?.sdp) {
+			// Implicit form — the engine generates internally with its own
+			// extmap numbering, which Chrome then holds us to. Reuse the last
+			// created description only when its type matches what the current
+			// state requires (a stale offer in have-remote-offer, e.g. after
+			// glare, would be applied where an answer is due and rejected).
+			const want = this.signalingState === 'stable' || this.signalingState === 'have-local-offer'
+				? 'offer'
+				: this.signalingState === 'have-remote-offer'
+					? 'answer'
+					: null;
+			d = pending.get(this);
+			if (!want) return origLocal.call(this, desc); // rollback / terminal
+			if (d?.type !== want) {
+				const made = want === 'offer' ? await origOffer.call(this) : await origAnswer.call(this);
+				d = { type: want, sdp: normalizeExtmaps(made.sdp ?? '') };
+			}
+		}
+		return origLocal.call(this, { ...d, sdp: normalizeExtmaps(d.sdp ?? '') });
+	} as unknown as typeof proto.setLocalDescription;
+	const origRemote = proto.setRemoteDescription as unknown as SetFn;
+	proto.setRemoteDescription = function (this: RTCPeerConnection, desc: RTCSessionDescriptionInit) {
+		if (!desc?.sdp) return origRemote.call(this, desc);
+		return origRemote.call(this, { ...desc, sdp: normalizeExtmaps(desc.sdp) });
+	} as unknown as typeof proto.setRemoteDescription;
 }
 
 // ------------------------------------------------------------- WebSocket

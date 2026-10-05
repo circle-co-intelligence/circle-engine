@@ -35,35 +35,31 @@ export async function capture(opts: { video?: boolean; audio?: boolean } = { vid
 
 /**
  * The vendored frontend owns getUserMedia — the bridge joins with
- * capture:false and never holds a MediaStream. install.ts tracks every stream
- * it hands out so the session can borrow the participant's already-live feed
- * for ISO recording; a second capture would double-open devices and could
- * record a camera the user deliberately left off.
+ * capture:false and never holds a MediaStream. install.ts registers every
+ * TRACK it hands out so the session can borrow the participant's already-live
+ * feed for ISO recording; a second capture would double-open devices and
+ * could record a camera the user deliberately left off. Track-level, not
+ * stream-level: prod moves tracks out of the gUM stream into its own publish
+ * composition, so the handed-back stream object ends up empty while the
+ * track itself stays live.
  */
-const grantedStreams = new Set<MediaStream>();
+const grantedTracks = new Map<string, MediaStreamTrack>(); // kind → latest live track
 const feedListeners = new Set<() => void>();
 
 export function trackLocalStream(stream: MediaStream) {
-	grantedStreams.add(stream);
-	for (const t of stream.getTracks())
+	for (const t of stream.getTracks()) {
+		grantedTracks.set(t.kind, t);
 		t.addEventListener('ended', () => {
-			if (stream.getTracks().every((x) => x.readyState === 'ended')) grantedStreams.delete(stream);
+			if (grantedTracks.get(t.kind) === t) grantedTracks.delete(t.kind);
 		});
+	}
 	for (const l of feedListeners) l();
 }
 
-/** richest still-live captured stream (the participant's published feed) */
+/** the participant's live local feed — latest live track per kind, recomposed */
 export function localFeed(): MediaStream | null {
-	let best: MediaStream | null = null;
-	let bestLive = 0;
-	for (const s of grantedStreams) {
-		const live = s.getTracks().filter((t) => t.readyState === 'live').length;
-		if (live > bestLive) {
-			best = s;
-			bestLive = live;
-		}
-	}
-	return best;
+	const live = [...grantedTracks.values()].filter((t) => t.readyState === 'live');
+	return live.length ? new MediaStream(live) : null;
 }
 
 /** fires when the frontend acquires media — lets a pending ISO record start late */

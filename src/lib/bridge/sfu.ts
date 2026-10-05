@@ -12,6 +12,7 @@
  */
 import type { RoomSession } from '../state/room.svelte';
 import { skipSimulcast } from '../media/simulcast';
+import { normalizeExtmaps } from '../net/sdp';
 
 type Frame = Record<string, unknown>;
 interface BridgeLike {
@@ -88,7 +89,9 @@ export class SfuLoopback {
 				this.negotiating = false;
 				this.pendingOffer = true;
 			}
-			await pc.setRemoteDescription({ type: 'offer', sdp: sdpOffer });
+			// Firefox prod publish offers carry per-m-line extmap ids that
+			// collide under BUNDLE — Chromium rejects them outright (see sdp.ts)
+			await pc.setRemoteDescription({ type: 'offer', sdp: normalizeExtmaps(sdpOffer) });
 			const answer = await pc.createAnswer();
 			await pc.setLocalDescription(answer);
 			await iceGathered(pc);
@@ -128,7 +131,7 @@ export class SfuLoopback {
 		// only valid while we hold an outstanding offer — a stale/duplicate
 		// answer on a stable pc throws and churns prod's media stack
 		if (pc && pc.signalingState === 'have-local-offer')
-			pc.setRemoteDescription({ type: 'answer', sdp }).catch(() => {});
+			pc.setRemoteDescription({ type: 'answer', sdp: normalizeExtmaps(sdp) }).catch(() => {});
 		this.negotiating = false;
 		if (this.pendingOffer) {
 			this.pendingOffer = false;
