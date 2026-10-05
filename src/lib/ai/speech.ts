@@ -22,16 +22,28 @@ import { base } from '$app/paths';
 import manifest from '../../../models/manifest.json';
 import { emitModel } from './modelStatus';
 
+// On-device ASR/TTS pack selection — sherpa WASM ships a handful of
+// language packs; pick via build env (all-languages ASR lives on the paid
+// sensory lane / whisper gateway — sherpa WASM has no multi-lang ASR pack)
+const ENV = import.meta.env as Record<string, string | undefined>;
+const ASR_VARIANTS = {
+	en: 'asr-en/sherpa-onnx-wasm-simd-v1.13.7-en-asr-zipformer',
+	'zh-en': 'asr-zh-en/sherpa-onnx-wasm-simd-v1.13.7-zh-en-asr-zipformer',
+	'zh-yue-en': 'asr-zh-yue-en/sherpa-onnx-wasm-simd-v1.13.7-zh-cantonese-en-asr-paraformer'
+} as const;
+const TTS_VARIANTS = {
+	en: 'tts-en/sherpa-onnx-wasm-simd-1.13.8-vits-piper-en_US-libritts_r-medium',
+	multi: 'tts-multi/sherpa-onnx-wasm-simd-1.13.8-kokoro-multi-lang-v1_0'
+} as const;
+const ASR_PACK = (ENV.VITE_CIC_ASR_PACK ?? 'en') as keyof typeof ASR_VARIANTS;
+const TTS_PACK = (ENV.VITE_CIC_TTS_PACK ?? 'en') as keyof typeof TTS_VARIANTS;
+const asrDir = ASR_VARIANTS[ASR_PACK] ?? ASR_VARIANTS.en;
+const ttsDir = TTS_VARIANTS[TTS_PACK] ?? TTS_VARIANTS.en;
+
 const PACKS = {
 	vad: { dir: `${base}/models/vad/sherpa-onnx-wasm-simd-v1.13.8-vad`, remote: '' },
-	asr: {
-		dir: `${base}/models/asr-en/sherpa-onnx-wasm-simd-v1.13.7-en-asr-zipformer`,
-		remote: ''
-	},
-	tts: {
-		dir: `${base}/models/tts-en/sherpa-onnx-wasm-simd-1.13.8-vits-piper-en_US-libritts_r-medium`,
-		remote: ''
-	}
+	asr: { dir: `${base}/models/${asrDir}`, remote: '' },
+	tts: { dir: `${base}/models/${ttsDir}`, remote: '' }
 } as const;
 
 // upstream tarballs (models/manifest.json) — used when the extracted pack
@@ -39,11 +51,15 @@ const PACKS = {
 // can't be committed). Upstream release assets carry no CORS headers, so
 // prefer the ai-gateway /pack proxy (allowlisted, same-origin-capable);
 // the raw manifest URL remains the no-gateway last resort.
-const REMOTE_KEYS = { vad: 'vad', asr: 'asr-en', tts: 'tts-en' } as const;
+const REMOTE_KEYS = {
+	vad: 'vad',
+	asr: asrDir.split('/')[0],
+	tts: ttsDir.split('/')[0]
+} as const;
 const aiBase = (import.meta.env as Record<string, string | undefined>).VITE_CIC_AI_ENDPOINT;
 for (const [kind, mkey] of Object.entries(REMOTE_KEYS)) {
 	const remote = (manifest.packs as Record<string, { url?: string }>)[mkey]?.url;
-	const proxied = aiBase ? `${aiBase.replace(/\/ai\/?$/, '')}/ai/pack/${kind}` : null;
+	const proxied = aiBase ? `${aiBase.replace(/\/ai\/?$/, '')}/ai/pack/${mkey}` : null;
 	(PACKS as Record<string, { remote: string }>)[kind].remote = proxied ?? remote ?? '';
 }
 

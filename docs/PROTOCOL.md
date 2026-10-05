@@ -202,10 +202,11 @@ data channel and prod's deployed protocol is untouched:
 - `enableSensory()` — PCM16 tee → sensory lane. Two transports:
   relay (default) — cic-dsp `/speech` owns provider auth and speaks
   Speechmatics RT (diarization + audio events, `SPEECH_LANG` selects the
-  language), AssemblyAI, or OpenAI Realtime transcription
+  language or `auto` LID), AssemblyAI (`SPEECH_LANG` → `language_code` /
+  `language_detection`), or OpenAI Realtime transcription
   (`SPEECH_PROVIDER=openai`, `SPEECH_MODEL` default `gpt-4o-transcribe` —
-  auto-detects language per segment, so EN/DE/ES code-switching works;
-  note: no diarization/audio-events on that lane), incl. on-prem
+  ~99 languages auto-detected per segment, code-switching works; note:
+  no diarization/audio-events on that lane), incl. on-prem
   Speechmatics via `SPEECH_BASE_URL`;
   direct — `VITE_CIC_SPEECH_URL` points the client at a Speechmatics RT
   endpoint itself (SaaS with a 60 s `?jwt=` temp key minted by

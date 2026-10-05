@@ -181,13 +181,20 @@ async function chat(req: Request, env: Env): Promise<Response> {
 // ------------------------------------------------------------- stt / tts
 
 async function stt(req: Request, env: Env): Promise<Response> {
-	const { audio, sampleRate } = (await req.json()) as { audio: string; sampleRate: number };
+	const { audio, sampleRate, language } = (await req.json()) as {
+		audio: string;
+		sampleRate: number;
+		/** optional whisper language hint (ISO 639-1); unset = auto-detect —
+		 *  whisper-large-v3-turbo covers ~99 languages incl. code-switching */
+		language?: string;
+	};
 	if (!audio) return json({ text: '' });
 	if (env.AI) {
 		// Workers AI whisper-family wants raw PCM16/bytes
 		const pcm = f32B64To16(audio);
 		const res = await env.AI.run(env.AI_STT_MODEL ?? '@cf/openai/whisper-large-v3-turbo', {
-			audio: [...new Uint8Array(pcm)]
+			audio: [...new Uint8Array(pcm)],
+			...(language ? { language } : {})
 		});
 		return json({ text: (res as { text?: string }).text ?? '' });
 	}
@@ -1017,10 +1024,17 @@ function hexToBytes(hex: string): Uint8Array {
  * this proxies a fixed allowlist, streams the body, and sets ACAO:* +
  * long cache. Free-tier speech works on the public site via this lane.
  */
+// keep in sync with models/manifest.json — keys are manifest pack ids;
+// 'asr'/'tts'/'asr-en'/'tts-en' aliases all resolve to the English packs
 const PACK_URLS: Record<string, string> = {
 	vad: 'https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-wasm-simd-v1.13.8-vad.tar.bz2',
 	asr: 'https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.7/sherpa-onnx-wasm-simd-v1.13.7-en-asr-zipformer.tar.bz2',
+	'asr-en': 'https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.7/sherpa-onnx-wasm-simd-v1.13.7-en-asr-zipformer.tar.bz2',
+	'asr-zh-en': 'https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.7/sherpa-onnx-wasm-simd-v1.13.7-zh-en-asr-zipformer.tar.bz2',
+	'asr-zh-yue-en': 'https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.7/sherpa-onnx-wasm-simd-v1.13.7-zh-cantonese-en-asr-paraformer.tar.bz2',
 	tts: 'https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-wasm-simd-1.13.8-vits-piper-en_US-libritts_r-medium.tar.bz2',
+	'tts-en': 'https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-wasm-simd-1.13.8-vits-piper-en_US-libritts_r-medium.tar.bz2',
+	'tts-multi': 'https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-wasm-simd-1.13.8-kokoro-multi-lang-v1_0.tar.bz2',
 	// keep in sync with models/manifest.json packs.llm — the on-device
 	// LLM (Milo + translation) rides the same CORS-safe lane; HF's
 	// resolve CDN can't be relied on for the CORP header our COEP

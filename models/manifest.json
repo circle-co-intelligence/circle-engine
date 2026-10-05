@@ -15,12 +15,33 @@
 			"licenseUrl": "https://github.com/k2-fsa/sherpa-onnx/blob/master/LICENSE",
 			"dest": "models/asr-en"
 		},
+		"asr-zh-en": {
+			"runtime": "sherpa-onnx",
+			"url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.7/sherpa-onnx-wasm-simd-v1.13.7-zh-en-asr-zipformer.tar.bz2",
+			"license": "Apache-2.0",
+			"licenseUrl": "https://github.com/k2-fsa/sherpa-onnx/blob/master/LICENSE",
+			"dest": "models/asr-zh-en"
+		},
+		"asr-zh-yue-en": {
+			"runtime": "sherpa-onnx",
+			"url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.7/sherpa-onnx-wasm-simd-v1.13.7-zh-cantonese-en-asr-paraformer.tar.bz2",
+			"license": "Apache-2.0",
+			"licenseUrl": "https://github.com/k2-fsa/sherpa-onnx/blob/master/LICENSE",
+			"dest": "models/asr-zh-yue-en"
+		},
 		"tts-en": {
 			"runtime": "sherpa-onnx",
 			"url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-wasm-simd-1.13.8-vits-piper-en_US-libritts_r-medium.tar.bz2",
 			"license": "MIT",
 			"licenseUrl": "https://github.com/rhasspy/piper/blob/master/LICENSE.md",
 			"dest": "models/tts-en"
+		},
+		"tts-multi": {
+			"runtime": "sherpa-onnx",
+			"url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-wasm-simd-1.13.8-kokoro-multi-lang-v1_0.tar.bz2",
+			"license": "Apache-2.0",
+			"licenseUrl": "https://github.com/hexgrad/kokoro/blob/main/LICENSE",
+			"dest": "models/tts-multi"
 		},
 		"llm": {
 			"runtime": "wllama",

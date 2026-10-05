@@ -150,9 +150,9 @@ didn't initiate — the portal can never create a new charge. Recommended Cloudf
 
 | `SPEECH_PROVIDER` | Upstream | Languages | Extras |
 |---|---|---|---|
-| `speechmatics` (default) | RT SaaS / `SPEECH_BASE_URL` on-prem | `SPEECH_LANG` (default `en`; `auto` = provider LID) | diarization + audio events |
-| `assemblyai` | streaming v3 | provider default | speaker labels |
-| `openai` | Realtime transcription session | **auto per-segment — EN/DE/ES code-switching works** | no diarization/audio events |
+| `speechmatics` (default) | RT SaaS / `SPEECH_BASE_URL` on-prem | ~50 — `SPEECH_LANG` (default `en`; `auto` = provider LID) | diarization + audio events |
+| `assemblyai` | streaming v3 | `SPEECH_LANG` → `language_code`; `auto` → `language_detection` | speaker labels |
+| `openai` | Realtime transcription session | **~99, auto per-segment — code-switching works** | no diarization/audio events |
 
 ```bash
 cd workers/dsp && wrangler deploy
@@ -160,10 +160,20 @@ wrangler secret put SPEECH_API_KEY    # openai: sk-… / speechmatics: api key
 wrangler deploy --var SPEECH_PROVIDER:openai --var SPEECH_MODEL:gpt-4o-transcribe
 ```
 
-`SPEECH_MODEL` defaults to `gpt-4o-transcribe`; `SPEECH_LANG` only applies
-to the speechmatics lane (the openai lane auto-detects). Client-side
-`VITE_CIC_SPEECH_LANG` mirrors `SPEECH_LANG` for direct-mode and
-`caption-update` lang tags.
+`SPEECH_MODEL` defaults to `gpt-4o-transcribe` (whisper-class, ~99
+languages, auto-detected per segment). `SPEECH_LANG` applies to the
+speechmatics + assemblyai lanes. Client-side `VITE_CIC_SPEECH_LANG`
+mirrors `SPEECH_LANG` for direct-mode and `caption-update` lang tags.
+
+**On-device packs** — sherpa WASM only ships a few ASR packs (no fully
+multilingual WASM ASR exists upstream): `VITE_CIC_ASR_PACK=en|zh-en|zh-yue-en`,
+`VITE_CIC_TTS_PACK=en|multi` (kokoro multi-lang TTS). `fetch-models.sh`
+fetches the selected variants under `FETCH_HEAVY=1`; the `/ai/pack/<id>`
+proxy serves every manifest pack id (`asr-en`, `asr-zh-en`,
+`asr-zh-yue-en`, `tts-en`, `tts-multi`). All-language free STT goes through
+`/ai/stt` → whisper-large-v3-turbo (~99 languages auto-detected, optional
+`language` hint) when an AI endpoint is configured — otherwise the
+on-device pack is the ceiling.
 
 **cic-ai-gateway `/ai/chat` (cloud Milo)** — `AI_PROVIDER` picks the
 upstream (`workers-ai` | `groq` | `openrouter` | `anthropic` | `openai`).

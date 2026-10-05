@@ -106,7 +106,10 @@ async function relaySpeech(req: Request, env: Env): Promise<Response> {
 		let upstream: string;
 		const headers: Record<string, string> = { upgrade: 'websocket' };
 		if (provider === 'assemblyai') {
-			upstream = `https://streaming.assemblyai.com/v3/ws?sample_rate=16000&token=${env.SPEECH_API_KEY}&speaker_labels=true`;
+			const lang = env.SPEECH_LANG;
+			const langParam =
+				lang === 'auto' ? '&language_detection=true' : lang ? `&language_code=${lang}` : '';
+			upstream = `https://streaming.assemblyai.com/v3/ws?sample_rate=16000&token=${env.SPEECH_API_KEY}&speaker_labels=true${langParam}`;
 		} else {
 			// Speechmatics RT — SaaS or self-hosted/on-prem (same protocol).
 			// Workers' outbound-WS fetch drops arbitrary headers, so Bearer
