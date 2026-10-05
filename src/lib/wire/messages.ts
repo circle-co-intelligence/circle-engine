@@ -178,7 +178,10 @@ export const realtimeMessage = z.discriminatedUnion('t', [
 		generation: z.string(),
 		pcm: z.string().max(400_000).optional(),
 		cueId: z.number().int().optional(),
-		original: z.string().max(2000).optional()
+		original: z.string().max(2000).optional(),
+		/** ISO code the ASR detected for this segment — subscribers render it,
+		 *  and it documents which direction the translation ran */
+		originalLang: z.string().max(12).optional()
 	}),
 	z.object({ t: z.literal('e2ee-key'), epoch, data: z.string() }), // wrapped EpochAnnouncement (JSON)
 	// beyond-GCC bandwidth broker: peers report link stats to the elected

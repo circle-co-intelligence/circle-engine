@@ -7,7 +7,7 @@
  */
 import { LocalSocket } from './localSocket';
 import { CaptionPipeline, LocalTts } from '../ai/speech';
-import { translateText } from '../ai/translate';
+import { translateText, langName } from '../ai/translate';
 import type { RoomSession } from '../state/room.svelte';
 import { base64 } from '@scure/base';
 
@@ -73,7 +73,7 @@ export class CaptionSocket extends LocalSocket {
 				sections: [
 					{
 						id: 1,
-						original: { final: seg.final ? seg.text : '', partial: seg.final ? '' : seg.text },
+						original: { final: seg.final ? seg.text : '', partial: seg.final ? '' : seg.text, lang: seg.lang },
 						translation: { final: '', partial: '' }
 					}
 				]
@@ -232,7 +232,7 @@ export class SpeechStreamPipe {
  *                       (base64 Int16 PCM at 24kHz — prod's player rate)
  */
 interface Job {
-	seg: { text: string; final: boolean };
+	seg: { text: string; final: boolean; lang?: string };
 	targets: Map<string, string[]>;
 	generation: string;
 	sourceMeshId: string;
@@ -316,7 +316,7 @@ export class TranslationFanout {
 	}
 
 	/** fan a locally-ASR'd segment out to every declared translation lane */
-	emit(seg: { text: string; final: boolean }, generation: string, sourceMeshId: string, sourceProdId: string) {
+	emit(seg: { text: string; final: boolean; lang?: string }, generation: string, sourceMeshId: string, sourceProdId: string) {
 		if (!seg.text) return;
 		const s = this.session;
 		if (seg.final) {
@@ -361,7 +361,7 @@ export class TranslationFanout {
 	}
 
 	private async deliver(
-		seg: { text: string; final: boolean },
+		seg: { text: string; final: boolean; lang?: string },
 		targets: Map<string, string[]>,
 		generation: string,
 		sourceMeshId: string,
@@ -370,7 +370,7 @@ export class TranslationFanout {
 		const s = this.session;
 		const which = seg.final ? 'final' : 'partial';
 		for (const [lang, peers] of targets) {
-			const text = await translateText(seg.text, lang, s.selfLang);
+			const text = await translateText(seg.text, lang, seg.lang ? langName(seg.lang) : 'the source language');
 			if (!text) {
 				console.debug('[stt] translate→', lang, 'unavailable (model missing or busy)');
 				continue;
@@ -383,7 +383,7 @@ export class TranslationFanout {
 				else
 					s.sendTrSegment(peerId, {
 						lang, which, delta: text, sourceId: sourceMeshId,
-						generation, cueId, original: seg.text
+						generation, cueId, original: seg.text, originalLang: seg.lang
 					});
 			}
 			// caption-audio only for finalized speech — partials are text-only

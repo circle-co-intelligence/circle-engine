@@ -165,15 +165,25 @@ languages, auto-detected per segment). `SPEECH_LANG` applies to the
 speechmatics + assemblyai lanes. Client-side `VITE_CIC_SPEECH_LANG`
 mirrors `SPEECH_LANG` for direct-mode and `caption-update` lang tags.
 
-**On-device packs** — sherpa WASM only ships a few ASR packs (no fully
-multilingual WASM ASR exists upstream): `VITE_CIC_ASR_PACK=en|zh-en|zh-yue-en`,
-`VITE_CIC_TTS_PACK=en|multi` (kokoro multi-lang TTS). `fetch-models.sh`
-fetches the selected variants under `FETCH_HEAVY=1`; the `/ai/pack/<id>`
-proxy serves every manifest pack id (`asr-en`, `asr-zh-en`,
-`asr-zh-yue-en`, `tts-en`, `tts-multi`). All-language free STT goes through
-`/ai/stt` → whisper-large-v3-turbo (~99 languages auto-detected, optional
-`language` hint) when an AI endpoint is configured — otherwise the
-on-device pack is the ceiling.
+**On-device packs** — `VITE_CIC_ASR_PACK` selects the local ASR engine:
+`whisper` (transformers.js + `onnx-community/whisper-base` q8 on ONNX
+Runtime Web — **fully zero-egress, ~99 languages, auto-detects the spoken
+language per utterance**, no user config needed; WebGPU→WASM fallback) or
+a sherpa WASM pack `en|zh-en|zh-yue-en`. `VITE_CIC_TTS_PACK=en|multi`
+(piper / kokoro multi-lang). `fetch-models.sh` fetches the selected sherpa
+variants under `FETCH_HEAVY=1`; whisper's model files stream through the
+`/ai/hf/<repo>/resolve/...` proxy (HF repo allowlist) and its ONNX runtime
+through `/ai/ort/` — both edge-cached, then browser Cache API for repeat
+loads. `/ai/pack/<id>` serves every manifest sherpa pack id. `/ai/stt`
+→ whisper-large-v3-turbo (~99 languages auto-detected, optional
+`language` hint) remains the cloud-fallback STT.
+
+**Language UX contract**: speakers never configure an input language —
+every lane auto-detects per utterance (whisper via SOT-token LID, openai
+lane natively). The only language a user picks is their *output* language
+(`tr-lang`/translation target); the detected source language rides
+segments (`lang`) and `tr-segment.originalLang` so translation runs the
+real direction, not the speaker's display language.
 
 **cic-ai-gateway `/ai/chat` (cloud Milo)** — `AI_PROVIDER` picks the
 upstream (`workers-ai` | `groq` | `openrouter` | `anthropic` | `openai`).

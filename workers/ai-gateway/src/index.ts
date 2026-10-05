@@ -100,6 +100,10 @@ export default {
 				return await adminMint(req, env);
 			if (url.pathname.startsWith('/ai/pack/') && req.method === 'GET')
 				return await pack(url.pathname.slice(9));
+			if (url.pathname.startsWith('/ai/hf/') && (req.method === 'GET' || req.method === 'HEAD'))
+				return await hfProxy(url.pathname.slice(7), req.method);
+			if (url.pathname.startsWith('/ai/ort/') && req.method === 'GET')
+				return await ortProxy(url.pathname.slice(8));
 			if (url.pathname === '/ai/telemetry' && req.method === 'POST')
 				return await telemetry(req, env);
 			if (url.pathname === '/ai/status' && req.method === 'GET')
@@ -1052,6 +1056,68 @@ async function pack(kind: string): Promise<Response> {
 		headers: {
 			...cors,
 			'content-type': kind === 'llm' ? 'application/octet-stream' : 'application/x-bzip2',
+			'cache-control': 'public, max-age=2592000, immutable'
+		}
+	});
+}
+
+/**
+ * GET /ai/hf/<repo>/resolve/<rev>/<file> — HuggingFace Hub proxy for
+ * transformers.js (the browser whisper lane). HF's CDN doesn't send CORP
+ * headers, so a direct fetch fails under our COEP require-corp document —
+ * same problem /ai/pack solves for sherpa tarballs, but transformers.js
+ * fetches per-file rather than one tarball, so this mirrors resolve URLs
+ * for a fixed repo allowlist and streams them edge-cached.
+ */
+const HF_REPOS = new Set([
+	'onnx-community/whisper-tiny',
+	'onnx-community/whisper-base',
+	'onnx-community/whisper-small',
+	'onnx-community/whisper-large-v3-turbo'
+]);
+
+/**
+ * GET /ai/ort/<file> — onnxruntime-web wasm/mjs runtime files via jsdelivr.
+ * The npm bundling emits the 26MB asyncify wasm into our Pages assets (over
+ * the 25MiB file limit) while transformers.js defaults wasmPaths to
+ * jsdelivr anyway — so we point wasmPaths here, keep the whole fetch on
+ * our CSP allowlist + CORP-clean origin, and drop the bundled asset.
+ */
+const ORT_DIST =
+	'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.0-dev.20260914-8d85527a0/dist/';
+
+async function ortProxy(file: string): Promise<Response> {
+	if (!/^ort-[\w.-]+\.(wasm|mjs)$/.test(file)) return json({ error: 'not allowed' }, 404);
+	const up = await fetch(`${ORT_DIST}${file}`, {
+		cf: { cacheEverything: true, cacheTtl: 2592000 }
+	});
+	if (!up.ok || !up.body) return json({ error: `upstream ${up.status}` }, 502);
+	return new Response(up.body, {
+		headers: {
+			...cors,
+			'content-type':
+				up.headers.get('content-type') ??
+				(file.endsWith('.wasm') ? 'application/wasm' : 'text/javascript'),
+			'cache-control': 'public, max-age=2592000, immutable'
+		}
+	});
+}
+
+async function hfProxy(path: string, method: string): Promise<Response> {
+	// <org>/<repo>/resolve/<rev>/<file...>
+	const m = path.match(/^([a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+)\/resolve\/([^/]+)\/(.+)$/);
+	if (!m || !HF_REPOS.has(m[1])) return json({ error: 'repo not allowed' }, 404);
+	const up = await fetch(`https://huggingface.co/${m[1]}/resolve/${m[2]}/${m[3]}`, {
+		method,
+		cf: { cacheEverything: true, cacheTtl: 2592000 }
+	});
+	if (!up.ok) return json({ error: `upstream ${up.status}` }, up.status === 404 ? 404 : 502);
+	const ct = up.headers.get('content-type') ?? 'application/octet-stream';
+	return new Response(method === 'HEAD' ? null : up.body, {
+		headers: {
+			...cors,
+			'content-type': ct,
+			'content-length': up.headers.get('content-length') ?? '',
 			'cache-control': 'public, max-age=2592000, immutable'
 		}
 	});

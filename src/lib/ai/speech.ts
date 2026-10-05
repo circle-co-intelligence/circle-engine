@@ -35,10 +35,15 @@ const TTS_VARIANTS = {
 	en: 'tts-en/sherpa-onnx-wasm-simd-1.13.8-vits-piper-en_US-libritts_r-medium',
 	multi: 'tts-multi/sherpa-onnx-wasm-simd-1.13.8-kokoro-multi-lang-v1_0'
 } as const;
-const ASR_PACK = (ENV.VITE_CIC_ASR_PACK ?? 'en') as keyof typeof ASR_VARIANTS;
+const ASR_PACK = (ENV.VITE_CIC_ASR_PACK ?? 'en') as keyof typeof ASR_VARIANTS | 'whisper';
 const TTS_PACK = (ENV.VITE_CIC_TTS_PACK ?? 'en') as keyof typeof TTS_VARIANTS;
-const asrDir = ASR_VARIANTS[ASR_PACK] ?? ASR_VARIANTS.en;
+const asrDir =
+	ASR_PACK === 'whisper' ? '' : (ASR_VARIANTS[ASR_PACK as keyof typeof ASR_VARIANTS] ?? ASR_VARIANTS.en);
 const ttsDir = TTS_VARIANTS[TTS_PACK] ?? TTS_VARIANTS.en;
+// language tag for sherpa segments — only the en pack is unambiguous;
+// bilingual packs (zh-en, zh-yue-en) can't distinguish per utterance, so
+// they emit no tag and downstream treats it as unknown (auto)
+const PACK_LANG = ASR_PACK === 'en' ? 'en' : undefined;
 
 const PACKS = {
 	vad: { dir: `${base}/models/vad/sherpa-onnx-wasm-simd-v1.13.8-vad`, remote: '' },
@@ -58,6 +63,8 @@ const REMOTE_KEYS = {
 } as const;
 const aiBase = (import.meta.env as Record<string, string | undefined>).VITE_CIC_AI_ENDPOINT;
 for (const [kind, mkey] of Object.entries(REMOTE_KEYS)) {
+	// whisper lane: no sherpa pack behind the 'asr' kind at all
+	if (!mkey) continue;
 	const remote = (manifest.packs as Record<string, { url?: string }>)[mkey]?.url;
 	const proxied = aiBase ? `${aiBase.replace(/\/ai\/?$/, '')}/ai/pack/${mkey}` : null;
 	(PACKS as Record<string, { remote: string }>)[kind].remote = proxied ?? remote ?? '';
@@ -200,8 +207,8 @@ function pack(kind: PackKind): Promise<SherpaModule | null> {
 	return loaded.get(kind)!;
 }
 
-/** Local streaming zipformer ASR → caption segments */
-export class CaptionPipeline {
+/** Local streaming zipformer ASR → caption segments (sherpa lane) */
+export class SherpaCaptionPipeline {
 	private recognizer: AsrApi | null = null;
 	private stream: AsrStream | null = null;
 	onSegment: (seg: SpeechSegment) => void = () => {};
@@ -228,9 +235,9 @@ export class CaptionPipeline {
 			const text = this.recognizer.getResult(this.stream).text;
 			if (this.recognizer.isEndpoint(this.stream)) {
 				this.recognizer.reset(this.stream);
-				if (text) this.onSegment({ text, final: true });
+				if (text) this.onSegment({ text, final: true, lang: PACK_LANG });
 			} else if (text) {
-				this.onSegment({ text, final: false });
+				this.onSegment({ text, final: false, lang: PACK_LANG });
 			}
 		} catch {
 			// sherpa's wasm can wedge on bad input; never let it throw across the
@@ -244,6 +251,52 @@ export class CaptionPipeline {
 		try { this.recognizer?.free?.(); } catch {}
 		this.stream = null;
 		this.recognizer = null;
+	}
+}
+
+/** ASR engine facade — VITE_CIC_ASR_PACK=whisper selects the multilingual
+ *  transformers.js lane (zero-egress, ~99 languages, auto-LID per
+ *  utterance); every other variant is a sherpa WASM pack. Same interface
+ *  either way — callers don't know which engine is underneath. */
+interface CaptionImpl {
+	init(): Promise<boolean>;
+	push(samples: Float32Array): void;
+	dispose(): void;
+	onSegment: (seg: SpeechSegment) => void;
+}
+
+export class CaptionPipeline {
+	private impl: CaptionImpl | null = null;
+	private pendingSegs: SpeechSegment[] = [];
+	private cb: ((seg: SpeechSegment) => void) | null = null;
+
+	set onSegment(cb: (seg: SpeechSegment) => void) {
+		this.cb = cb;
+		// segments can arrive before init() wires the impl's callback —
+		// flush anything buffered once the caller's handler lands
+		for (const seg of this.pendingSegs) cb(seg);
+		this.pendingSegs = [];
+	}
+	get onSegment(): (seg: SpeechSegment) => void {
+		return (seg) => (this.cb ?? ((s) => this.pendingSegs.push(s)))(seg);
+	}
+
+	async init(): Promise<boolean> {
+		this.impl =
+			ASR_PACK === 'whisper'
+				? new (await import('./whisper')).WhisperCaptionPipeline()
+				: new SherpaCaptionPipeline();
+		this.impl.onSegment = this.onSegment;
+		return this.impl.init();
+	}
+
+	push(samples: Float32Array) {
+		this.impl?.push(samples);
+	}
+
+	dispose() {
+		this.impl?.dispose();
+		this.impl = null;
 	}
 }
 

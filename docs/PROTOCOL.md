@@ -199,6 +199,16 @@ data channel and prod's deployed protocol is untouched:
 - `enableEdgeDenoise()` — attaches a CF Realtime Media Transport Adapter to
   cic-dsp; mic audio reaches the edge as PLAINTEXT → `edgeProcessed` badge
   ("edge-processed, not E2EE") is mandatory.
+- captions/stt — local ASR is `VITE_CIC_ASR_PACK`-selectable: `whisper` =
+  transformers.js `onnx-community/whisper-*` in-browser (**zero-egress,
+  ~99 languages, per-utterance auto-LID via the SOT-token first-token
+  trick** — transformers.js doesn't implement detect_language itself);
+  sherpa packs `en|zh-en|zh-yue-en`. Model files arrive via the
+  `/ai/hf/<repo>/resolve/...` allowlist proxy, ONNX runtime via `/ai/ort/`.
+  Detected language propagates on `caption-update.lang`,
+  `caption-sections.original.lang`, and `tr-segment.originalLang` —
+  listeners only pick their *output* language (tr-lang); input detection
+  is automatic.
 - `enableSensory()` — PCM16 tee → sensory lane. Two transports:
   relay (default) — cic-dsp `/speech` owns provider auth and speaks
   Speechmatics RT (diarization + audio events, `SPEECH_LANG` selects the

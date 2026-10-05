@@ -477,3 +477,44 @@ describe('/ai/chat model + reasoning-effort passthrough', () => {
 		vi.unstubAllGlobals();
 	});
 });
+
+// ------------------------------------------------------------- hf proxy
+
+describe('/ai/hf transformers.js proxy', () => {
+	const get = (path: string) => new Request(`https://gw.example${path}`);
+
+	it('proxies allowlisted repos to huggingface', async () => {
+		const seen: { url?: string } = {};
+		vi.stubGlobal('fetch', async (url: string) => {
+			seen.url = String(url);
+			return new Response('{"ok":1}', {
+				status: 200,
+				headers: { 'content-type': 'application/json' }
+			});
+		});
+		const res = await worker.fetch(
+			get('/ai/hf/onnx-community/whisper-base/resolve/main/config.json'),
+			{} as never,
+			{} as never
+		);
+		expect(res.status).toBe(200);
+		expect(seen.url).toBe(
+			'https://huggingface.co/onnx-community/whisper-base/resolve/main/config.json'
+		);
+		vi.unstubAllGlobals();
+	});
+
+	it('rejects repos outside the allowlist', async () => {
+		const res = await worker.fetch(
+			get('/ai/hf/evil-org/evil-repo/resolve/main/x.bin'),
+			{} as never,
+			{} as never
+		);
+		expect(res.status).toBe(404);
+	});
+
+	it('rejects malformed paths', async () => {
+		const res = await worker.fetch(get('/ai/hf/onnx-community/whisper-base/nope'), {} as never, {} as never);
+		expect(res.status).toBe(404);
+	});
+});

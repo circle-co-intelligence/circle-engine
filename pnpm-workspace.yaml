@@ -2,6 +2,7 @@ allowBuilds:
   '@firebase/util': true
   esbuild: true
   msw: true
+  onnxruntime-node: false
   protobufjs: true
 
 overrides:

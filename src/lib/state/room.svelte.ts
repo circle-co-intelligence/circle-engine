@@ -1512,13 +1512,13 @@ export class RoomSession {
 	}
 
 	/** a caption segment from the speech stream (prod frontend streams PCM via speech-frame) */
-	appendCaption(text: string, final: boolean) {
+	appendCaption(text: string, final: boolean, lang?: string) {
 		this.captions = [...this.captions.slice(-50), { from: this.selfId, text, final }];
 		// excluded participant (denied/silent while recording): our speech is
 		// never broadcast as captions, never stored, never fed to Milo
 		const excluded = this.recording && !this.isConsented(this.selfId);
 		if (!excluded)
-			this.handle.sendRealtime({ t: 'caption-update', text, final, lang: CAPTION_LANG });
+			this.handle.sendRealtime({ t: 'caption-update', text, final, lang: lang ?? CAPTION_LANG });
 		if (final && !excluded) {
 			this.storeTranscriptLine(this.names[this.selfId] ?? this.displayName, text);
 			void this.maybeMilo(text);

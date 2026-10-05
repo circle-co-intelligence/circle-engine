@@ -17,9 +17,9 @@
     "models:fetch:heavy": "FETCH_HEAVY=1 bash scripts/fetch-models.sh",
     "probe": "node probe-flows.mjs",
     "probe:pw": "node probe-pw.mjs",
-    "build:pages": "CIC_BASE=/circle-engine VITE_CIC_AI_ENDPOINT=https://cic-ai-gateway.regenleadership.workers.dev/ai VITE_CIC_DSP_ENDPOINT=https://cic-dsp.regenleadership.workers.dev vite build && rm -rf build/models && cp build/index.html build/404.html && touch build/.nojekyll && CIC_BASE=/circle-engine node scripts/patch-pages.mjs",
-    "build:cf": "VITE_CIC_SFU_ENDPOINT=/api/sfu VITE_CIC_AI_ENDPOINT=/api/ai VITE_CIC_PAY_ENDPOINT=/api/pay VITE_CIC_DSP_ENDPOINT=https://cic-dsp.regenleadership.workers.dev VITE_CIC_SIGNAL_WS=/sig VITE_CIC_LANES=mqtt,ws VITE_CIC_ANALYTICS_URL=https://cic-analytics.regenleadership.workers.dev vite build && rm -rf build/models && node scripts/patch-pages.mjs",
-    "build:native": "VITE_CIC_SFU_ENDPOINT=https://cic-sfu.regenleadership.workers.dev VITE_CIC_AI_ENDPOINT=https://cic-ai-gateway.regenleadership.workers.dev/ai VITE_CIC_PAY_ENDPOINT=https://cic-pay.regenleadership.workers.dev/pay VITE_CIC_DSP_ENDPOINT=https://cic-dsp.regenleadership.workers.dev VITE_CIC_SIGNAL_WS=wss://cic-signaling.regenleadership.workers.dev VITE_CIC_LANES=ws vite build && rm -rf build/models && node scripts/patch-pages.mjs",
+    "build:pages": "CIC_BASE=/circle-engine VITE_CIC_AI_ENDPOINT=https://cic-ai-gateway.regenleadership.workers.dev/ai VITE_CIC_DSP_ENDPOINT=https://cic-dsp.regenleadership.workers.dev vite build && rm -rf build/models build/_app/immutable/assets/ort-*.wasm && cp build/index.html build/404.html && touch build/.nojekyll && CIC_BASE=/circle-engine node scripts/patch-pages.mjs",
+    "build:cf": "VITE_CIC_SFU_ENDPOINT=/api/sfu VITE_CIC_AI_ENDPOINT=/api/ai VITE_CIC_PAY_ENDPOINT=/api/pay VITE_CIC_DSP_ENDPOINT=https://cic-dsp.regenleadership.workers.dev VITE_CIC_SIGNAL_WS=/sig VITE_CIC_LANES=mqtt,ws VITE_CIC_ANALYTICS_URL=https://cic-analytics.regenleadership.workers.dev vite build && rm -rf build/models build/_app/immutable/assets/ort-*.wasm && node scripts/patch-pages.mjs",
+    "build:native": "VITE_CIC_SFU_ENDPOINT=https://cic-sfu.regenleadership.workers.dev VITE_CIC_AI_ENDPOINT=https://cic-ai-gateway.regenleadership.workers.dev/ai VITE_CIC_PAY_ENDPOINT=https://cic-pay.regenleadership.workers.dev/pay VITE_CIC_DSP_ENDPOINT=https://cic-dsp.regenleadership.workers.dev VITE_CIC_SIGNAL_WS=wss://cic-signaling.regenleadership.workers.dev VITE_CIC_LANES=ws vite build && rm -rf build/models build/_app/immutable/assets/ort-*.wasm && node scripts/patch-pages.mjs",
     "icons": "node scripts/gen-icons.mjs",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build"
@@ -46,6 +46,7 @@
   },
   "dependencies": {
     "@excalidraw/excalidraw": "0.17.6",
+    "@huggingface/transformers": "4.3.0",
     "@mediapipe/tasks-vision": "^0.10.17",
     "@noble/ciphers": "^2.4.0",
     "@noble/curves": "^1.8.0",

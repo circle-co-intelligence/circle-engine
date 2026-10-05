@@ -64,6 +64,12 @@ const LANG_NAMES: Record<string, string> = {
 	yue: 'Cantonese'
 };
 
+/** ISO code → English display name for prompts; codes we don't name pass
+ *  through verbatim (the model still gets a usable instruction) */
+export function langName(code: string): string {
+	return LANG_NAMES[code] ?? code;
+}
+
 let llm: Wllama | null = null;
 let loading: Promise<Wllama | null> | null = null;
 
