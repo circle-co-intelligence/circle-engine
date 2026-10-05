@@ -1,0 +1,725 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import {
+    CloudflareClient,
+    getBundledWranglerBinPath,
+    resetWranglerBinPathCache,
+} from "../cloudflare.js";
+import { ProcessOutput } from "zx";
+import path from "path";
+import { createRequire } from "node:module";
+import { homedir } from "node:os";
+
+const nodeModuleState = vi.hoisted(() => ({
+    throwOnCreateRequire: false,
+    failExistsCheck: false,
+}));
+
+// Mock the entire zx module
+vi.mock("zx", async (importOriginal) => {
+    const actual = await importOriginal<typeof import("zx")>();
+    return {
+        ...actual,
+        $: vi.fn(),
+    };
+});
+
+vi.mock("node:module", async (importOriginal) => {
+    const actual = await importOriginal<typeof import("node:module")>();
+    return {
+        ...actual,
+        createRequire: vi.fn((...args) => {
+            if (nodeModuleState.throwOnCreateRequire) {
+                throw new Error("Simulated resolution failure");
+            }
+            return actual.createRequire(...args);
+        }),
+    };
+});
+
+vi.mock("node:fs", async (importOriginal) => {
+    const actual = await importOriginal<typeof import("node:fs")>();
+    return {
+        ...actual,
+        existsSync: vi.fn((...args) => {
+            if (nodeModuleState.failExistsCheck) {
+                return false;
+            }
+            return actual.existsSync(...args);
+        }),
+    };
+});
+
+// Import and spy on the mocked function
+const { $ } = await import("zx");
+
+// Mock fetch globally
+global.fetch = vi.fn();
+
+describe("CloudflareClient", () => {
+    let client: CloudflareClient;
+    const mockConfigPath = "/mock/path/wrangler.json";
+
+    beforeEach(() => {
+        vi.clearAllMocks();
+        nodeModuleState.throwOnCreateRequire = false;
+        nodeModuleState.failExistsCheck = false;
+        resetWranglerBinPathCache();
+        client = new CloudflareClient(mockConfigPath);
+    });
+
+    afterEach(() => {
+        vi.resetModules();
+    });
+
+    describe("constructor", () => {
+        it("should use default config path when not provided", () => {
+            const defaultClient = new CloudflareClient();
+            expect(defaultClient["configPath"]).toBe(
+                path.join(homedir(), ".counterscale", "wrangler.json"),
+            );
+        });
+
+        it("should use provided config path", () => {
+            expect(client["configPath"]).toBe(mockConfigPath);
+        });
+    });
+
+    describe("wrangler binary resolution", () => {
+        const mockAccountId = "1234567890abcdef1234567890abcdef";
+
+        // captured[i] holds the interpolated substitution values of the i-th
+        // `$` invocation. Templates like `${argv} secret list --config ${path}`
+        // yield multiple substitutions, so argv is itself a nested array.
+        function captureSubs(): unknown[][] {
+            const captured: unknown[][] = [];
+            vi.mocked($).mockImplementation(((...args: unknown[]) => {
+                const [strings, ...subs] = args;
+                if (!Array.isArray(strings)) {
+                    return ((
+                        templateStrings: TemplateStringsArray,
+                        ...subs: unknown[]
+                    ) => {
+                        captured.push(subs);
+                        return {
+                            stdout: `random content ${mockAccountId} \nmore random content`,
+                            stderr: "",
+                            exitCode: 0,
+                        };
+                    }) as any;
+                }
+                captured.push(subs);
+                return {
+                    stdout: JSON.stringify([]),
+                    stderr: "",
+                    exitCode: 0,
+                } as any;
+            }) as any);
+            return captured;
+        }
+
+        it("should resolve the wrangler binary bundled with the CLI", () => {
+            const binPath = getBundledWranglerBinPath();
+            expect(binPath).toMatch(/[\\/]bin[\\/]wrangler\.js$/);
+            expect(binPath).toContain("node_modules");
+        });
+
+        it("should memoize the resolved binary path across calls", () => {
+            getBundledWranglerBinPath();
+
+            const createRequireSpy = vi.mocked(createRequire);
+            const callsAfterFirstResolution =
+                createRequireSpy.mock.calls.length;
+
+            getBundledWranglerBinPath();
+
+            expect(createRequireSpy.mock.calls.length).toBe(
+                callsAfterFirstResolution,
+            );
+        });
+
+        it("should spawn the bundled wrangler binary for whoami", async () => {
+            const captured = captureSubs();
+
+            await client.getAccountId();
+
+            expect(captured[0]).toEqual([
+                ["node", getBundledWranglerBinPath()],
+            ]);
+        });
+
+        it("should spawn the bundled wrangler binary for secret list", async () => {
+            const captured = captureSubs();
+
+            await client.getCloudflareSecrets();
+
+            expect(captured[0]).toEqual([
+                ["node", getBundledWranglerBinPath()],
+                mockConfigPath,
+            ]);
+        });
+
+        it("should fall back to npx wrangler and warn when the bundled binary cannot be resolved", async () => {
+            nodeModuleState.throwOnCreateRequire = true;
+            const warnSpy = vi
+                .spyOn(console, "warn")
+                .mockImplementation(() => {});
+            const captured = captureSubs();
+
+            await client.getAccountId();
+
+            expect(captured[0]).toEqual([["npx", "wrangler"]]);
+            expect(warnSpy).toHaveBeenCalledWith(
+                "Failed to resolve bundled wrangler binary, falling back to npx:",
+                expect.anything(),
+            );
+            warnSpy.mockRestore();
+        });
+
+        it("should warn when the resolved binary path does not exist", () => {
+            nodeModuleState.failExistsCheck = true;
+            const warnSpy = vi
+                .spyOn(console, "warn")
+                .mockImplementation(() => {});
+
+            expect(getBundledWranglerBinPath()).toBeNull();
+            expect(warnSpy).toHaveBeenCalledWith(
+                expect.stringMatching(
+                    /Bundled wrangler binary not found at .*bin[\\/]wrangler\.js, falling back to npx/,
+                ),
+            );
+            warnSpy.mockRestore();
+        });
+    });
+
+    describe("getAccountId", () => {
+        it("should extract account ID from whoami command", async () => {
+            const mockAccountId = "1234567890abcdef1234567890abcdef";
+
+            vi.mocked($).mockImplementation(() => {
+                return () => ({
+                    stdout: `random content ${mockAccountId} \nmore random content`,
+                    stderr: "",
+                    exitCode: 0,
+                });
+            });
+
+            const result = await client.getAccountId();
+            expect(result).toBe(mockAccountId);
+            expect($).toHaveBeenCalledWith({ quiet: true });
+        });
+
+        it("should return null if account ID not found", async () => {
+            vi.mocked($).mockImplementation(() => {
+                return () => ({
+                    stdout: "No account ID here",
+                    stderr: "",
+                    exitCode: 0,
+                });
+            });
+
+            const result = await client.getAccountId();
+            expect(result).toBeNull();
+        });
+
+        it("should handle command errors", async () => {
+            vi.mocked($).mockImplementation(() => {
+                return () => {
+                    throw new ProcessOutput(
+                        1, // exit code
+                        null, // signal
+                        "Command failed", // stdout
+                        "", // stderr
+                        "Command failed", // combined?
+                        "",
+                        0, // duration
+                    );
+                };
+            });
+
+            await expect(client.getAccountId()).rejects.toThrow(
+                "Command failed",
+            );
+        });
+    });
+
+    describe("getCloudflareSecrets", () => {
+        it("should parse secrets list correctly", async () => {
+            const mockSecrets = [
+                { name: "SECRET1", type: "string" },
+                { name: "SECRET2", type: "string" },
+            ];
+
+            vi.mocked($).mockImplementation(() => {
+                return {
+                    stdout: JSON.stringify(mockSecrets),
+                    stderr: "",
+                    exitCode: 0,
+                };
+            });
+
+            const result = await client.getCloudflareSecrets();
+            expect(result).toEqual({
+                SECRET1: "string",
+                SECRET2: "string",
+            });
+        });
+
+        it("should return empty object for the legacy worker-not-found error", async () => {
+            vi.mocked($).mockImplementation(() => {
+                throw "other content \n[code: 10007] Worker not found";
+            });
+
+            const result = await client.getCloudflareSecrets();
+            expect(result).toEqual({});
+        });
+
+        it("should return empty object for the current worker-not-found error", async () => {
+            vi.mocked($).mockImplementation(() => {
+                throw '✘ [ERROR] Worker "counterscale" not found.';
+            });
+
+            const result = await client.getCloudflareSecrets();
+            expect(result).toEqual({});
+        });
+
+        it("should propagate unrelated not-found errors", async () => {
+            const error = 'Resource "counterscale" not found.';
+            vi.mocked($).mockImplementation(() => {
+                throw error;
+            });
+
+            await expect(client.getCloudflareSecrets()).rejects.toBe(error);
+        });
+    });
+
+    describe("setCloudflareSecrets", () => {
+        it("should set all secrets successfully", async () => {
+            vi.mocked($).mockImplementation(() => {
+                return {
+                    stdout: "Secret successfully created/updated",
+                    stderr: "",
+                    exitCode: 0,
+                };
+            });
+
+            const result = await client.setCloudflareSecrets({
+                SECRET1: "value1",
+                SECRET2: "value2",
+            });
+            expect(result).toBe(true);
+            expect($).toHaveBeenCalledTimes(2);
+        });
+
+        it("should return false if any secret fails to set", async () => {
+            let callCount = 0;
+
+            vi.mocked($).mockImplementation(() => {
+                callCount++;
+                if (callCount === 1) {
+                    return {
+                        stdout: "Success",
+                        stderr: "",
+                        exitCode: 0,
+                    };
+                } else {
+                    throw new Error("Failed to set secret");
+                }
+            });
+
+            const result = await client.setCloudflareSecrets({
+                SECRET1: "value1",
+                SECRET2: "value2",
+            });
+            expect(result).toBe(false);
+        });
+    });
+
+    describe("getAccounts", () => {
+        it("should parse multiple accounts from table format", async () => {
+            const mockOutput = `
+Getting User settings...
+ℹ️  The API Token is read from the CLOUDFLARE_API_TOKEN in your environment.
+👋 You are logged in with an API Token. Unable to retrieve email for this user. Are you missing the User->User Details->Read permission?
+┌─────────────┬──────────────────────────────────┐
+│ Account Name│ Account ID                       │
+├─────────────┼──────────────────────────────────┤
+│ Account 1   │ 1234567890abcdef1234567890abcdef │
+│ Account 2   │ abcdef1234567890abcdef1234567890 │
+└─────────────┴──────────────────────────────────┘
+`;
+
+            vi.mocked($).mockImplementation(() => {
+                return () => ({
+                    stdout: mockOutput,
+                    stderr: "",
+                    exitCode: 0,
+                });
+            });
+
+            const result = await client.getAccounts();
+            expect(result).toEqual([
+                { id: "1234567890abcdef1234567890abcdef", name: "Account 1" },
+                { id: "abcdef1234567890abcdef1234567890", name: "Account 2" },
+            ]);
+        });
+
+        it("should parse single account from table format", async () => {
+            const mockOutput = `
+Getting User settings...
+ℹ️  The API Token is read from the CLOUDFLARE_API_TOKEN in your environment.
+👋 You are logged in with an API Token. Unable to retrieve email for this user. Are you missing the User->User Details->Read permission?
+┌─────────────┬──────────────────────────────────┐
+│ Account Name│ Account ID                       │
+├─────────────┼──────────────────────────────────┤
+│ Account 1   │ 1234567890abcdef1234567890abcdef │
+└─────────────┴──────────────────────────────────┘
+`;
+
+            vi.mocked($).mockImplementation(() => {
+                return () => ({
+                    stdout: mockOutput,
+                    stderr: "",
+                    exitCode: 0,
+                });
+            });
+
+            const result = await client.getAccounts();
+            expect(result).toEqual([
+                { id: "1234567890abcdef1234567890abcdef", name: "Account 1" },
+            ]);
+        });
+
+        it("should fall back to getAccountId when table parsing fails", async () => {
+            const mockOutput = "Invalid output format";
+            const mockAccountId = "1234567890abcdef1234567890abcdef";
+
+            vi.mocked($).mockImplementation(() => {
+                return () => ({
+                    stdout: mockOutput,
+                    stderr: "",
+                    exitCode: 0,
+                });
+            });
+
+            // Mock getAccountId to return a fallback account
+            vi.spyOn(client, "getAccountId").mockResolvedValue(mockAccountId);
+
+            const result = await client.getAccounts();
+            expect(result).toEqual([
+                {
+                    id: mockAccountId,
+                    name: `Account ${mockAccountId.slice(-6)}`,
+                },
+            ]);
+        });
+
+        it("should return empty array when no accounts found", async () => {
+            const mockOutput = "No accounts found";
+
+            vi.mocked($).mockImplementation(() => {
+                return () => ({
+                    stdout: mockOutput,
+                    stderr: "",
+                    exitCode: 0,
+                });
+            });
+
+            // Mock getAccountId to return null
+            vi.spyOn(client, "getAccountId").mockResolvedValue(null);
+
+            const result = await client.getAccounts();
+            expect(result).toEqual([]);
+        });
+
+        it("should handle command errors", async () => {
+            vi.mocked($).mockImplementation(() => {
+                return () => {
+                    throw new ProcessOutput(
+                        1, // exit code
+                        null, // signal
+                        "Command failed", // stdout
+                        "", // stderr
+                        "Command failed", // combined?
+                        "",
+                        0, // duration
+                    );
+                };
+            });
+
+            await expect(client.getAccounts()).rejects.toThrow(
+                "Command failed",
+            );
+        });
+    });
+
+    describe("deploy", () => {
+        it("should extract worker URL from deploy output", async () => {
+            vi.mocked($).mockImplementation(() => {
+                return async function* () {
+                    yield "Worker deployed to test-worker.test-account.workers.dev";
+                };
+            });
+
+            const result = await client.deploy(false, "0.0.1");
+            expect(result).toBe("https://test-worker.test-account.workers.dev");
+        });
+
+        it("should return <unknown> if URL not found in output", async () => {
+            vi.mocked($).mockImplementation(() => {
+                return async function* () {
+                    yield "Deployment successful but no URL found";
+                };
+            });
+
+            const result = await client.deploy(false, "0.0.1");
+            expect(result).toBe("<unknown>");
+        });
+
+        it("should throw on deployment error", async () => {
+            vi.mocked($).mockImplementation(() => {
+                throw new Error("Deployment failed");
+            });
+
+            await expect(client.deploy(false, "0.0.1")).rejects.toThrow(
+                "Deployment failed",
+            );
+        });
+    });
+});
+
+describe("CloudflareClient.validateToken", () => {
+    beforeEach(() => {
+        vi.resetAllMocks();
+    });
+
+    it("should return valid: true for active token", async () => {
+        (global.fetch as any).mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({
+                success: true,
+                result: { id: "test-id", status: "active" },
+            }),
+        });
+
+        const result = await CloudflareClient.validateToken("valid-token");
+        expect(result.valid).toBe(true);
+        expect(result.error).toBeUndefined();
+    });
+
+    it("should return valid: false for 401 unauthorized", async () => {
+        (global.fetch as any).mockResolvedValueOnce({
+            ok: false,
+            status: 401,
+            statusText: "Unauthorized",
+        });
+
+        const result = await CloudflareClient.validateToken("invalid-token");
+        expect(result.valid).toBe(false);
+        expect(result.error).toBe("Invalid or expired token");
+    });
+
+    it("should fall back to the account verify endpoint when the user endpoint returns 401", async () => {
+        (global.fetch as any)
+            .mockResolvedValueOnce({
+                ok: false,
+                status: 401,
+                statusText: "Unauthorized",
+            })
+            .mockResolvedValueOnce({
+                ok: true,
+                json: async () => ({
+                    success: true,
+                    result: { id: "test-id", status: "active" },
+                }),
+            });
+
+        const result = await CloudflareClient.validateToken(
+            "account-owned-token",
+            "1234567890abcdef1234567890abcdef",
+        );
+
+        expect(result.valid).toBe(true);
+        expect(global.fetch).toHaveBeenCalledTimes(2);
+        expect(global.fetch).toHaveBeenNthCalledWith(
+            2,
+            "https://api.cloudflare.com/client/v4/accounts/1234567890abcdef1234567890abcdef/tokens/verify",
+            {
+                method: "GET",
+                headers: {
+                    Authorization: "Bearer account-owned-token",
+                    "Content-Type": "application/json",
+                },
+            },
+        );
+    });
+
+    it("should not fall back to the account verify endpoint without an account ID", async () => {
+        (global.fetch as any).mockResolvedValueOnce({
+            ok: false,
+            status: 401,
+            statusText: "Unauthorized",
+        });
+
+        const result = await CloudflareClient.validateToken("invalid-token");
+
+        expect(result.valid).toBe(false);
+        expect(result.error).toBe("Invalid or expired token");
+        expect(global.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it("should return valid: false when both verify endpoints return 401", async () => {
+        (global.fetch as any)
+            .mockResolvedValueOnce({
+                ok: false,
+                status: 401,
+                statusText: "Unauthorized",
+            })
+            .mockResolvedValueOnce({
+                ok: false,
+                status: 401,
+                statusText: "Unauthorized",
+            });
+
+        const result = await CloudflareClient.validateToken(
+            "invalid-account-token",
+            "1234567890abcdef1234567890abcdef",
+        );
+
+        expect(result.valid).toBe(false);
+        expect(result.error).toBe("Invalid or expired token");
+    });
+
+    it("should surface the account endpoint error when the fallback fails", async () => {
+        (global.fetch as any)
+            .mockResolvedValueOnce({
+                ok: false,
+                status: 401,
+                statusText: "Unauthorized",
+            })
+            .mockResolvedValueOnce({
+                ok: true,
+                json: async () => ({
+                    success: true,
+                    result: { id: "test-id", status: "disabled" },
+                }),
+            });
+
+        const result = await CloudflareClient.validateToken(
+            "disabled-account-token",
+            "1234567890abcdef1234567890abcdef",
+        );
+
+        expect(result.valid).toBe(false);
+        expect(result.error).toBe("Token is not active");
+    });
+
+    it("should not fall back to the account verify endpoint on non-401 failures", async () => {
+        (global.fetch as any).mockResolvedValueOnce({
+            ok: false,
+            status: 403,
+            statusText: "Forbidden",
+        });
+
+        const result = await CloudflareClient.validateToken(
+            "insufficient-permissions",
+            "1234567890abcdef1234567890abcdef",
+        );
+
+        expect(result.valid).toBe(false);
+        expect(result.error).toBe("Token lacks required permissions");
+        expect(global.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it("should return valid: false for 403 forbidden", async () => {
+        (global.fetch as any).mockResolvedValueOnce({
+            ok: false,
+            status: 403,
+            statusText: "Forbidden",
+        });
+
+        const result = await CloudflareClient.validateToken(
+            "insufficient-permissions",
+        );
+        expect(result.valid).toBe(false);
+        expect(result.error).toBe("Token lacks required permissions");
+    });
+
+    it("should return valid: false for other HTTP errors", async () => {
+        (global.fetch as any).mockResolvedValueOnce({
+            ok: false,
+            status: 500,
+            statusText: "Internal Server Error",
+        });
+
+        const result = await CloudflareClient.validateToken("any-token");
+        expect(result.valid).toBe(false);
+        expect(result.error).toBe("HTTP 500: Internal Server Error");
+    });
+
+    it("should return valid: false when API returns success: false", async () => {
+        (global.fetch as any).mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({
+                success: false,
+                errors: [{ code: 10000, message: "Authentication failed" }],
+            }),
+        });
+
+        const result = await CloudflareClient.validateToken("failed-token");
+        expect(result.valid).toBe(false);
+        expect(result.error).toBe("Authentication failed");
+    });
+
+    it("should return valid: false when token is not active", async () => {
+        (global.fetch as any).mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({
+                success: true,
+                result: { id: "test-id", status: "inactive" },
+            }),
+        });
+
+        const result = await CloudflareClient.validateToken("inactive-token");
+        expect(result.valid).toBe(false);
+        expect(result.error).toBe("Token is not active");
+    });
+
+    it("should handle network errors", async () => {
+        (global.fetch as any).mockRejectedValueOnce(new Error("Network error"));
+
+        const result = await CloudflareClient.validateToken("any-token");
+        expect(result.valid).toBe(false);
+        expect(result.error).toBe("Network error");
+    });
+
+    it("should handle unknown errors", async () => {
+        (global.fetch as any).mockRejectedValueOnce("Unknown error");
+
+        const result = await CloudflareClient.validateToken("any-token");
+        expect(result.valid).toBe(false);
+        expect(result.error).toBe("Network error during validation");
+    });
+
+    it("should call the correct Cloudflare API endpoint", async () => {
+        (global.fetch as any).mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({
+                success: true,
+                result: { id: "test-id", status: "active" },
+            }),
+        });
+
+        await CloudflareClient.validateToken("test-token");
+
+        expect(global.fetch).toHaveBeenCalledWith(
+            "https://api.cloudflare.com/client/v4/user/tokens/verify",
+            {
+                method: "GET",
+                headers: {
+                    Authorization: "Bearer test-token",
+                    "Content-Type": "application/json",
+                },
+            },
+        );
+    });
+});

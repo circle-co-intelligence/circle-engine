@@ -490,6 +490,7 @@ class RoomBridge {
 					}
 					await this.session.join({ capture: false }); // frontend owns getUserMedia
 					this.watch();
+					void import('../obs/ux').then((m) => m.ux()?.step('prejoin_opened'));
 				}
 				// fast local check when we already hold room state — a sessionToken
 				// we issued on an earlier welcome IS the resync credential, so
@@ -541,6 +542,15 @@ class RoomBridge {
 					snapshot: this.snapshot()
 				});
 				this.frame({ t: 'snapshot', room: this.snapshot(), seq: this.seq });
+				// aggregate funnel signal — join landed. authorityId === selfId
+				// means this peer created the room; never emits the code itself.
+				void import('../obs/ux').then((m) => {
+					const u = m.ux();
+					if (!u) return;
+					const host = this.session?.authorityId === this.session?.selfId;
+					u.setRole(host ? 'host' : 'participant');
+					u.step(host ? 'room_created' : 'join_succeeded');
+				});
 				const items = this.recordingsItems();
 				if (items.length) this.frame({ t: 'recordings', items });
 				// push: subscribe this device (only when the user already granted

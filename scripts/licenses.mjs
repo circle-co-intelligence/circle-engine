@@ -155,6 +155,9 @@ ${modelRows.join('\n')}
 | \`static/dotlottie-player.wasm\` | MIT | github.com/LottieFiles/dotlottie-web | text at /licenses/MIT.txt |
 | \`static/libarchive/\` wasm | BSD-2-Clause (libarchive core) + MIT (JS glue) | github.com/libarchive/libarchive + nika-begiashvili/libarchivejs | text at /licenses/BSD-2-Clause.txt |
 | \`static/excalidraw-assets/\` (fonts + vendor chunk for the UMD build) | MIT | github.com/excalidraw/excalidraw (from @excalidraw/excalidraw dist) | text at /licenses/MIT.txt |
+| \`vendor/counterscale/\` (deployed as the \`cic-analytics\` worker — cookieless traffic analytics + dashboard) | MIT | github.com/benvinegar/counterscale | text at vendor/counterscale/LICENSE |
+| \`static/cic/chunks/D_hX0jLj.js\` masked replay recorder (rrweb inlined, org's own build) | org-owned, AGPL-3.0 (rrweb core MIT) | this repo + github.com/rrweb-io/rrweb | texts shipped |
+| \`rrweb-player\` (admin replay viewer dep) | MIT | github.com/rrweb-io/rrweb-player | resolved per package-lock |
 | \`caption-capture-worklet.js\`, \`dg-capture-worklet.js\`, \`sw/\`, \`coi-serviceworker.js\` | AGPL-3.0-only (own code) | this repo | — |
 | MediaPipe selfie-segmentation tflite (inside @twilio/video-processors) | Apache-2.0 | Google | NOTICE attribution |
 

@@ -15,6 +15,9 @@ actually reads. It maps what the system *does* to what auditors ask.
 | Cloud AI (paid) | ZDR provider terms (ai-gateway stores nothing) | Workers AI default — same CF boundary |
 | Recordings | XChaCha20-Poly1305 sealed client-side | R2 ciphertext; key never leaves the room |
 | Room secret | URL `#fragment` only — never transmitted | nowhere |
+| UX funnel events (opt-in) | enum-only schema, no identity/IP/content; consent + GPC/DNT double-enforced | Analytics Engine `cic_ux_events` (~90d, immutable) |
+| Masked session replay (opt-in, in-room only) | all text `•`-masked, inputs/media/transcript/names blocked client-side | R2 `cic-ux-replay`, 30-day lifecycle, admin-gated, revoke deletes |
+| Traffic pageview (opt-in) | cookieless Counterscale; sanitized paths (`/room/{code}`→`/room`) | `cic-analytics` worker → AE `cic_web_metrics` + rollups R2 |
 
 ## Access control
 

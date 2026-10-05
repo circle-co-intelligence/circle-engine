@@ -69,6 +69,75 @@ const CAM_DENY_MARKER = 'Check camera & microphone';
 const CAM_DENY_TAIL = ',v(H,Ba(),!0),v(d,!0)}';
 const CAM_DENY_FIX = ',v(H,Ba(),!0),v(d,!1)}';
 
+// session replay: the vendored masked rrweb recorder lives in one hashed
+// chunk exporting createReplayRecorder. Our ux.ts lazy-imports it by name —
+// publish the basename at build/cic/replay-chunk.txt and assert the masking
+// anchors a privacy regression would remove. Anchors are the load-bearing
+// literals of the recorder's config (block selectors, all-text masking,
+// no media/fonts/canvas, dictionary-only data-ux-static labels).
+const REPLAY_EXPORT_RE = /export\{[^}]*\bas (?:createReplayRecorder|startReplayRecorder)\b/;
+const REPLAY_ANCHORS = [
+	'ux-replay-block',
+	'maskAllInputs:!0',
+	'recordCanvas:!1',
+	'inlineImages:!1',
+	'collectFonts:!1',
+	'maskTextSelector:"body"',
+	'[data-transcript]',
+	'[data-message]',
+	'/api/ux/replay/chunks',
+	'replay.invalid' // meta.href is synthetic — real URLs never recorded
+];
+// data-ux-static elements can only render one of these canned labels —
+// anything else (or new marks in a future bundle) fails the build.
+const STATIC_LABELS = new Set([
+	'create-room', 'join-room', 'start-room', 'continue', 'back', 'cancel',
+	'save', 'settings', 'chat', 'recording', 'transcript', 'milo', 'share',
+	'leave', 'microphone', 'camera', 'play', 'pause', 'replay', 'on', 'off'
+]);
+const STATIC_MARK_RE = /data-ux-static="([^"]+)"/g;
+
+function patchReplayDiscovery() {
+	const dir = 'build/cic/chunks';
+	let found = null;
+	for (const f of readdirSync(dir)) {
+		if (!f.endsWith('.js')) continue;
+		const src = readFileSync(join(dir, f), 'utf8');
+		if (!REPLAY_EXPORT_RE.test(src)) continue;
+		const missing = REPLAY_ANCHORS.filter((a) => !src.includes(a));
+		if (missing.length) {
+			console.error(`[patch-pages] replay recorder ${f} lost masking anchors: ${missing.join(', ')}`);
+			process.exit(1);
+		}
+		if (found) {
+			console.error(`[patch-pages] two replay recorder chunks? ${found} + ${f}`);
+			process.exit(1);
+		}
+		found = f;
+	}
+	if (!found) {
+		console.error('[patch-pages] no replay recorder chunk found — vendored bundle changed?');
+		process.exit(1);
+	}
+	writeFileSync('build/cic/replay-chunk.txt', `${found}\n`);
+	console.log(`[patch-pages] replay recorder → ${found}`);
+
+	// every data-ux-static mark across the vendored build must map to the
+	// canned-label dictionary — a new mark would show unreviewed text
+	let marks = 0;
+	for (const f of jsFiles('build/cic')) {
+		const src = readFileSync(f, 'utf8');
+		for (const m of src.matchAll(STATIC_MARK_RE)) {
+			marks++;
+			if (!STATIC_LABELS.has(m[1])) {
+				console.error(`[patch-pages] unknown data-ux-static label "${m[1]}" in ${f} — replay would show unreviewed text`);
+				process.exit(1);
+			}
+		}
+	}
+	console.log(`[patch-pages] ${marks} data-ux-static marks — all dictionary labels`);
+}
+
 function patchJsCss(src, file = '') {
 	if (file.endsWith('/site/index14cf.html')) return SITE_VARIANT_REDIRECT(BASE);
 	let out = src.replace(ABS_RE, (_m, q, p) => `${q}${BASE}${p}`);
@@ -121,6 +190,7 @@ for (const file of jsFiles('build')) {
 	console.log(`[patch-pages] env gate neutralized in ${file} (${count} site${count > 1 ? 's' : ''})`);
 }
 console.log(`[patch-pages] asset base refs fixed in ${assetPatched} files`);
+patchReplayDiscovery();
 if (!patched && !sawGate) {
 	console.error('[patch-pages] environment gate not found — vendored bundle changed?');
 	process.exit(1);

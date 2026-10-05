@@ -144,6 +144,63 @@ didn't initiate — the portal can never create a new charge. Recommended Cloudf
 `/pay/checkout`, `/pay/link-begin`, `/pay/challenge` → ~10 req/min per IP;
 `/sessions/new` on cic-sfu → ~30/min per IP.
 
+### UX telemetry (opt-in analytics + masked replay)
+
+Three pieces: the `/api/ux` Pages Function (bindings in root `wrangler.toml`),
+the `cic-ux-replay` R2 bucket, and the vendored Counterscale worker.
+
+1. **Enable Analytics Engine on the account once** — dashboard → Workers →
+   Analytics Engine (`/workers/analytics-engine` on the account). This is a
+   one-time account toggle; wrangler refuses AE bindings until it's on.
+2. **R2 bucket + retention**:
+   ```bash
+   wrangler r2 bucket create cic-ux-replay
+   ```
+   Then a lifecycle rule expiring `ux-replay/` at 30 days (keep the default
+   multipart-abort rule when PUTting):
+   ```bash
+   curl -X PUT "$CF_API/accounts/$ACCOUNT_ID/r2/buckets/cic-ux-replay/lifecycle" \
+     -H "Authorization: Bearer $CF_TOKEN" -H 'content-type: application/json' -d '{
+     "rules":[
+       {"id":"expire-replay-30d","enabled":true,"conditions":{"prefix":"ux-replay/"},
+        "deleteObjectsTransition":{"condition":{"type":"Age","maxAge":2592000}}},
+       {"id":"Default Multipart Abort Rule","enabled":true,"conditions":{},
+        "abortMultipartUploadsTransition":{"condition":{"type":"Age","maxAge":604800}}}]}'
+   ```
+3. **Pages secrets** (project `circle-engine`):
+   ```bash
+   wrangler pages secret put UX_HMAC --project-name circle-engine   # 64-hex
+   wrangler pages secret put UX_ADMIN --project-name circle-engine  # replay viewer bearer
+   ```
+   `UX_DISABLED=1` as a project var is the kill switch for all collection.
+4. **Counterscale worker** (`vendor/counterscale`, MIT — unmodified upstream
+   except wrangler name/dataset/bucket):
+   ```bash
+   cd vendor/counterscale && pnpm install && pnpm --filter @counterscale/server build
+   cd packages/server && wrangler deploy
+   wrangler secret put CF_ACCOUNT_ID      # regenleadership account id
+   wrangler secret put CF_BEARER_TOKEN    # API token with Account Analytics: Read
+   wrangler secret put CF_PASSWORD_HASH   # bcrypt of the dashboard password
+   wrangler secret put CF_JWT_SECRET      # random hex
+   wrangler secret put CF_AUTH_ENABLED    # 'true'
+   wrangler r2 bucket create cic-analytics-rollups   # daily rollup storage
+   ```
+   Dashboard: `https://cic-analytics.regenleadership.workers.dev` — password
+   login. The site-id used by the client is `circle-engine`.
+5. **Querying funnel events** (Analytics Engine SQL):
+   ```bash
+   curl -X POST "$CF_API/accounts/$ACCOUNT_ID/analytics_engine/sql" \
+     -H "Authorization: Bearer $CF_TOKEN" --data \
+     "SELECT blob1 AS event, count() FROM cic_ux_events
+      WHERE timestamp > now() - INTERVAL '7' DAY GROUP BY event ORDER BY count() DESC"
+   ```
+6. **Replay admin viewer**: `https://<pages>/admin/replay` — paste the
+   `UX_ADMIN` token; sessions list, click to play masked rrweb.
+
+Privacy contract lives in `docs/SECURITY.md` §UX telemetry — enum-only
+events, `•`-masked replay, GPC/DNT double-enforced, 30-day replay retention,
+revoke deletes the visit prefix.
+
 ## B. Self-host (no Cloudflare)
 
 `deploy/` ships a three-service compose stack: **caddy** (static+TLS+proxy),
@@ -171,6 +228,7 @@ Caddy provisions and renews certificates itself.
 | cic-ai-gateway / cic-dsp | unset → all AI stays on-device (default free path) |
 | Speechmatics SaaS | `VITE_CIC_SPEECH_URL` → on-prem RT endpoint (same protocol) |
 | Access admin | self-host has no console — meters are Cloudflare-side |
+| UX telemetry | `/api/ux/*` absent → emitters no-op after one failed mint; consent toggles stay but collect nothing (nothing leaves the browser) |
 
 Optional heavier services — a faster-whisper/piper speech container or an
 on-prem Speechmatics appliance — plug in via `VITE_CIC_SPEECH_URL` /

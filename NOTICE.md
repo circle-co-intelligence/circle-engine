@@ -62,6 +62,11 @@ Additional asset attributions:
 - `static/libarchive/libarchive.wasm` — BSD-2-Clause (libarchive core,
   Tim Kientzle et al.); the JS glue (`libarchive.js`) is MIT.
 - `static/dotlottie-player.wasm` — MIT (LottieFiles dotlottie-web).
+- `vendor/counterscale/` — MIT (Ben Vinegar et al., github.com/benvinegar/
+  counterscale). Deployed as the `cic-analytics` worker for cookieless,
+  consent-gated traffic analytics. See `vendor/counterscale/LICENSE`.
+- `rrweb-player` (admin replay viewer) and the rrweb core inlined in the
+  vendored masked recorder — MIT (rrweb-io).
 
 Font licenses: Lato/EB Garamond/Caveat — OFL-1.1 (text vendored at
 `static/licenses/OFL-1.1.txt`); Switzer — Fontshare ITF Free Font License

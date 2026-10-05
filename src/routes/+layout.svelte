@@ -9,6 +9,8 @@
 	onMount(() => {
 		initDeepLinks();
 		void initErrorMonitoring();
+		// consent-gated UX telemetry — no-ops silently until the user opts in
+		void import('$lib/obs/ux').then((m) => m.initUx());
 	});
 </script>
 

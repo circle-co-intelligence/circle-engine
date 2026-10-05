@@ -14,9 +14,15 @@
 		if (q.get('code')) code = q.get('code') ?? '';
 		if (q.get('name')) name = q.get('name') ?? '';
 		try { name ||= sessionStorage.getItem('cic.name') ?? ''; } catch {}
+		void import('$lib/obs/ux').then((m) => m.ux()?.step('setup_opened'));
 	});
 
 	function join() {
+		const fresh = !code.replace(/\D/g, '');
+		void import('$lib/obs/ux').then((m) => {
+			const u = m.ux();
+			if (u) u.ack(u.activate(fresh ? 'create_room' : 'join_room'));
+		});
 		const c = code.replace(/\D/g, '').slice(0, 6) || Math.floor(100000 + Math.random() * 900000).toString();
 		const params = new URLSearchParams();
 		if (name.trim()) {

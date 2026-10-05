@@ -107,3 +107,52 @@ Analytics Engine — an attacker can stop writing but can't erase history.
   procedural (2FA, scoped tokens, rotation) plus the append-only AE audit.
 - Liveness of spend relies on clients honestly reporting usage — the paid
   tier is honest-metering, not adversarial billing isolation.
+
+## UX telemetry (opt-in)
+
+Product analytics + session replay exist **only behind explicit per-visit
+consent** (`cic.uxConsent.v1`, written by the room's consent toggle). Design:
+
+- **Consent gate**: nothing initializes until `analytics:true`; replay
+  additionally requires `replay:true`. `navigator.globalPrivacyControl` /
+  `doNotTrack` force both off client-side, and the Pages Function refuses
+  collection again server-side on `Sec-GPC`/`DNT` headers — a tampered
+  client still can't emit.
+- **Session**: `POST /api/ux/session` mints an HMAC-signed token carrying
+  only `{visitId, exp}` — a per-load UUID in sessionStorage. No account,
+  IP, room code, or device identifier exists in the token, so tokens can't
+  be correlated across loads or tied to a person.
+- **Funnel events** → Analytics Engine (`cic_ux_events`). The event schema
+  is a fixed enum vocabulary (page/step/target/role/browser/device) —
+  unknown field values are dropped server-side, free text is impossible,
+  and room-code paths are normalized to `/room` before any write
+  (`/room/803351` never reaches a blob). The only request-derived field is
+  coarse `request.cf.country`; IPs are never persisted. AE datapoints are
+  immutable for their retention window (~90d), so nothing written may
+  identify a person — that is the deletion strategy.
+- **Traffic** → `cic-analytics` worker (vendored MIT Counterscale):
+  cookieless If-Modified-Since visitor counting, no identifiers, no IP
+  storage; our client sends the sanitized path only.
+- **Replay** → R2 `cic-ux-replay`, only when `replay:true` **and** inside a
+  room. The vendored masked rrweb recorder (`static/cic/chunks/`):
+  all text → `•`, all inputs masked (every input type), media/images/
+  canvas/iframes/fonts/CSS-images blocked, `[data-message]`/
+  `[data-transcript]`/participant-name/avatar selectors blocked,
+  `data-ux-static` resolves to a fixed dictionary of ~22 canned labels —
+  never DOM text. `meta.href` is synthetic (`replay.invalid/{page}`), so
+  URLs — and therefore room codes — cannot appear in a recording.
+  Hard caps: 10min / 5MB / 32 chunks per visit. `patch-pages.mjs` fails
+  the build if the masking anchors or label dictionary change.
+- **Revocation**: `POST /api/ux/revoke` deletes the visit's whole R2
+  prefix (indistinguishable 204 — no existence oracle); AE datapoints are
+  unlinkable so there is nothing person-scoped to delete. R2 lifecycle
+  also expires `ux-replay/` at 30 days.
+- **Admin access**: `GET /api/ux/admin/replay/*` requires the `UX_ADMIN`
+  bearer (constant-ish comparison over a high-entropy secret); objects are
+  never public. The viewer at `/admin/replay` shows anonymous visit ids
+  only — there is no identity column to display.
+
+Residuals: replay shows interaction geometry (where people click); the
+If-Modified-Since scheme is "tracking" under GDPR but sits behind the same
+consent; a compromised `cic-analytics`/Pages origin could accept forged
+datapoints (bounded: enum vocabulary only, no exfil target).

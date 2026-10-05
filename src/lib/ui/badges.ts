@@ -96,12 +96,14 @@ export function mountBadges(session: RoomSession): () => void {
 	let panel: HTMLElement | null = null;
 	let unmountWb: (() => void) | null = null;
 	const toggleWb = async () => {
+		const u = (await import('../obs/ux')).ux();
 		if (panel) {
 			unmountWb?.();
 			panel.remove();
 			panel = null;
 			return;
 		}
+		u?.step('tool_opened');
 		panel = document.createElement('div');
 		panel.style.cssText =
 			'position:fixed;inset:10% 12%;z-index:9998;background:#fff;border-radius:16px;' +
@@ -110,6 +112,7 @@ export function mountBadges(session: RoomSession): () => void {
 		try {
 			const { mountWhiteboard } = await import('../whiteboard/island');
 			unmountWb = await mountWhiteboard(panel, session.notes.doc);
+			u?.step('tool_succeeded');
 		} catch (e) {
 			console.error('[whiteboard] mount failed', e);
 			panel.textContent = `whiteboard unavailable — ${e instanceof Error ? e.message : e}`;
@@ -205,7 +208,10 @@ export function mountBadges(session: RoomSession): () => void {
 			span.appendChild(mk('strong', '', a.label));
 			span.appendChild(mk('span', 'text-[11px] text-[var(--muted)]', a.desc));
 			b.appendChild(span);
-			b.onclick = () => a.run(b);
+			b.onclick = () => {
+				void import('../obs/ux').then((m) => m.ux()?.step('tool_opened'));
+				a.run(b);
+			};
 			wrap.appendChild(b);
 		}
 		body.appendChild(wrap);

@@ -50,6 +50,7 @@ Required license texts ship in `static/licenses/`.
 | `qr-scanner` | 1.4.2 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/nimiq/qr-scanner |
 | `react` | 18.3.1 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/facebook/react |
 | `react-dom` | 18.3.1 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/facebook/react |
+| `rrweb-player` | 2.1.7 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/rrweb-io/rrweb |
 | `sframe-ratchet` | 0.5.8 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/anatolykoptev/sframe-ratchet |
 | `sip.js` | 0.21.2 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/onsip/SIP.js |
 | `streamsaver` | 2.0.6 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://jimmywarting@github.com/jimmywarting/StreamSaver.js |
@@ -68,7 +69,7 @@ Required license texts ship in `static/licenses/`.
 
 | License | Package count |
 |---|---|
-| MIT | 377 |
+| MIT | 391 |
 | Apache-2.0 | 88 |
 | Apache-2.0 OR MIT | 66 |
 | ISC | 23 |
@@ -147,6 +148,9 @@ linking to an unmodified system library is compliant; no source offer owed.
 | `static/dotlottie-player.wasm` | MIT | github.com/LottieFiles/dotlottie-web | text at /licenses/MIT.txt |
 | `static/libarchive/` wasm | BSD-2-Clause (libarchive core) + MIT (JS glue) | github.com/libarchive/libarchive + nika-begiashvili/libarchivejs | text at /licenses/BSD-2-Clause.txt |
 | `static/excalidraw-assets/` (fonts + vendor chunk for the UMD build) | MIT | github.com/excalidraw/excalidraw (from @excalidraw/excalidraw dist) | text at /licenses/MIT.txt |
+| `vendor/counterscale/` (deployed as the `cic-analytics` worker — cookieless traffic analytics + dashboard) | MIT | github.com/benvinegar/counterscale | text at vendor/counterscale/LICENSE |
+| `static/cic/chunks/D_hX0jLj.js` masked replay recorder (rrweb inlined, org's own build) | org-owned, AGPL-3.0 (rrweb core MIT) | this repo + github.com/rrweb-io/rrweb | texts shipped |
+| `rrweb-player` (admin replay viewer dep) | MIT | github.com/rrweb-io/rrweb-player | resolved per package-lock |
 | `caption-capture-worklet.js`, `dg-capture-worklet.js`, `sw/`, `coi-serviceworker.js` | AGPL-3.0-only (own code) | this repo | — |
 | MediaPipe selfie-segmentation tflite (inside @twilio/video-processors) | Apache-2.0 | Google | NOTICE attribution |
 
@@ -188,7 +192,7 @@ Measured at generation time:
 
 | Metric | Value | Reading |
 |---|---|---|
-| Authored runtime LOC | 18,809 | vs 70 direct OSS deps + 596 pkgs in the transitive closure → **<5%** of the delivered application's source composition |
+| Authored runtime LOC | 20,178 | vs 71 direct OSS deps + 610 pkgs in the transitive closure → **<5%** of the delivered application's source composition |
 | Authored test/probe LOC | 2,670 | dev-time only, never shipped |
 | Shipped non-OSS bytes | **0%** | every build artifact is third-party OSS or org-owned AGPL-3.0 |
 | Org-authored shipped bytes | ~9 MiB of ~44 MiB (~20%) | vendored product bundles + compiled authored code — all AGPL-3.0, so OSS-licensed even though org-authored |

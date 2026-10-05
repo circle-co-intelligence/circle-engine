@@ -37,6 +37,6 @@ export default defineConfig({
 		}
 	},
 	test: {
-		include: ['src/**/*.test.ts', 'workers/**/*.test.ts']
+		include: ['src/**/*.test.ts', 'workers/**/*.test.ts', 'functions/**/*.test.ts']
 	}
 });

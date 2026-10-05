@@ -6,7 +6,7 @@
  *   /ws/caption/{code}   → CaptionSocket → sherpa-onnx streaming ASR
  *   /api/room-ui/*       → localStorage persistence (themes/preferences/defaults)
  *   /api/site-brand/*    → local brand assets
- *   /api/ux-events|room-ui/events|feedback → accepted (204) — no telemetry sink exists
+ *   /api/ux/*          → real telemetry endpoints (prod) / 204 sink (dev)
  *   /_app/version.json   → local build stamp
  *   /rec/abort|/rec-local/* → local recorder artifact store (memory-backed, real bytes)
  *   other same-origin /ws/* → refused (nothing claims those paths)
@@ -108,8 +108,15 @@ function patchFetch() {
 			return orig(`${base}/brand/${name === 'symbol-dark' ? 'logo.svg' : `${name}.png`}`, init);
 		}
 
-		// telemetry sinks — accepted locally, stored nowhere else
-		if (path === '/api/ux/events' || path === '/api/room-ui/events' || path === '/api/ux/revoke' || path === '/api/feedback')
+		// telemetry lanes: /api/ux/* is a REAL endpoint in prod (Pages
+		// Function → Analytics Engine + R2) — let it through. In dev there
+		// is no function; swallowing it with 204 keeps the emitters quiet.
+		if (path.startsWith('/api/ux/')) {
+			if (!import.meta.env.DEV) return orig(input, init);
+			return new Response(null, { status: 204 });
+		}
+		// remaining telemetry sinks — no backend exists anywhere
+		if (path === '/api/room-ui/events' || path === '/api/feedback')
 			return new Response(null, { status: 204 });
 
 		// version.json → our own build stamp (prevents their reload loop)
@@ -168,9 +175,26 @@ function patchGetUserMedia() {
 	if (!md?.getUserMedia) return;
 	const orig = md.getUserMedia.bind(md);
 	md.getUserMedia = async (constraints) => {
-		const stream = await orig(constraints);
-		trackLocalStream(stream);
-		return stream;
+		const target = constraints?.video ? 'camera' : 'microphone';
+		try {
+			const stream = await orig(constraints);
+			trackLocalStream(stream);
+			import('../obs/ux').then((m) => {
+				const u = m.ux();
+				if (u) u.success(u.activate(target));
+			});
+			return stream;
+		} catch (e) {
+			// aggregate signal only — which device class was denied, never why/who
+			import('../obs/ux').then((m) => {
+				const u = m.ux();
+				if (u) {
+					const id = u.activate(constraints?.video ? 'camera' : 'microphone');
+					u.failure(id);
+				}
+			});
+			throw e;
+		}
 	};
 }
 

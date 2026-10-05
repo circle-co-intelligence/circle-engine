@@ -7,3 +7,17 @@ compatibility_date = "2025-01-01"
 [[r2_buckets]]
 binding = "REC_BUCKET"
 bucket_name = "cic-rec"
+
+# UX telemetry — masked session-replay chunks (see functions/api/ux,
+# docs/SECURITY.md "UX telemetry"). Recommend a 30-day lifecycle expiry on
+# ux-replay/ via the R2 dashboard settings.
+[[r2_buckets]]
+binding = "UX_REPLAY"
+bucket_name = "cic-ux-replay"
+
+# UX telemetry — anonymized product-funnel events (enum fields only, no
+# identity/IP/content). Queried via the Analytics Engine SQL API; 90-day
+# retention window.
+[[analytics_engine_datasets]]
+binding = "UX_EVENTS"
+dataset = "cic_ux_events"
