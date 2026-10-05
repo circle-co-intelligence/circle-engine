@@ -1,0 +1,11 @@
+Co-Intelligence Circle — marketing site bundle
+Copyright (C) Co-Intelligence Circle / RegenLeadership
+
+The static marketing pages in this directory are the production pages
+of www.co-intelligence.online, vendored into circle-engine with scripts
+removed. Licensed under the GNU Affero General Public License v3 (see
+LICENSE.txt).
+
+Bundled fonts retain their own licenses: EB Garamond and Caveat under
+the SIL Open Font License 1.1, Switzer Variable under the Fontshare /
+Indian Type Foundry free font license.

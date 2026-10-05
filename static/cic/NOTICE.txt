@@ -1,0 +1,13 @@
+Co-Intelligence Circle — production application bundle
+Copyright (C) Co-Intelligence Circle / RegenLeadership
+
+The compiled application bundle in this directory is the production
+frontend of circle.co-intelligence.online, vendored into circle-engine
+as the visual/interaction source of truth for the self-hosted build of
+the same product. It is licensed under the GNU Affero General Public
+License v3 (see LICENSE.txt).
+
+This is a compiled artifact; the preferred form for modification is the
+org's frontend source repository. Bundle contents embed MIT-licensed
+third-party output (e.g. Tailwind CSS utilities, Excalidraw-related
+vendor code) which remains under its original licenses.

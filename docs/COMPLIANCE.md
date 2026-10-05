@@ -55,6 +55,10 @@ actually reads. It maps what the system *does* to what auditors ask.
   (verification gate).
 - New dependencies require a commercially-usable license listed in
   `docs/OSS-LICENSES.md` and ≥7-day-published versions.
+- Project code is AGPL-3.0 — serving the app over the network requires
+  offering source; satisfied by the public repo linked in the deployed
+  site footer (github.com/circle-co-intelligence/circle-engine). Keep
+  that link reachable in any fork/rebrand.
 
 ## Remaining gaps (honest)
 

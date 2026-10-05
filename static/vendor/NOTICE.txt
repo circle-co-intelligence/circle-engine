@@ -1,0 +1,7 @@
+Co-Intelligence Circle — vendored stylesheet bundle
+Copyright (C) Co-Intelligence Circle / RegenLeadership
+
+Compiled CSS split out of the production frontend bundle (see
+../cic/NOTICE.txt). Licensed under the GNU Affero General Public
+License v3 (see LICENSE.txt). Embeds MIT-licensed Tailwind CSS
+utilities, which remain MIT.

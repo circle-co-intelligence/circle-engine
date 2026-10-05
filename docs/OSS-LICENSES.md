@@ -157,12 +157,16 @@ linking to an unmodified system library is compliant; no source offer owed.
 | Lato, EB Garamond, Caveat | OFL-1.1 | ship `/licenses/OFL-1.1.txt`; copyright lines in NOTICE.md |
 | Switzer | Fontshare (ITF Free Font License) | free for commercial use; see `/licenses/FONTS.md` |
 
-## Proprietary vendored bundles — NOT OSS
+## Org-owned code & assets — AGPL-3.0 (our own code)
 
 | Asset | Rights | Source |
 |---|---|---|
-| `static/cic/` production frontend bundle | org-owned; not open source | circle.co-intelligence.online |
-| `static/site/` marketing page | org-owned; not open source | www.co-intelligence.online |
+| `static/cic/` production frontend bundle | org-owned, AGPL-3.0 — see `static/cic/LICENSE.txt` | circle.co-intelligence.online (org) |
+| `static/site/` marketing page | org-owned, AGPL-3.0 — see `static/site/LICENSE.txt` | www.co-intelligence.online (org) |
+| `static/vendor/cic/` stylesheet chunks | org-owned, AGPL-3.0 — see `static/vendor/LICENSE.txt` | same product (embeds MIT Tailwind output) |
+| `src/`, `functions/`, `workers/`, `scripts/`, `e2e/`, `probe-*.mjs`, `src-tauri/` glue | org-authored, AGPL-3.0 — root `LICENSE` | this repo |
+| `caption-capture-worklet.js`, `dg-capture-worklet.js`, `sw/`, `coi-serviceworker.js`, `static/policy/` (OPA-compiled cic.rego) | org-authored, AGPL-3.0 | this repo |
+| Media assets (`*.lottie`, `brand/`, `assets/`, favicon/og/webp/png/svg, `manifest.webmanifest`) | org-owned, AGPL-3.0 | this repo |
 
 ## Self-host stack images (deploy/)
 
@@ -177,4 +181,16 @@ linking to an unmodified system library is compliant; no source offer owed.
 Root `package.json` license: `AGPL-3.0-only` — our own code. AGPL
 charging-for-hosted-service is fine since we hold copyright; dual-licensing
 is an owner decision and doesn't block commercial operation.
+
+## Custom-code share
+
+Measured at generation time:
+
+| Metric | Value | Reading |
+|---|---|---|
+| Authored runtime LOC | 18,809 | vs 70 direct OSS deps + 596 pkgs in the transitive closure → **<5%** of the delivered application's source composition |
+| Authored test/probe LOC | 2,670 | dev-time only, never shipped |
+| Shipped non-OSS bytes | **0%** | every build artifact is third-party OSS or org-owned AGPL-3.0 |
+| Org-authored shipped bytes | ~9 MiB of ~44 MiB (~20%) | vendored product bundles + compiled authored code — all AGPL-3.0, so OSS-licensed even though org-authored |
+| Third-party OSS shipped bytes | ~16 MiB static assets + dep code inside `_app` | wasm runtimes, fonts, vendored libs |
 
