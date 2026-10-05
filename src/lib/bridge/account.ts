@@ -110,6 +110,7 @@ export interface BillingAccount {
 	} | null;
 	customerId: string | null;
 	sponsoredRooms: string[];
+	sponsored?: Record<string, { budget?: number; spent?: number } | true>;
 	devices: { keyHash: string; name?: string; at?: number; primary?: boolean }[];
 	passkeys: { credId: string; name?: string; at?: number }[];
 	limits: { maxSecondsPerDay?: number } | null;
@@ -225,11 +226,13 @@ export async function convertCredits(
 	return (await res.json()) as Awaited<ReturnType<typeof convertCredits>>;
 }
 
-/** host opts to cover the whole circle's paid lanes from their wallet */
-export async function sponsorRoom(room: string, on: boolean): Promise<boolean> {
+/** host opts to cover the circle's paid lanes from their wallet, bounded
+ *  by a cumulative per-room budget (seconds; default 4h, max 24h) — a
+ *  compromised server can only spend what the host already committed */
+export async function sponsorRoom(room: string, on: boolean, budgetSeconds?: number): Promise<boolean> {
 	const acc = localAccount();
 	if (!acc) return false;
-	const body = JSON.stringify({ room, accountId: acc.accountId, on });
+	const body = JSON.stringify({ room, accountId: acc.accountId, on, budgetSeconds });
 	const res = await payFetch(
 		'/sponsor',
 		{ method: 'POST', headers: { 'content-type': 'application/json' }, body },
@@ -262,13 +265,19 @@ export async function deviceLinkStatus(code: string): Promise<string | null> {
 	return ((await res.json()) as { accountId?: string }).accountId ?? null;
 }
 
-/** existing device: approve the device that parked code (signed + passkey) */
+/** existing device: approve the device that parked code (signed + passkey).
+ *  The pending device's pubkey goes into the signed body — MeterBus stores
+ *  key:<sha256(pub)> only when the hash matches, so a compromised pay
+ *  worker can't substitute an attacker's key. */
 export async function deviceLinkApprove(
 	code: string
 ): Promise<{ ok: boolean; accountId?: string; keyHash?: string }> {
 	const acc = localAccount();
 	if (!acc) return { ok: false };
-	const body = JSON.stringify({ accountId: acc.accountId, code, webauthn: await assertionFor() });
+	const st = await payFetch(`/link-status?code=${encodeURIComponent(code)}`);
+	const pub = st?.ok ? ((await st.json()) as { pub?: string }).pub : undefined;
+	if (!pub) return { ok: false };
+	const body = JSON.stringify({ accountId: acc.accountId, code, pub, webauthn: await assertionFor() });
 	const res = await payFetch(
 		'/link-approve',
 		{ method: 'POST', headers: { 'content-type': 'application/json' }, body },

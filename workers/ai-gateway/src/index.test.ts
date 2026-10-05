@@ -41,7 +41,7 @@ const fakeId = (name: string) =>
 		equals: (o: { toString(): string }) => String(o) === name
 	}) as unknown as DurableObjectId;
 
-const TOKENS = { admin: 'mt_admin', spend: 'mt_spend', probe: 'mt_probe' };
+const TOKENS = { admin: 'mt_admin', spend: 'mt_spend', probe: 'mt_probe', settle: 'mt_settle' };
 
 async function makeEnv(stores: Map<string, ReturnType<typeof fakeStorage>>, withAcl = true) {
 	const acl: Record<string, string> = {};
@@ -267,6 +267,104 @@ describe('MeterBus hardened mode', () => {
 		const res = await call(mb, `acct:${acct}`, '/debit', 'anything', { amount: 40 });
 		expect(res.status).toBe(200);
 		expect(store.map.get('balance')).toBe(60);
+	});
+
+	it('settle role can credit wallets but not sponsor or transfer', async () => {
+		const stores = new Map<string, ReturnType<typeof fakeStorage>>();
+		const env = await makeEnv(stores);
+		const acct = '9'.repeat(64);
+		const { mb, store } = makeDo(`acct:${acct}`, env, stores);
+		expect((await call(mb, `acct:${acct}`, '/credit', TOKENS.settle, { amount: 100, creditId: 'pi_x' })).status).toBe(200);
+		expect(store.map.get('balance')).toBe(100);
+		// but settle cannot touch an unsigned debit, a sponsor flag, or a transfer
+		expect((await call(mb, `acct:${acct}`, '/debit', TOKENS.settle, { amount: 50 })).status).toBe(401);
+		const { mb: mbRoom } = makeDo('ROOMS', env, stores);
+		expect((await call(mbRoom, 'ROOMS', '/sponsor', TOKENS.settle, { account: acct })).status).toBe(403);
+		expect((await call(mb, `acct:${acct}`, '/transfer', TOKENS.settle, { to: 'X', amount: 10 })).status).toBe(403);
+	});
+
+	it('kvput on acct:* internal keys is denied for every role', async () => {
+		const stores = new Map<string, ReturnType<typeof fakeStorage>>();
+		const env = await makeEnv(stores);
+		const acct = '8'.repeat(64);
+		const { mb } = makeDo(`acct:${acct}`, env, stores);
+		for (const tok of [TOKENS.admin, TOKENS.settle]) {
+			expect((await call(mb, `acct:${acct}`, '/kvput', tok, { key: 'balance', value: 99999 })).status).toBe(403);
+			expect((await call(mb, `acct:${acct}`, '/kvput', tok, { key: 'credit:pi_fake', value: 500 })).status).toBe(403);
+			expect((await call(mb, `acct:${acct}`, '/kvput', tok, { key: 'nonce:x', value: 0 })).status).toBe(403);
+		}
+	});
+
+	it('key:* writes require a live link-approve signature bound to the pubkey', async () => {
+		const stores = new Map<string, ReturnType<typeof fakeStorage>>();
+		const env = await makeEnv(stores);
+		const owner = await deviceKey();
+		const newDev = await deviceKey();
+		const { mb, store } = makeDo(`acct:${owner.keyHash}`, env, stores);
+		// unsigned injection attempt by the admin token alone → 401
+		expect((await call(mb, `acct:${owner.keyHash}`, '/kvput', TOKENS.admin,
+			{ key: `key:${newDev.keyHash}`, value: { pub: 'aa' } })).status).toBe(401);
+		// signed link-approve carrying the new device's pub → stored w/ binding
+		const auth = await signAuth(owner, owner.keyHash, '/pay/link-approve',
+			{ accountId: owner.keyHash, code: 'abc', pub: toHex(newDev.pub) });
+		expect((await call(mb, `acct:${owner.keyHash}`, '/kvput', TOKENS.admin,
+			{ key: `key:${newDev.keyHash}`, value: {}, auth })).status).toBe(200);
+		expect((store.map.get(`key:${newDev.keyHash}`) as { pub: string }).pub).toBe(toHex(newDev.pub));
+		// signed body that names a DIFFERENT pub → binding fails
+		const evil = await deviceKey();
+		const bad = await signAuth(owner, owner.keyHash, '/pay/link-approve',
+			{ accountId: owner.keyHash, code: 'abc', pub: toHex(evil.pub) });
+		expect((await call(mb, `acct:${owner.keyHash}`, '/kvput', TOKENS.admin,
+			{ key: `key:${newDev.keyHash}`, value: {}, auth: bad })).status).toBe(403);
+	});
+
+	it('sponsored:* writes come from the signed /pay/sponsor body; budget decrements', async () => {
+		const stores = new Map<string, ReturnType<typeof fakeStorage>>();
+		const env = await makeEnv(stores);
+		const dev = await deviceKey();
+		const { mb, store } = makeDo(`acct:${dev.keyHash}`, env, stores);
+		store.map.set('balance', 50000);
+		// unsigned sponsor record write → 401
+		expect((await call(mb, `acct:${dev.keyHash}`, '/kvput', TOKENS.admin,
+			{ key: 'sponsored:RM', value: true })).status).toBe(401);
+		// signed sponsor with budgetSeconds 100 → DO derives the record
+		const auth = await signAuth(dev, dev.keyHash, '/pay/sponsor',
+			{ accountId: dev.keyHash, room: 'RM', on: true, budgetSeconds: 100 });
+		expect((await call(mb, `acct:${dev.keyHash}`, '/kvput', TOKENS.admin,
+			{ key: 'sponsored:RM', value: true, auth })).status).toBe(200);
+		const rec = store.map.get('sponsored:RM') as { budget: number; spent: number };
+		expect(rec.budget).toBe(100);
+		// spend against it — bounded by the 100s budget, not just the call cap
+		const d1 = await call(mb, `acct:${dev.keyHash}`, '/debit', TOKENS.spend, { amount: 7200, room: 'RM' });
+		expect(d1.status).toBe(200);
+		expect(d1.body.debitedSeconds).toBe(100);
+		// budget exhausted → next debit fails 402 even though wallet has funds
+		expect((await call(mb, `acct:${dev.keyHash}`, '/debit', TOKENS.spend, { amount: 50, room: 'RM' })).status).toBe(402);
+		expect(store.map.get('balance')).toBe(50000 - 100);
+	});
+
+	it('cust:* accountId is first-binding even for settle', async () => {
+		const stores = new Map<string, ReturnType<typeof fakeStorage>>();
+		const env = await makeEnv(stores);
+		const { mb } = makeDo('cust:cus_1', env, stores);
+		expect((await call(mb, 'cust:cus_1', '/kvput', TOKENS.settle, { key: 'accountId', value: 'aaaa' })).status).toBe(200);
+		expect((await call(mb, 'cust:cus_1', '/kvput', TOKENS.settle, { key: 'accountId', value: 'bbbb' })).status).toBe(409);
+	});
+
+	it('passkey signCount bumps pass without auth; new enrollments need it', async () => {
+		const stores = new Map<string, ReturnType<typeof fakeStorage>>();
+		const env = await makeEnv(stores);
+		const acct = '7'.repeat(64);
+		const { mb, store } = makeDo(`acct:${acct}`, env, stores);
+		// bump-only update on an existing credential → allowed
+		expect((await call(mb, `acct:${acct}`, '/kvput', TOKENS.admin,
+			{ key: 'passkey:c1', value: { pubSpki: 'aa', signCount: 0 } })).status).toBe(401); // no existing → auth needed
+		store.map.set('passkey:c1', { pubSpki: 'aa', signCount: 1 });
+		expect((await call(mb, `acct:${acct}`, '/kvput', TOKENS.admin,
+			{ key: 'passkey:c1', value: { pubSpki: 'aa', signCount: 2 } })).status).toBe(200);
+		// pubkey swap under the same credId → not a bump, needs a signature
+		expect((await call(mb, `acct:${acct}`, '/kvput', TOKENS.admin,
+			{ key: 'passkey:c1', value: { pubSpki: 'bb', signCount: 3 } })).status).toBe(401);
 	});
 
 	it('writes a server-side audit entry for acct money ops', async () => {

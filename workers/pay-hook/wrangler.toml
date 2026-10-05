@@ -1,0 +1,33 @@
+name = "cic-pay-hook"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+# pinned: all circle-engine resources live on the regenleadership account
+account_id = "cf1f279501abeda01c1260a60cf95f5f"
+
+# The ONLY worker holding Stripe secrets — and only a read-scoped one.
+# Stripe webhook endpoint → https://cic-pay-hook.regenleadership.workers.dev/pay-hook/webhook
+# cic-pay forwards /pay/webhook + /pay/portal here verbatim.
+
+# MeterBus DO lives in cic-ai-gateway — bound by script name.
+[[durable_objects.bindings]]
+name = "METER"
+class_name = "MeterBus"
+script_name = "cic-ai-gateway"
+
+# Vars:
+#   APP_ORIGIN      — site origin for passkey rp / links
+#   PAY_PORTAL_LINK — Stripe's hosted portal login URL
+#                     (Settings → Billing → Customer portal → share link;
+#                     customer authenticates by email OTP — no API needed)
+#   PAY_PACKAGES    — same JSON as cic-pay (priceId → seconds mapping only;
+#                     the paymentLink field is unused here but harmless)
+#   PAY_SUB         — same JSON as cic-pay
+#
+# Secrets (`wrangler secret put` — never commit):
+#   STRIPE_READ_KEY       — rk_… RESTRICTED key, READ-ONLY scopes:
+#                           Checkout Sessions:read, Charges:read,
+#                           Events:read. No PaymentIntents/PaymentMethods/
+#                           Payouts/Portal — it cannot charge cards,
+#                           create sessions, or move money.
+#   STRIPE_WEBHOOK_SECRET — whsec_… for the webhook endpoint
+#   METER_TOKEN           — 'settle' role token (scripts/meter-acl.mjs)

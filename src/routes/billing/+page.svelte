@@ -24,6 +24,7 @@
 	let busy = $state(false);
 	let error = $state('');
 	let sponsorCode = $state('');
+	let sponsorHours = $state('4');
 	let showRecovery = $state(false);
 	let approveCode = $state('');
 	let linkCode = $state('');
@@ -81,7 +82,8 @@
 	}
 
 	async function toggleSponsor(room: string, on: boolean) {
-		if (!(await sponsorRoom(room, on))) {
+		const hours = Math.max(0.1, Math.min(24, Number(sponsorHours) || 4));
+		if (!(await sponsorRoom(room, on, Math.round(hours * 3600)))) {
 			error = 'Sponsorship needs a funded balance and your device key.';
 			return;
 		}
@@ -240,11 +242,14 @@
 			<p class="dim">When you host, you can pay everyone's paid-lane usage from your balance.</p>
 			<div class="sponsor-row">
 				<input placeholder="room code" bind:value={sponsorCode} />
-				<button class="ghost" onclick={() => toggleSponsor(sponsorCode.trim(), true)} disabled={!sponsorCode.trim()}>Cover</button>
+				<input class="cap-input" type="number" min="0.5" max="24" step="0.5" bind:value={sponsorHours} title="max hours to cover" />
+				<button class="ghost" onclick={() => toggleSponsor(sponsorCode.trim(), true)} disabled={!sponsorCode.trim()}>Cover up to {sponsorHours || 4}h</button>
 			</div>
+			<p class="dim">Capped coverage — the server can only ever spend the budget you commit here.</p>
 			{#if wallet?.sponsoredRooms?.length}
 				{#each wallet.sponsoredRooms as r (r)}
-					<div class="pack"><span>Sponsoring <strong>{r}</strong></span>
+					{@const rec = wallet?.sponsored?.[r]}
+					<div class="pack"><span>Sponsoring <strong>{r}</strong>{typeof rec === 'object' && rec?.budget ? ` — ${fmtSeconds(rec.spent ?? 0)}/${fmtSeconds(rec.budget)} used` : ''}</span>
 					<button class="ghost" onclick={() => toggleSponsor(r, false)}>Stop</button></div>
 				{/each}
 			{/if}
@@ -327,6 +332,7 @@
 	.pack .dim { display: block; }
 	.sponsor-row { display: flex; gap: 0.5rem; }
 	input { flex: 1; padding: 0.6rem; border: 1px solid #e4ded2; border-radius: 8px; font: inherit; }
+	.cap-input { flex: 0 0 4.5rem; }
 	button { padding: 0.6rem 1.1rem; border: 0; border-radius: 10px; background: #1f4d3a; color: #fff; font-weight: 600; cursor: pointer; }
 	button:disabled { opacity: 0.5; cursor: default; }
 	button.ghost { background: transparent; color: #1f4d3a; border: 1px solid #1f4d3a; }

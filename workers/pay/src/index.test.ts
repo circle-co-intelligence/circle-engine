@@ -1,42 +1,5 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { verifyStripeSignature, handleEvent, type Env } from './index';
-
-const SECRET = 'whsec_testsecret';
-
-async function sign(raw: string, secret: string, t = Math.floor(Date.now() / 1000)): Promise<string> {
-	const key = await crypto.subtle.importKey(
-		'raw',
-		new TextEncoder().encode(secret),
-		{ name: 'HMAC', hash: 'SHA-256' },
-		false,
-		['sign']
-	);
-	const mac = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(`${t}.${raw}`));
-	const hex = [...new Uint8Array(mac)].map((b) => b.toString(16).padStart(2, '0')).join('');
-	return `t=${t},v1=${hex}`;
-}
-
-describe('verifyStripeSignature', () => {
-	it('accepts a correctly-signed payload', async () => {
-		const raw = '{"id":"evt_1"}';
-		expect(await verifyStripeSignature(raw, await sign(raw, SECRET), SECRET)).toBe(true);
-	});
-
-	it('rejects tampered payloads and wrong secrets', async () => {
-		const raw = '{"id":"evt_1"}';
-		const h = await sign(raw, SECRET);
-		expect(await verifyStripeSignature('{"id":"evt_2"}', h, SECRET)).toBe(false);
-		expect(await verifyStripeSignature(raw, await sign(raw, 'whsec_other'), SECRET)).toBe(false);
-	});
-
-	it('rejects stale timestamps and malformed headers', async () => {
-		const raw = '{"id":"evt_1"}';
-		const old = Math.floor(Date.now() / 1000) - 600;
-		expect(await verifyStripeSignature(raw, await sign(raw, SECRET, old), SECRET)).toBe(false);
-		expect(await verifyStripeSignature(raw, 't=1', SECRET)).toBe(false);
-		expect(await verifyStripeSignature(raw, null, SECRET)).toBe(false);
-	});
-});
+import { describe, it, expect, vi } from 'vitest';
+import { type Env } from './index';
 
 /**
  * MeterBus stub — in-memory instances keyed by name; implements just the
@@ -129,96 +92,11 @@ const ACCT = 'a'.repeat(64);
 function env(over: Partial<Env> = {}): Env {
 	return {
 		METER: fakeMeter().ns,
-		PAY_SUB: JSON.stringify({ priceId: 'price_sub', seconds: 20000, label: 'Pro' }),
-		PAY_PACKAGES: JSON.stringify([{ id: 'pack8k', seconds: 8000, priceId: 'price_p8' }]),
+		PAY_SUB: JSON.stringify({ priceId: 'price_sub', seconds: 20000, label: 'Pro', paymentLink: 'https://buy.stripe.com/sub_link' }),
+		PAY_PACKAGES: JSON.stringify([{ id: 'pack8k', seconds: 8000, priceId: 'price_p8', paymentLink: 'https://buy.stripe.com/p8_link' }]),
 		...over
 	};
 }
-
-describe('handleEvent — checkout.session.completed', () => {
-	it('credits the account wallet on pack purchase', async () => {
-		const m = fakeMeter();
-		const e = env({ METER: m.ns });
-		await handleEvent(e, 'checkout.session.completed', {
-			id: 'cs_1', mode: 'payment', customer: 'cus_1',
-			metadata: { accountId: ACCT, kind: 'pack', seconds: '8000' }
-		});
-		const s = m.stores.get(`acct:${ACCT}`)!;
-		expect(s.get('balance')).toBe(8000);
-		expect(s.get('customer')).toBe('cus_1');
-		expect(m.stores.get('cust:cus_1')!.get('accountId')).toBe(ACCT);
-	});
-
-	it('credits the room pool for room top-ups', async () => {
-		const m = fakeMeter();
-		await handleEvent(env({ METER: m.ns }), 'checkout.session.completed', {
-			id: 'cs_2', mode: 'payment', customer: 'cus_2',
-			metadata: { accountId: ACCT, kind: 'room', room: 'ROOM9', seconds: '1800' }
-		});
-		expect(m.stores.get('ROOM9')!.get('balance')).toBe(1800);
-		expect(m.stores.get(`acct:${ACCT}`)).toBeDefined(); // cust link still recorded
-		expect(m.stores.get(`acct:${ACCT}`)!.get('balance')).toBeUndefined();
-	});
-
-	it('links the customer but does not credit on subscription checkout', async () => {
-		const m = fakeMeter();
-		await handleEvent(env({ METER: m.ns }), 'checkout.session.completed', {
-			id: 'cs_3', mode: 'subscription', customer: 'cus_3', subscription: 'sub_3',
-			metadata: { accountId: ACCT, kind: 'sub' }
-		});
-		expect(m.stores.get(`acct:${ACCT}`)!.get('balance')).toBeUndefined();
-		expect(m.stores.get(`acct:${ACCT}`)!.get('subscriptionId')).toBe('sub_3');
-	});
-});
-
-describe('handleEvent — invoice.paid', () => {
-	it('credits the monthly allotment once per invoice', async () => {
-		const m = fakeMeter();
-		const e = env({ METER: m.ns });
-		m.stores.set('cust:cus_4', new Map([['accountId', ACCT]]));
-		const inv = { id: 'in_1', customer: 'cus_4', subscription: 'sub_4', billing_reason: 'subscription_cycle' };
-		await handleEvent(e, 'invoice.paid', inv);
-		await handleEvent(e, 'invoice.paid', inv); // resent event → no double credit
-		expect(m.stores.get(`acct:${ACCT}`)!.get('balance')).toBe(20000);
-	});
-
-	it('ignores non-subscription invoices', async () => {
-		const m = fakeMeter();
-		const e = env({ METER: m.ns });
-		m.stores.set('cust:cus_5', new Map([['accountId', ACCT]]));
-		await handleEvent(e, 'invoice.paid', {
-			id: 'in_2', customer: 'cus_5', subscription: 'sub_5', billing_reason: 'subscription_update'
-		});
-		expect(m.stores.get(`acct:${ACCT}`)).toBeUndefined();
-	});
-});
-
-describe('handleEvent — subscription lifecycle + clawback', () => {
-	it('records subscription status on the account', async () => {
-		const m = fakeMeter();
-		const e = env({ METER: m.ns });
-		m.stores.set('cust:cus_6', new Map([['accountId', ACCT]]));
-		await handleEvent(e, 'customer.subscription.deleted', {
-			id: 'sub_6', customer: 'cus_6', status: 'canceled',
-			cancel_at_period_end: false, current_period_end: 1_800_000_000,
-			items: { data: [{ price: { id: 'price_sub' } }] }
-		});
-		const sub = m.stores.get(`acct:${ACCT}`)!.get('sub') as Record<string, unknown>;
-		expect(sub.status).toBe('canceled');
-		expect(sub.priceId).toBe('price_sub');
-	});
-
-	it('clamp-debits on charge.refunded using payment-intent metadata', async () => {
-		const m = fakeMeter();
-		const e = env({ METER: m.ns });
-		m.stores.set(`acct:${ACCT}`, new Map([['balance', 5000]]));
-		await handleEvent(e, 'charge.refunded', {
-			id: 'ch_1', metadata: { accountId: ACCT, seconds: '8000' }
-		});
-		// 5000 - 8000 floors at 0
-		expect(m.stores.get(`acct:${ACCT}`)!.get('balance')).toBe(0);
-	});
-});
 
 // ------------------------------------------------------------ signed auth
 
@@ -346,70 +224,86 @@ describe('signed billing endpoints', () => {
 	});
 });
 
-describe('webhook event re-verification', () => {
-	const mkWebhook = (body: object, secret: string) =>
-		sign(JSON.stringify(body), secret).then(
-			(sig) =>
-				new Request('https://pay.test/pay/webhook', {
-					method: 'POST',
-					headers: { 'content-type': 'application/json', 'stripe-signature': sig },
-					body: JSON.stringify(body)
-				})
+describe('payment-link checkout — no Stripe credential on cic-pay', () => {
+	it('assembles a Payment Link with the account bound as client_reference_id', async () => {
+		const res = await worker.fetch(
+			new Request('https://pay.test/pay/checkout', {
+				method: 'POST', headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ accountId: ACCT, kind: 'pack', packId: 'pack8k' })
+			}),
+			env()
 		);
+		const body = (await res.json()) as { url?: string };
+		expect(res.status).toBe(200);
+		expect(body.url).toBe(`https://buy.stripe.com/p8_link?client_reference_id=${ACCT}`);
+	});
 
-	it('rejects events Stripe cannot confirm — leaked secret ≠ minted credits', async () => {
-		vi.stubGlobal('fetch', async (u: unknown) =>
-			String(u).includes('/v1/events/') ? new Response('{}', { status: 404 }) : new Response('{}')
+	it('binds room top-ups as accountId:room in the reference', async () => {
+		const res = await worker.fetch(
+			new Request('https://pay.test/pay/checkout', {
+				method: 'POST', headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ accountId: ACCT, kind: 'room', packId: 'pack8k', room: 'ROOM9' })
+			}),
+			env()
 		);
+		const body = (await res.json()) as { url?: string };
+		expect(body.url).toContain(`client_reference_id=${ACCT}%3AROOM9`);
+	});
+
+	it('never calls the Stripe API — checkout works with zero Stripe env', async () => {
+		const calls: string[] = [];
+		vi.stubGlobal('fetch', async (u: unknown) => { calls.push(String(u)); return new Response('{}'); });
 		try {
-			const m = fakeMeter();
-			const e = env({ METER: m.ns, STRIPE_WEBHOOK_SECRET: SECRET, STRIPE_SECRET_KEY: 'rk_test_x' });
-			const evt = { id: 'evt_forge', type: 'checkout.session.completed', data: { object: { id: 'cs_x', metadata: { accountId: ACCT, seconds: '8000' } } } };
-			const res = await worker.fetch(await mkWebhook(evt, SECRET), e);
-			expect(res.status).toBe(400);
-			expect(m.stores.get(`acct:${ACCT}`)).toBeUndefined();
+			await worker.fetch(
+				new Request('https://pay.test/pay/checkout', {
+					method: 'POST', headers: { 'content-type': 'application/json' },
+					body: JSON.stringify({ accountId: ACCT, kind: 'sub' })
+				}),
+				env()
+			);
+			expect(calls.filter((u) => u.includes('api.stripe.com'))).toHaveLength(0);
 		} finally {
 			vi.unstubAllGlobals();
 		}
 	});
+});
 
-	it('rejects tampered payloads even when the event id is real', async () => {
-		vi.stubGlobal('fetch', async (u: unknown) =>
-			String(u).includes('/v1/events/')
-				? new Response(JSON.stringify({ id: 'evt_real', type: 'checkout.session.completed', data: { object: { id: 'cs_REAL' } } }))
-				: new Response('{}')
+describe('portal + webhook forward to cic-pay-hook', () => {
+	const fakeHook = (seen: { url: string; body: string; sig: string | null }[]) =>
+		({
+			fetch: async (u: string, init?: RequestInit) => {
+				seen.push({
+					url: String(u),
+					body: String(init?.body ?? ''),
+					sig: (init?.headers as Headers).get('stripe-signature')
+				});
+				return new Response(JSON.stringify({ received: true }));
+			}
+		}) as unknown as Fetcher;
+
+	it('webhook forwards the raw signed payload verbatim via the binding', async () => {
+		const seen: { url: string; body: string; sig: string | null }[] = [];
+		const evt = JSON.stringify({ id: 'evt_1', type: 'ping', data: { object: {} } });
+		const res = await worker.fetch(
+			new Request('https://pay.test/pay/webhook', {
+				method: 'POST',
+				headers: { 'content-type': 'application/json', 'stripe-signature': 't=1,v1=x' },
+				body: evt
+			}),
+			env({ PAY_HOOK: fakeHook(seen) })
 		);
-		try {
-			const m = fakeMeter();
-			const e = env({ METER: m.ns, STRIPE_WEBHOOK_SECRET: SECRET, STRIPE_SECRET_KEY: 'rk_test_x' });
-			// real event id but swapped object → data.object.id mismatch
-			const evt = { id: 'evt_real', type: 'checkout.session.completed', data: { object: { id: 'cs_FORGED', metadata: { accountId: ACCT, seconds: '8000' } } } };
-			const res = await worker.fetch(await mkWebhook(evt, SECRET), e);
-			expect(res.status).toBe(400);
-		} finally {
-			vi.unstubAllGlobals();
-		}
+		expect(res.status).toBe(200);
+		expect(seen[0].url).toBe('https://pay-hook/pay-hook/webhook');
+		expect(seen[0].body).toBe(evt);
+		expect(seen[0].sig).toBe('t=1,v1=x');
 	});
 
-	it('processes a Stripe-confirmed event and credits once', async () => {
-		vi.stubGlobal('fetch', async (u: unknown) =>
-			String(u).includes('/v1/events/')
-				? new Response(JSON.stringify({ id: 'evt_ok', type: 'checkout.session.completed', data: { object: { id: 'cs_ok' } } }))
-				: new Response('{}')
+	it('webhook is 503 when the hook is unbound', async () => {
+		const res = await worker.fetch(
+			new Request('https://pay.test/pay/webhook', { method: 'POST', body: '{}' }),
+			env()
 		);
-		try {
-			const m = fakeMeter();
-			const e = env({ METER: m.ns, STRIPE_WEBHOOK_SECRET: SECRET, STRIPE_SECRET_KEY: 'rk_test_x' });
-			const evt = { id: 'evt_ok', type: 'checkout.session.completed', data: { object: { id: 'cs_ok', mode: 'payment', customer: 'cus_9', metadata: { accountId: ACCT, kind: 'pack', seconds: '8000' } } } };
-			expect((await worker.fetch(await mkWebhook(evt, SECRET), e)).status).toBe(200);
-			expect(m.stores.get(`acct:${ACCT}`)!.get('balance')).toBe(8000);
-			// replayed verbatim → dedupe
-			const dup = await worker.fetch(await mkWebhook(evt, SECRET), e);
-			expect((await dup.json() as { duplicate?: boolean }).duplicate).toBe(true);
-			expect(m.stores.get(`acct:${ACCT}`)!.get('balance')).toBe(8000);
-		} finally {
-			vi.unstubAllGlobals();
-		}
+		expect(res.status).toBe(503);
 	});
 });
 

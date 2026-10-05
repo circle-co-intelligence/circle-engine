@@ -31,33 +31,59 @@ Calls app) — without them `/api/ice` and `/api/sfu` degrade gracefully
 path runs STUN-only, which covers most consumer NATs but not symmetric
 NATs/corporate firewalls.
 
-### Billing (cic-pay + Stripe)
+### Billing (cic-pay + cic-pay-hook + Stripe)
 
-`workers/pay/` deploys `cic-pay` — the Stripe bridge. It binds ai-gateway's
-MeterBus DO via `script_name`, so wallets/room pools share one ledger.
+Billing is split across two workers so that **no client-facing worker holds
+any Stripe credential**:
+
+- `workers/pay/` → `cic-pay` — the public bridge. Checkout is Stripe
+  **Payment Link** URL assembly (no API call); portal + webhook requests
+  are forwarded verbatim to the hook worker. It holds only `METER_TOKEN`.
+- `workers/pay-hook/` → `cic-pay-hook` — the isolated Stripe worker. Holds
+  the only Stripe secrets, both minimal: a **read-only restricted key**
+  plus the webhook secret.
 
 ```bash
-cd workers/pay && wrangler deploy
-wrangler secret put STRIPE_SECRET_KEY      # rk_… restricted key (see below)
+cd workers/pay-hook && wrangler deploy
+wrangler secret put STRIPE_READ_KEY        # rk_… restricted key (see below)
 wrangler secret put STRIPE_WEBHOOK_SECRET  # whsec_… from the webhook below
-wrangler secret put METER_TOKEN            # 'admin' role — scripts/meter-acl.mjs
+wrangler secret put METER_TOKEN            # 'settle' role — scripts/meter-acl.mjs
+# PAY_PORTAL_LINK is a plain var (public hosted link, not a secret):
+#   wrangler deploy --var PAY_PORTAL_LINK:https://billing.stripe.com/p/login/<id>
+
+cd ../pay && wrangler deploy   # [[services]] binding → cic-pay-hook
+wrangler secret put METER_TOKEN            # 'admin' role
 ```
 
-**Use a restricted Stripe key (`rk_…`), not a full `sk_…`.** cic-pay only
-ever calls four endpoints, so the key needs exactly four permissions —
+**Stripe key — restricted `rk_…` on cic-pay-hook only, read-only.**
 Dashboard → Developers → API keys → Create restricted key:
 
 | Permission | Access | Used for |
 |---|---|---|
-| Checkout Sessions | Write | `/pay/checkout` |
-| Billing Portal Sessions | Write | `/pay/portal` |
-| Charges | Read | refund/dispute metadata lookup |
+| Checkout Sessions | **Read** | line-item lookup → price → seconds |
+| Charges | Read | refund/dispute → bounded clawback resolution |
 | Events | Read | webhook event re-verification |
 
-Everything else stays `None` — in particular no PaymentIntents, no
-PaymentMethods, no Payouts — so a leaked key cannot charge saved payment
-methods or move money. `/pay/status` reports `keyType` (`restricted`/`full`)
-so you can verify.
+Everything else stays `None` — no PaymentIntents, no PaymentMethods, no
+Payouts, no Checkout or Portal write — **the capability to charge a card
+or open a session does not exist on this key**. `/pay-hook/status` reports
+`readKey: 'restricted'`.
+
+**Checkout = Payment Links.** Create one Payment Link per pack and one for
+the subscription (Dashboard → Payment Links), each pointing to its price.
+Put the `https://buy.stripe.com/…` URLs in `PAY_PACKAGES[].paymentLink` /
+`PAY_SUB.paymentLink`. `/pay/checkout` assembles
+`link?client_reference_id=<accountId>` (or `<accountId>:<room>` for room
+top-ups) — the hook worker resolves the purchased price to seconds at
+settlement time.
+
+**Portal = hosted login link.** Stripe's billing portal has a shareable
+login URL (Dashboard → Settings → Billing → Customer portal → "Share a
+link to the portal") — `https://billing.stripe.com/p/login/<id>`. Set it
+as `PAY_PORTAL_LINK` on cic-pay-hook; `/pay/portal` returns it after the
+signed-request + step-up checks, and the customer authenticates with an
+email OTP on Stripe's domain. No `billing_portal/sessions` API call
+exists anywhere in the codebase.
 
 The webhook additionally re-fetches each event via `GET /v1/events/{id}`
 before crediting (Events:Read) — a leaked `whsec_` alone cannot forge
@@ -69,35 +95,52 @@ cic-ai-gateway, every ledger call needs a role token and `acct:*` money
 ops need a client signature / sponsorship / matching credit. Generate:
 
 ```bash
-node scripts/meter-acl.mjs   # prints 3 tokens + the ACL JSON
+node scripts/meter-acl.mjs   # prints 4 tokens + the ACL JSON
 ```
 
-Deploy order matters — set all three `METER_TOKEN` secrets (cic-pay=admin,
-cic-ai-gateway=spend, cic-sfu=probe) **before** setting `METER_ACL` on
-cic-ai-gateway, or calls start 401ing. `GET /ai/status` reports
-`meterAcl: true` when the gate is live.
+Deploy order matters — set all four `METER_TOKEN` secrets (cic-pay=admin,
+cic-ai-gateway=spend, cic-sfu=probe, cic-pay-hook=settle) **before** setting
+`METER_ACL` on cic-ai-gateway, or calls start 401ing. `GET /ai/status`
+reports `meterAcl: true` when the gate is live.
+
+Privileged wallet records (`key:*` device keys, `passkey:*`,
+`sponsored:*`, `limits`) additionally require the client's own signature —
+MeterBus derives the stored value from the signed body, so a compromised
+worker can't register an attacker device key or fake a sponsorship.
+Internal keys (`balance`, `credit:*`, `nonce:*`, …) are unwritable via
+kvput for every role.
 
 Vars in `workers/pay/wrangler.toml` (or `wrangler deploy --var`):
-`APP_ORIGIN` (site origin for checkout redirects), `PAY_PACKAGES` (JSON
-pack catalog: id/label/seconds/priceId), `PAY_SUB` (JSON monthly plan).
+`APP_ORIGIN`, `PAY_PACKAGES` (JSON pack catalog:
+id/label/seconds/priceId/paymentLink), `PAY_SUB` (JSON monthly plan with
+paymentLink). Mirror `PAY_PACKAGES`/`PAY_SUB` onto cic-pay-hook (it maps
+price → seconds at settlement). cic-pay reaches the hook via the
+`[[services]]` binding (`PAY_HOOK` → `cic-pay-hook`); `PAY_HOOK_URL`
+remains only as a self-host fallback — workers.dev fetches between
+same-account workers are refused (error 1042), so do not rely on the URL
+path on Cloudflare.
 
 Stripe Dashboard → Developers → Webhooks → add endpoint:
-`https://cic-pay.regenleadership.workers.dev/pay/webhook` with events
-`checkout.session.completed`, `invoice.paid`,
+`https://cic-pay-hook.regenleadership.workers.dev/pay-hook/webhook`
+(cic-pay's `/pay/webhook` forwards there too, so either URL works) with
+events `checkout.session.completed`, `invoice.paid`,
 `customer.subscription.updated`, `customer.subscription.deleted`,
 `charge.refunded`, `charge.dispute.created`.
 
 Spend model: `acct:<accountId>` wallet per user. The accountId is a public
 identifier (sha256 of the device's signing key); spend requires an
 x-cic-signed request — see docs/SECURITY.md. `POST /pay/sponsor` lets a
-funded host's wallet cover a whole circle; otherwise each participant's
-paid lanes draw their own wallet, falling back to the room pool.
-Frontend calls it via `VITE_CIC_PAY_ENDPOINT` (default path prefix `/pay`).
+funded host's wallet cover a circle **up to a committed budget**
+(default 4h, max 24h — `budgetSeconds` in the signed body); otherwise each
+participant's paid lanes draw their own wallet, falling back to the room
+pool. Frontend calls it via `VITE_CIC_PAY_ENDPOINT` (default `/pay`).
 
 Recommended Stripe portal configuration (Dashboard → Settings → Billing →
 Customer portal): enable invoice history, payment-method update, and
 subscription cancellation; disable plan switching (single plan — proration
-invoices aren't credited). Recommended Cloudflare rate-limit rules:
+invoices aren't credited) and keep subscription *pausing* off. Disabling
+plan switching also means a customer can't be upsold into a charge they
+didn't initiate — the portal can never create a new charge. Recommended Cloudflare rate-limit rules:
 `/pay/checkout`, `/pay/link-begin`, `/pay/challenge` → ~10 req/min per IP;
 `/sessions/new` on cic-sfu → ~30/min per IP.
 

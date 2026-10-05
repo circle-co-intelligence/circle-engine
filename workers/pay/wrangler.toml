@@ -11,22 +11,29 @@ name = "METER"
 class_name = "MeterBus"
 script_name = "cic-ai-gateway"
 
+# cic-pay → cic-pay-hook — service binding, not a URL fetch: worker→worker
+# fetches on workers.dev within one account are rejected (error 1042).
+[[services]]
+binding = "PAY_HOOK"
+service = "cic-pay-hook"
+
+# NO Stripe secrets on this worker — by design.
+# Checkout = Payment-Link URL assembly (client_reference_id binds the
+# settlement target). Portal + webhook are forwarded verbatim to
+# cic-pay-hook, the only worker holding Stripe secrets (read-only rk_ +
+# whsec_). A compromised cic-pay cannot charge cards or mint sessions.
+#
 # Vars (set here or via `wrangler deploy --var`):
-#   APP_ORIGIN    — site origin for checkout success/cancel, e.g.
-#                   https://circle-engine-7ny.pages.dev
-#   PAY_PACKAGES  — JSON array of one-time credit packs:
+#   APP_ORIGIN    — site origin, e.g. https://circle-engine-7ny.pages.dev
+#   PAY_HOOK_URL  — https://cic-pay-hook.regenleadership.workers.dev
+#   PAY_PACKAGES  — JSON array of one-time credit packs with Payment Links:
 #                   [{"id":"pack8k","label":"8,000 seconds","seconds":8000,
-#                     "priceId":"price_…","amountCents":500,"currency":"usd"}]
+#                     "priceId":"price_…","paymentLink":"https://buy.stripe.com/…",
+#                     "amountCents":500,"currency":"usd"}]
 #   PAY_SUB       — JSON monthly plan:
-#                   {"priceId":"price_…","seconds":20000,"label":"Circle Pro",
+#                   {"priceId":"price_…","paymentLink":"https://buy.stripe.com/…",
+#                    "seconds":20000,"label":"Circle Pro",
 #                    "amountCents":800,"currency":"usd"}
 #
 # Secrets (`wrangler secret put` — never commit):
-#   STRIPE_SECRET_KEY      — prefer a RESTRICTED key (rk_…) scoped to
-#                            Checkout Sessions:write, Billing Portal
-#                            Sessions:write, Charges:read, Events:read.
-#                            A full sk_ works but can charge saved cards —
-#                            /pay/status reports keyType so you can check.
-#   STRIPE_WEBHOOK_SECRET  — whsec_… for the /pay/webhook endpoint
-#   METER_TOKEN            — 'admin' role token for MeterBus (see
-#                            scripts/meter-acl.mjs)
+#   METER_TOKEN — 'admin' role token for MeterBus (scripts/meter-acl.mjs)

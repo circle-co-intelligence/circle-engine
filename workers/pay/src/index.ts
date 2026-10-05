@@ -1,39 +1,44 @@
 /**
- * cic-pay — Stripe billing bridge (Cloudflare Worker).
+ * cic-pay — billing bridge (Cloudflare Worker). Holds NO Stripe credential.
  *
- * The bearer billing identity is the browser-local accountId (an unguessable
- * 64-hex token held in the user's localStorage — see src/lib/bridge/account.ts).
- * Stripe Checkout carries it as client_reference_id + metadata; the webhook
- * settles events into MeterBus-backed pools:
+ * Accounts are self-certifying: accountId = sha256(device pubkey); every
+ * wallet-touching op requires an ECDSA signature MeterBus re-verifies.
+ * Checkout is Stripe Payment-Link URL assembly (client_reference_id binds
+ * the settlement target: `<accountId>` or `<accountId>:<room>`); portal and
+ * webhook are forwarded verbatim to cic-pay-hook — the only worker holding
+ * Stripe secrets (read-only rk_ + whsec_).
  *
+ * MeterBus pools:
  *   acct:<accountId>   — the user's wallet ({balance,spent} + 'customer',
- *                        'sub', 'sponsored:<room>' KV records)
- *   <room>             — room pool (existing paid-tier semantics) + 'sponsor'
- *   cust:<customerId>  — stripe customer → accountId (subscription events
- *                        carry the customer, not our metadata)
+ *                        'sub', 'sponsored:<room>', 'key:*', 'passkey:*',
+ *                        'limits', 'audit' KV records)
+ *   <room>             — room pool + 'sponsor'
+ *   cust:<customerId>  — stripe customer → accountId (first binding wins,
+ *                        enforced inside the DO)
  *   evt:<eventId>      — webhook dedupe via the /claim op
- *
- * No Stripe SDK — api.stripe.com speaks form-encoded HTTP and WebCrypto
- * verifies webhook signatures; zero deps keeps the deploy surface clean.
  *
  * Endpoints:
  *   GET  /pay/config                       → public package/plan catalog
- *   POST /pay/checkout {accountId,kind,…}  → Stripe Checkout Session url
- *   POST /pay/webhook                      → Stripe event intake (signed)
- *   GET  /pay/account?account=             → balance + subscription state
- *   POST /pay/portal   {accountId}         → Stripe Billing Portal url
- *   POST /pay/convert  {accountId,room,seconds} → acct→room credit move
- *   POST /pay/sponsor  {room,accountId,on} → host covers this circle
+ *   POST /pay/checkout {accountId,kind,…}  → Payment Link url
+ *   POST /pay/webhook                      → forwarded to cic-pay-hook
+ *   GET  /pay/account                      → signed; wallet + devices + audit
+ *   POST /pay/portal   {accountId}         → forwarded to cic-pay-hook
+ *   POST /pay/convert  {accountId,room,seconds} → signed acct→room move
+ *   POST /pay/sponsor  {room,accountId,on,budgetSeconds?} → signed host cover
  */
 
 export interface Env {
 	METER?: DurableObjectNamespace;
-	STRIPE_SECRET_KEY?: string;
-	STRIPE_WEBHOOK_SECRET?: string;
 	APP_ORIGIN?: string;
 	PAY_PACKAGES?: string;
 	PAY_SUB?: string;
+	PAY_HOOK?: Fetcher; // service binding → cic-pay-hook (portal + webhook)
+	PAY_HOOK_URL?: string; // fallback for self-hosts without the binding
 	METER_TOKEN?: string; // admin-role capability token for MeterBus ops
+	// No Stripe credential here by design: checkout uses pre-signed Payment
+	// Links and portal/webhook are forwarded to cic-pay-hook, which holds the
+	// read-only rk_ + whsec_. A compromised cic-pay cannot charge cards,
+	// mint checkout sessions, or forge settlements.
 }
 
 const cors = {
@@ -49,11 +54,13 @@ interface Pack {
 	label: string;
 	seconds: number;
 	priceId: string;
+	paymentLink?: string; // https://buy.stripe.com/… — pre-signed checkout
 	amountCents?: number;
 	currency?: string;
 }
 interface SubPlan {
 	priceId: string;
+	paymentLink?: string;
 	seconds: number;
 	label: string;
 	amountCents?: number;
@@ -62,7 +69,6 @@ interface SubPlan {
 
 const ACCOUNT_RE = /^[0-9a-f]{16,128}$/i;
 const ROOM_RE = /^[a-zA-Z0-9_-]{1,64}$/;
-const SIG_TOLERANCE_S = 300;
 
 export default {
 	async fetch(req: Request, env: Env): Promise<Response> {
@@ -100,14 +106,11 @@ export default {
 			if (url.pathname === '/pay/status' && req.method === 'GET')
 				return json({
 					ok: true,
-					stripe: !!env.STRIPE_SECRET_KEY,
-					// rk_* restricted keys can't charge saved cards — full sk_*
-					// keys work but widen the leak blast radius; see DEPLOYMENT.md
-					keyType: env.STRIPE_SECRET_KEY
-						? env.STRIPE_SECRET_KEY.startsWith('rk_')
-							? 'restricted'
-							: 'full'
-						: 'none',
+					// by design this worker holds NO Stripe credential —
+					// checkout is Payment-Link assembly; portal + webhook are
+					// forwarded to cic-pay-hook (the only worker with rk_/whsec_)
+					stripe: 'none',
+					hook: !!(env.PAY_HOOK ?? env.PAY_HOOK_URL),
 					meter: !!env.METER,
 					meterToken: !!env.METER_TOKEN
 				});
@@ -142,88 +145,58 @@ function origin(env: Env): string {
 
 /**
  * POST /pay/checkout {accountId, kind:'pack'|'sub'|'room', packId?, room?}
- * → {url} — redirect the user to Stripe Checkout. Seconds land via webhook.
- * kind 'room' tops a room pool directly; 'pack'/'sub' fund the account wallet.
+ * → {url} — the Stripe *Payment Link* URL with the settlement target bound
+ * into client_reference_id (`<accountId>` or `<accountId>:<room>`).
+ *
+ * No Stripe API call happens here — Payment Links are pre-signed hosted
+ * URLs minted once in the dashboard. cic-pay therefore holds NO Stripe
+ * credential: a compromise of this worker can mislabel a URL but cannot
+ * create a checkout session, a portal session, or a charge. Seconds land
+ * via cic-pay-hook's webhook (price → seconds from PAY_PACKAGES/PAY_SUB).
  */
 async function checkout(req: Request, env: Env): Promise<Response> {
-	if (!env.STRIPE_SECRET_KEY) return json({ error: 'payments unconfigured' }, 503);
-	const { accountId, kind, packId, room, seconds } = (await req.json()) as {
+	const { accountId, kind, packId, room } = (await req.json()) as {
 		accountId?: string;
 		kind?: string;
 		packId?: string;
 		room?: string;
-		seconds?: number;
 	};
 	if (!accountId || !ACCOUNT_RE.test(accountId)) return json({ error: 'accountId required' }, 400);
 
-	const base = origin(env);
-	const p: Record<string, string> = {
-		client_reference_id: accountId,
-		'metadata[accountId]': accountId,
-		success_url: `${base}/billing?checkout=ok&session_id={CHECKOUT_SESSION_ID}`,
-		cancel_url: `${base}/billing?checkout=canceled`,
-		allow_promotion_codes: 'true'
-	};
-
+	let link: string | undefined;
 	if (kind === 'sub') {
-		const sub = subPlan(env);
-		if (!sub) return json({ error: 'no subscription plan configured' }, 503);
-		p.mode = 'subscription';
-		p['line_items[0][price]'] = sub.priceId;
-		p['line_items[0][quantity]'] = '1';
-		p['metadata[kind]'] = 'sub';
-		p['subscription_data[metadata][accountId]'] = accountId;
+		link = subPlan(env)?.paymentLink;
+		if (!link) return json({ error: 'no subscription payment link configured' }, 503);
 	} else if (kind === 'pack' || kind === 'room') {
 		const pack = packs(env).find((x) => x.id === packId);
 		if (!pack) return json({ error: 'unknown pack' }, 400);
 		if (kind === 'room' && (!room || !ROOM_RE.test(room)))
 			return json({ error: 'room required' }, 400);
-		p.mode = 'payment';
-		p['line_items[0][price]'] = pack.priceId;
-		p['line_items[0][quantity]'] = '1';
-		p.customer_creation = 'always';
-		p['metadata[kind]'] = kind;
-		p['metadata[seconds]'] = String(Math.round(seconds ?? pack.seconds));
-		if (room) p['metadata[room]'] = room;
-		// refunds/disputes resolve back to the account via the PI's metadata
-		p['payment_intent_data[metadata][accountId]'] = accountId;
-		p['payment_intent_data[metadata][seconds]'] = p['metadata[seconds]'];
+		link = pack.paymentLink;
+		if (!link) return json({ error: 'no payment link configured for this pack' }, 503);
 	} else {
 		return json({ error: 'kind must be pack | sub | room' }, 400);
 	}
 
-	const res = await stripe(env, '/checkout/sessions', p);
-	const body = (await res.json()) as { url?: string; error?: { message?: string } };
-	if (!res.ok || !body.url) return json({ error: body.error?.message ?? 'checkout failed' }, 502);
-	return json({ url: body.url });
+	const u = new URL(link);
+	u.searchParams.set(
+		'client_reference_id',
+		kind === 'room' ? `${accountId}:${room}` : accountId
+	);
+	return json({ url: u.toString() });
 }
 
 // ------------------------------------------------------------- portal
 
-/** POST /pay/portal {accountId, webauthn?} → Stripe Billing Portal session url.
- *  Signed; passkey-asserted when the account has one enrolled. */
+/** POST /pay/portal {accountId, webauthn?} → Stripe Billing Portal url.
+ *  This worker holds no Stripe credential — the signed request is
+ *  forwarded verbatim to cic-pay-hook, which verifies the signature
+ *  itself (same canonical path) and creates the portal session with its
+ *  restricted read+portal key. */
 async function portal(req: Request, env: Env): Promise<Response> {
-	if (!env.STRIPE_SECRET_KEY) return json({ error: 'payments unconfigured' }, 503);
-	const raw = await req.text();
-	const { accountId, webauthn } = JSON.parse(raw || '{}') as {
-		accountId?: string;
-		webauthn?: Parameters<typeof verifyPasskey>[2];
-	};
-	if (!accountId || !ACCOUNT_RE.test(accountId)) return json({ error: 'accountId required' }, 400);
-	const auth = await authorize(env, req, '/pay/portal', raw, accountId);
-	if (auth instanceof Response) return auth;
-	const step = await needStepUp(env, accountId, 'portal', webauthn);
-	if (step) return step;
-	const customer = await kvget(env, `acct:${accountId}`, 'customer');
-	if (!customer) return json({ error: 'no billing customer for this account' }, 404);
-	const res = await stripe(env, '/billing_portal/sessions', {
-		customer: String(customer),
-		return_url: `${origin(env)}/billing`
-	});
-	const body = (await res.json()) as { url?: string; error?: { message?: string } };
-	if (!res.ok || !body.url) return json({ error: body.error?.message ?? 'portal failed' }, 502);
-	await audit(env, accountId, auth.keyHash, 'portal');
-	return json({ url: body.url });
+	const res = await hookFetch(env, '/pay-hook/portal', req);
+	if (!res) return json({ error: 'portal unconfigured' }, 503);
+	return new Response(res.body, { status: res.status, headers: { ...cors, 'content-type': 'application/json' } });
 }
 
 // ------------------------------------------------------------- wallet ops
@@ -273,15 +246,18 @@ async function convert(req: Request, env: Env): Promise<Response> {
 	return json({ status: 'purchased', seconds: amount, balance: body.balanceSeconds ?? 0 });
 }
 
-/** POST /pay/sponsor {room, accountId, on} — host covers the whole circle's
- *  paid lanes from their wallet. Only a funded account may sponsor. */
+/** POST /pay/sponsor {room, accountId, on, budgetSeconds?} — host covers
+ *  the circle's paid lanes from their wallet, bounded by a cumulative
+ *  per-room budget (default 4h, max 24h) enforced inside MeterBus — a
+ *  compromised gateway can only burn what the host already committed. */
 async function sponsor(req: Request, env: Env): Promise<Response> {
 	if (!env.METER) return json({ error: 'ledger unconfigured' }, 503);
 	const raw = await req.text();
-	const { room, accountId, on } = JSON.parse(raw || '{}') as {
+	const { room, accountId, on, budgetSeconds } = JSON.parse(raw || '{}') as {
 		room?: string;
 		accountId?: string;
 		on?: boolean;
+		budgetSeconds?: number;
 	};
 	if (!room || !ROOM_RE.test(room)) return json({ error: 'room required' }, 400);
 	if (!accountId || !ACCOUNT_RE.test(accountId)) return json({ error: 'accountId required' }, 400);
@@ -294,8 +270,9 @@ async function sponsor(req: Request, env: Env): Promise<Response> {
 			return json({ error: 'no funded balance to sponsor with' }, 402);
 	}
 	await meter(env, room, 'sponsor', { account: on ? accountId : null });
-	await kvput(env, `acct:${accountId}`, `sponsored:${room}`, on === true);
-	await audit(env, accountId, auth.keyHash, 'sponsor', `${on ? 'on' : 'off'} ${room}`);
+	// the DO derives {budget,spent} from the signed body — b.value is ignored
+	await kvput(env, `acct:${accountId}`, `sponsored:${room}`, on === true, auth);
+	await audit(env, accountId, auth.keyHash, 'sponsor', `${on ? 'on' : 'off'} ${room}${budgetSeconds ? ` budget=${budgetSeconds}s` : ''}`);
 	return json({ ok: true, sponsoring: on === true });
 }
 
@@ -326,8 +303,11 @@ async function accountInfo(req: Request, env: Env): Promise<Response> {
 		subscription: sub ?? null,
 		customerId: customer ?? null,
 		sponsoredRooms: Object.keys(sponsored)
-			.filter((k) => sponsored[k] === true)
+			.filter((k) => !!sponsored[k])
 			.map((k) => k.slice('sponsored:'.length)),
+		sponsored: Object.fromEntries(
+			Object.entries(sponsored).map(([k, v]) => [k.slice('sponsored:'.length), v])
+		),
 		devices: [
 			{ keyHash: account, primary: true },
 			...Object.entries(keys)
@@ -375,7 +355,7 @@ async function passkeyRegister(req: Request, env: Env): Promise<Response> {
 		name: passkey.name,
 		signCount: 0,
 		at: Date.now()
-	});
+	}, auth);
 	await audit(env, accountId, auth.keyHash, 'passkey-register', passkey.name);
 	return json({ ok: true });
 }
@@ -404,7 +384,9 @@ async function linkStatus(url: URL, env: Env): Promise<Response> {
 		| { pub: string; expiresAt: number; claimedBy?: string }
 		| null;
 	if (!pending || Date.now() > pending.expiresAt) return json({ error: 'expired' }, 404);
-	return json({ accountId: pending.claimedBy ?? null });
+	// pub is a public key — exposing it lets the approver bind the parked
+	// device into its signed body so MeterBus can verify the write end-to-end
+	return json({ accountId: pending.claimedBy ?? null, pub: pending.pub });
 }
 
 /** POST /pay/link-approve {accountId, code, webauthn?} — signed + step-up:
@@ -430,7 +412,12 @@ async function linkApprove(req: Request, env: Env): Promise<Response> {
 	if (pending.claimedBy && pending.claimedBy !== accountId)
 		return json({ error: 'already claimed' }, 409);
 	const keyHash = await sha256hex(hexBytes(pending.pub)!);
-	await kvput(env, `acct:${accountId}`, `key:${keyHash}`, { at: Date.now(), via: 'link' });
+	// defense in depth: the signed body carries `pub` too, and MeterBus only
+	// stores the record when sha256(body.pub) == the key name — this worker
+	// can't substitute a different device even while compromised
+	const bodyPub = (JSON.parse(raw) as { pub?: string }).pub;
+	if (bodyPub !== pending.pub) return json({ error: 'pub mismatch' }, 400);
+	await kvput(env, `acct:${accountId}`, `key:${keyHash}`, { pub: pending.pub, at: Date.now(), via: 'link' }, auth);
 	await kvput(env, '__links__', `pending:${code}`, { ...pending, claimedBy: accountId });
 	await audit(env, accountId, auth.keyHash, 'link-approve', keyHash.slice(0, 8));
 	return json({ ok: true, accountId, keyHash });
@@ -452,7 +439,7 @@ async function revoke(req: Request, env: Env): Promise<Response> {
 	if (auth instanceof Response) return auth;
 	const step = await needStepUp(env, accountId, 'revoke', webauthn);
 	if (step) return step;
-	await kvput(env, `acct:${accountId}`, `key:${pubHash}`, null);
+	await kvput(env, `acct:${accountId}`, `key:${pubHash}`, null, auth);
 	await audit(env, accountId, auth.keyHash, 'revoke', pubHash.slice(0, 8));
 	return json({ ok: true });
 }
@@ -472,7 +459,7 @@ async function limits(req: Request, env: Env): Promise<Response> {
 	const step = await needStepUp(env, accountId, 'limits', webauthn);
 	if (step) return step;
 	const cap = maxSecondsPerDay == null ? null : Math.max(0, Math.round(maxSecondsPerDay));
-	await kvput(env, `acct:${accountId}`, 'limits', cap ? { maxSecondsPerDay: cap } : null);
+	await kvput(env, `acct:${accountId}`, 'limits', cap ? { maxSecondsPerDay: cap } : null, auth);
 	await audit(env, accountId, auth.keyHash, 'limits', cap ? `${cap}s/day` : 'cleared');
 	return json({ ok: true, maxSecondsPerDay: cap });
 }
@@ -480,173 +467,16 @@ async function limits(req: Request, env: Env): Promise<Response> {
 // ------------------------------------------------------------- webhook
 
 /**
- * POST /pay/webhook — Stripe event intake. Signature-verified, deduped on
- * event.id, and only then dispatched. Never credits on the client redirect —
- * settlement is exclusively webhook-driven.
+ * POST /pay/webhook — Stripe event intake is forwarded verbatim to
+ * cic-pay-hook, which verifies the signature (whsec_), re-fetches the
+ * event with its read-only key, and settles into MeterBus as the `settle`
+ * role. Keeping this shim lets the Stripe endpoint stay pointed at
+ * cic-pay while the secrets live only on the isolated worker.
  */
 async function webhook(req: Request, env: Env): Promise<Response> {
-	if (!env.STRIPE_WEBHOOK_SECRET || !env.METER)
-		return json({ error: 'webhook unconfigured' }, 503);
-	const raw = await req.text();
-	const ok = await verifyStripeSignature(raw, req.headers.get('stripe-signature'), env.STRIPE_WEBHOOK_SECRET);
-	if (!ok) return json({ error: 'bad signature' }, 400);
-	const evt = JSON.parse(raw) as { id?: string; type?: string; data?: { object?: { id?: string } } };
-	if (!evt.id || !evt.type) return json({ error: 'bad event' }, 400);
-
-	// Anti-forgery: a leaked webhook secret alone must not mint credits, so
-	// re-fetch the event from Stripe — fabricated ids 404, tampered payloads
-	// mismatch data.object.id. Done BEFORE the dedupe claim so a forgery
-	// can't burn a real event's slot.
-	if (env.STRIPE_SECRET_KEY) {
-		const chk = await fetch(`https://api.stripe.com/v1/events/${encodeURIComponent(evt.id)}`, {
-			headers: { authorization: `Bearer ${env.STRIPE_SECRET_KEY}` }
-		});
-		if (!chk.ok) return json({ error: 'event not verifiable' }, 400);
-		const real = (await chk.json()) as {
-			id?: string;
-			type?: string;
-			data?: { object?: { id?: string } };
-		};
-		if (real.id !== evt.id || real.type !== evt.type || real.data?.object?.id !== evt.data?.object?.id)
-			return json({ error: 'event mismatch' }, 400);
-	}
-
-	// replay guard — first claim wins, forever
-	const claim = await meter(env, `evt:${evt.id}`, 'claim', { nonce: evt.id });
-	if (!claim.ok) return json({ received: true, duplicate: true });
-
-	await handleEvent(env, evt.type, (evt.data?.object ?? {}) as Record<string, unknown>, evt.id);
-	return json({ received: true });
-}
-
-export async function verifyStripeSignature(
-	raw: string,
-	header: string | null,
-	secret: string,
-	nowS = Math.floor(Date.now() / 1000)
-): Promise<boolean> {
-	if (!header || !secret) return false;
-	let t = '';
-	const v1s: string[] = [];
-	for (const part of header.split(',')) {
-		const [k, v] = part.split('=');
-		if (k === 't') t = v;
-		else if (k === 'v1') v1s.push(v);
-	}
-	if (!t || !v1s.length) return false;
-	if (Math.abs(nowS - Number(t)) > SIG_TOLERANCE_S) return false;
-	const key = await crypto.subtle.importKey(
-		'raw',
-		new TextEncoder().encode(secret),
-		{ name: 'HMAC', hash: 'SHA-256' },
-		false,
-		['sign']
-	);
-	const mac = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(`${t}.${raw}`));
-	const expected = toHex(new Uint8Array(mac));
-	return v1s.some((v1) => timingSafeEqual(expected, v1));
-}
-
-function timingSafeEqual(a: string, b: string): boolean {
-	if (a.length !== b.length) return false;
-	let diff = 0;
-	for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-	return diff === 0;
-}
-
-export async function handleEvent(
-	env: Env,
-	type: string,
-	obj: Record<string, unknown>,
-	evtId?: string
-): Promise<void> {
-	const meta = (obj.metadata ?? {}) as Record<string, string>;
-	// a linkable id for the credit record — clawback debits must name a
-	// credit they unwind, so a compromised worker can't drain wallets
-	const creditId = obj.payment_intent
-		? `pi:${obj.payment_intent}`
-		: `tx:${evtId ?? String(obj.id ?? '')}`;
-
-	if (type === 'checkout.session.completed') {
-		const accountId = meta.accountId ?? (obj.client_reference_id as string | undefined);
-		if (accountId && obj.customer)
-			await linkCustomer(env, accountId, String(obj.customer), String(obj.subscription ?? ''));
-		if (obj.mode === 'subscription') return; // allotments credit on invoice.paid
-		const seconds = Math.round(Number(meta.seconds ?? 0));
-		if (!accountId || seconds <= 0) return;
-		const target = meta.kind === 'room' && meta.room ? meta.room : `acct:${accountId}`;
-		await meter(env, target, 'credit', { amount: seconds, creditId, room: meta.room });
-		await kvput(env, `acct:${accountId}`, 'lastPurchase', { seconds, at: Date.now() });
-		return;
-	}
-
-	if (type === 'invoice.paid') {
-		const sub = subPlan(env);
-		const subscription = String(obj.subscription ?? '');
-		if (!sub || !subscription) return;
-		const reason = String(obj.billing_reason ?? '');
-		if (reason !== 'subscription_create' && reason !== 'subscription_cycle') return;
-		const accountId = meta.accountId ?? (await resolveAccount(env, String(obj.customer ?? '')));
-		if (!accountId) return;
-		// belt-and-suspenders on top of event.id dedupe: one credit per invoice
-		const lastInvoice = await kvget(env, `acct:${accountId}`, 'lastInvoice');
-		if (lastInvoice === obj.id) return;
-		await kvput(env, `acct:${accountId}`, 'lastInvoice', obj.id);
-		await meter(env, `acct:${accountId}`, 'credit', { amount: sub.seconds, creditId });
-		return;
-	}
-
-	if (type === 'customer.subscription.updated' || type === 'customer.subscription.deleted') {
-		const accountId = meta.accountId ?? (await resolveAccount(env, String(obj.customer ?? '')));
-		if (!accountId) return;
-		const items = (obj.items as { data?: { price?: { id?: string } }[] } | undefined)?.data;
-		await kvput(env, `acct:${accountId}`, 'sub', {
-			id: obj.id,
-			status: obj.status,
-			priceId: items?.[0]?.price?.id ?? null,
-			cancelAtPeriodEnd: obj.cancel_at_period_end === true,
-			currentPeriodEnd: typeof obj.current_period_end === 'number' ? obj.current_period_end * 1000 : null,
-			at: Date.now()
-		});
-		return;
-	}
-
-	if (type === 'charge.refunded' || type === 'charge.dispute.created') {
-		// clamp-debit the previously credited seconds (MeterBus floors at 0)
-		let m = meta;
-		if (!m.accountId && obj.id && env.STRIPE_SECRET_KEY) {
-			const res = await fetch(`https://api.stripe.com/v1/charges/${obj.id}`, {
-				headers: { authorization: `Bearer ${env.STRIPE_SECRET_KEY}` }
-			});
-			const ch = (await res.json()) as { metadata?: Record<string, string> };
-			m = ch.metadata ?? {};
-		}
-		const accountId = m.accountId;
-		const seconds = Math.round(Number(m.seconds ?? 0));
-		if (!accountId || seconds <= 0) return;
-		// the DO only unwinds up to the recorded credit:<id> — a clawback
-		// can't drain below what that purchase originally added
-		const clawbackOf = obj.payment_intent ? `pi:${obj.payment_intent}` : `tx:${evtId ?? String(obj.id)}`;
-		await meter(env, `acct:${accountId}`, 'debit', { amount: seconds, clawbackOf });
-		await kvput(env, `acct:${accountId}`, 'lastChargeback', { seconds, type, at: Date.now() });
-		return;
-	}
-}
-
-async function linkCustomer(env: Env, accountId: string, customer: string, subscription: string): Promise<void> {
-	// first binding wins — a stranger's checkout can't rebind the account's
-	// Stripe customer (and thereby its portal destination)
-	const existing = await kvget(env, `acct:${accountId}`, 'customer');
-	if (existing && existing !== customer) return;
-	await kvput(env, `cust:${customer}`, 'accountId', accountId);
-	await kvput(env, `acct:${accountId}`, 'customer', customer);
-	if (subscription) await kvput(env, `acct:${accountId}`, 'subscriptionId', subscription);
-}
-
-async function resolveAccount(env: Env, customer: string): Promise<string | null> {
-	if (!customer) return null;
-	const v = await kvget(env, `cust:${customer}`, 'accountId');
-	return typeof v === 'string' ? v : null;
+	const res = await hookFetch(env, '/pay-hook/webhook', req);
+	if (!res) return json({ error: 'webhook unconfigured' }, 503);
+	return new Response(res.body, { status: res.status, headers: { ...cors, 'content-type': 'application/json' } });
 }
 
 // ------------------------------------------------------------- auth
@@ -868,15 +698,29 @@ async function audit(env: Env, accountId: string, keyHash: string, op: string, d
 
 // ------------------------------------------------------------- plumbing
 
-async function stripe(env: Env, path: string, params: Record<string, string>): Promise<Response> {
-	return fetch(`https://api.stripe.com/v1${path}`, {
-		method: 'POST',
-		headers: {
-			authorization: `Bearer ${env.STRIPE_SECRET_KEY}`,
-			'content-type': 'application/x-www-form-urlencoded'
-		},
-		body: new URLSearchParams(params)
-	});
+/** headers to carry across the cic-pay → cic-pay-hook forward — the
+ *  signature block + stripe-signature only; forwarding req.headers whole
+ *  leaks our Host header and Cloudflare routes the fetch back to us */
+/** forward a request to cic-pay-hook — service binding preferred (same-
+ * account workers.dev fetches are refused with error 1042), URL fallback
+ * for self-hosts. Only signature/stripe headers cross the boundary. */
+async function hookFetch(env: Env, path: string, req: Request): Promise<Response | null> {
+	const init = { method: 'POST', headers: fwdHeaders(req), body: await req.text() };
+	if (env.PAY_HOOK) return env.PAY_HOOK.fetch(`https://pay-hook${path}`, init);
+	if (env.PAY_HOOK_URL) return fetch(`${env.PAY_HOOK_URL}${path}`, init);
+	return null;
+}
+
+function fwdHeaders(req: Request): Headers {
+	const h = new Headers();
+	for (const k of [
+		'content-type', 'stripe-signature',
+		'x-cic-account', 'x-cic-pub', 'x-cic-ts', 'x-cic-nonce', 'x-cic-sig'
+	]) {
+		const v = req.headers.get(k);
+		if (v) h.set(k, v);
+	}
+	return h;
 }
 
 function meter(env: Env, instance: string, op: string, body: object): Promise<Response> {
@@ -895,8 +739,14 @@ async function kvget(env: Env, instance: string, key: string): Promise<unknown> 
 	const res = await meter(env, instance, 'kvget', { key });
 	return ((await res.json()) as { value?: unknown }).value ?? null;
 }
-async function kvput(env: Env, instance: string, key: string, value: unknown): Promise<void> {
-	await meter(env, instance, 'kvput', { key, value });
+async function kvput(
+	env: Env,
+	instance: string,
+	key: string,
+	value: unknown,
+	auth?: AuthResult
+): Promise<void> {
+	await meter(env, instance, 'kvput', { key, value, auth: auth?.forward });
 }
 async function kvlist(env: Env, instance: string, prefix: string): Promise<Record<string, unknown>> {
 	const res = await meter(env, instance, 'kvlist', { prefix });

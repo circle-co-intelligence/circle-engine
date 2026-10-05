@@ -464,25 +464,33 @@ function meter(env: Env, room: string, op: string, body: object): Promise<Respon
  * needed. The shared '__grants__' instance holds redeemed grant nonces.
  * Hibernates idle; storage is KV-backed (per-key, no schema).
  */
-type MeterRole = 'admin' | 'spend' | 'probe';
+type MeterRole = 'admin' | 'spend' | 'probe' | 'settle';
 
 /**
  * Ops each role may invoke when METER_ACL is configured.
- *   probe — cic-sfu: balance reads + key lookup + nonce claims (its
- *           account-signature verifier needs them)
- *   spend — cic-ai-gateway: usage debits, grant-redemption credits on
- *           non-acct pools, telemetry/index writes
- *   admin — cic-pay: everything, incl. wallet credits, kv writes,
- *           sponsorship, transfers
+ *   probe  — cic-sfu: balance reads + key lookup + nonce claims (its
+ *            account-signature verifier needs them)
+ *   spend  — cic-ai-gateway: usage debits, grant-redemption credits on
+ *            non-acct pools, telemetry/index writes
+ *   settle — cic-pay-hook: webhook settlement — wallet credits, bounded
+ *            clawback debits, settlement-record kv writes. NO sponsor or
+ *            transfer, and acct:* debits still need the DO-level spend
+ *            rules (clawbackOf) — the settlement worker cannot drain.
+ *   admin  — cic-pay: everything, incl. wallet credits, kv writes,
+ *            sponsorship, transfers
  */
 const ROLE_OPS: Record<MeterRole, Set<string>> = {
 	probe: new Set(['/get', '/kvget', '/claim']),
 	spend: new Set(['/get', '/kvget', '/kvlist', '/claim', '/debit', '/credit', '/report', '/list', '/audit']),
+	settle: new Set(['/get', '/kvget', '/kvlist', '/kvput', '/claim', '/debit', '/credit', '/audit']),
 	admin: new Set(['/get', '/kvget', '/kvlist', '/kvput', '/claim', '/debit', '/credit', '/report', '/list', '/audit', '/sponsor', '/transfer'])
 };
 
 /** per-call ceiling for unsigned sponsored-room debits on a wallet */
 const SPONSORED_DEBIT_MAX_S = 7200;
+/** default/ceiling for a sponsored room's cumulative wallet budget */
+const DEFAULT_SPONSOR_BUDGET_S = 14_400; // 4h
+const MAX_SPONSOR_BUDGET_S = 86_400; // 24h
 
 export class MeterBus implements DurableObject {
 	constructor(
@@ -576,16 +584,17 @@ export class MeterBus implements DurableObject {
 			const balance = Math.max(0, ((await s.get<number>('balance')) ?? 0) - amount);
 			const spent = ((await s.get<number>('spent')) ?? 0) + amount;
 			await s.put({ balance, spent });
-			if (acct) await auditLocal(s, { op: 'debit', amount, via, room: b.room });
+			if (acct) await auditLocal(this.env, s, { op: 'debit', amount, via, room: b.room });
 			return json({ paid: balance > 0, balanceSeconds: balance, spentSeconds: spent, debitedSeconds: amount });
 		}
 		if (op === '/credit') {
-			if (acct && role !== 'admin') return json({ error: 'meter: forbidden' }, 403);
+			if (acct && role !== 'admin' && role !== 'settle')
+				return json({ error: 'meter: forbidden' }, 403);
 			const amount = Math.max(0, Math.round(b.amount ?? 0));
 			const balance = ((await s.get<number>('balance')) ?? 0) + amount;
 			await s.put('balance', balance);
 			if (b.creditId) await s.put(`credit:${b.creditId}`, amount);
-			if (acct) await auditLocal(s, { op: 'credit', amount, via: 'settlement', room: b.room });
+			if (acct) await auditLocal(this.env, s, { op: 'credit', amount, via: 'settlement', room: b.room });
 			return json({ ok: true, balanceSeconds: balance });
 		}
 		if (op === '/claim') {
@@ -621,6 +630,22 @@ export class MeterBus implements DurableObject {
 		}
 		if (op === '/kvput') {
 			if (!b.key) return json({ error: 'key required' }, 400);
+			if (acct) {
+				// wallet-instance writes are content-bound: privileged keys are
+				// derived from the client's signed body (never the caller's
+				// supplied value), settlement keys are settle/admin-only, and
+				// internal counters are unreachable from outside the DO.
+				const w = await authorizeKvput(s, acct, role, b);
+				if (w instanceof Response) return w;
+				await s.put(b.key, w);
+				return json({ ok: true });
+			}
+			// cust:* first-binding is enforced here too — a compromised settle
+			// worker can't re-map a victim's customer onto its own account
+			if ((b.inst ?? '').startsWith('cust:') && b.key === 'accountId') {
+				const cur = await s.get(b.key);
+				if (cur && cur !== b.value) return json({ error: 'customer already bound' }, 409);
+			}
 			await s.put(b.key, b.value ?? null);
 			return json({ ok: true });
 		}
@@ -671,14 +696,23 @@ export class MeterBus implements DurableObject {
 				body: JSON.stringify({ amount, inst: to, creditId: b.creditId })
 			});
 			const credited = (await res.json()) as { balanceSeconds?: number };
-			if (acct) await auditLocal(s, { op: 'transfer', amount, via, room: to });
+			if (acct) await auditLocal(this.env, s, { op: 'transfer', amount, via, room: to });
 			return json({ ok: true, balanceSeconds: credited.balanceSeconds ?? 0 });
 		}
 		if (op === '/audit') {
-			// signed-ops trail — last 50 {op, device, at, detail} on this instance
+			// signed-ops trail — last 50 {op, device, at, detail} on this
+			// instance, mirrored append-only to Analytics Engine
+			const e = (b.entry ?? {}) as { op?: string; device?: string; detail?: string };
 			const list = ((await s.get<unknown[]>('audit')) ?? []) as unknown[];
-			list.unshift(b.entry ?? {});
+			list.unshift(e);
 			await s.put('audit', list.slice(0, 50));
+			try {
+				this.env.AE?.writeDataPoint({
+					blobs: [e.op ?? '', e.device ?? '', e.detail ?? ''],
+					doubles: [0],
+					indexes: ['meter']
+				});
+			} catch { /* best-effort */ }
 			return json({ ok: true });
 		}
 		return json({ error: 'unknown op' }, 404);
@@ -795,8 +829,20 @@ async function authorizeSpend(
 		if (!v || !DEBIT_AUTH_PATHS.has(v.path)) return json({ error: 'spend auth failed' }, 401);
 		return { via: `key:${v.keyHash.slice(0, 8)}`, amount: v.amount, auth: { path: v.path, room: v.room } };
 	}
-	if (b.room && (await s.get(`sponsored:${b.room}`)))
-		return { via: `sponsored:${b.room}`, amount: Math.min(Math.max(0, Math.round(b.amount ?? 0)), SPONSORED_DEBIT_MAX_S) };
+	if (b.room) {
+		const raw = await s.get(`sponsored:${b.room}`);
+		// legacy boolean records migrate to the default budget
+		const rec = (
+			raw === true ? { budget: DEFAULT_SPONSOR_BUDGET_S, spent: 0 } : raw
+		) as { budget?: number; spent?: number; at?: number } | null;
+		if (rec?.budget) {
+			const remain = rec.budget - (rec.spent ?? 0);
+			const amt = Math.min(Math.max(0, Math.round(b.amount ?? 0)), SPONSORED_DEBIT_MAX_S, Math.max(0, remain));
+			if (amt <= 0) return json({ error: 'sponsor budget exhausted' }, 402);
+			await s.put(`sponsored:${b.room}`, { ...rec, spent: (rec.spent ?? 0) + amt });
+			return { via: `sponsored:${b.room}`, amount: amt };
+		}
+	}
 	if (b.clawbackOf) {
 		const credited = (await s.get<number>(`credit:${b.clawbackOf}`)) ?? 0;
 		const clawed = (await s.get<number>(`clawed:${b.clawbackOf}`)) ?? 0;
@@ -809,14 +855,125 @@ async function authorizeSpend(
 	return json({ error: 'wallet spend requires signature' }, 401);
 }
 
-/** append to the instance's 50-entry signed-ops ring (read via /pay/account) */
+/**
+ * authorizeKvput — acct:* writes are content-bound in hardened mode.
+ * Returns the value the DO itself decided to store (derived from the
+ * signed body for privileged keys, never trusting the caller's `value`),
+ * or a Response on rejection. A compromised admin/settle worker cannot
+ * register an attacker device key, fake a sponsorship, or loosen a cap.
+ */
+async function authorizeKvput(
+	s: DurableObjectStorage,
+	acct: string,
+	role: MeterRole,
+	b: { key?: string; value?: unknown; auth?: SignedAuth }
+): Promise<unknown | Response> {
+	const k = b.key!;
+	// ledger internals are unreachable via kvput for EVERY role —
+	// balance/spent move only through their own ops, and credit:/nonce:/
+	// dauth: records can't be forged to fake a clawback base or replay
+	if (
+		k === 'balance' || k === 'spent' || k === 'sponsor' || k === 'audit' ||
+		/^(credit|clawed|nonce|dauth|spendDay):/.test(k)
+	)
+		return json({ error: 'key is internal' }, 403);
+
+	// settlement records (written by cic-pay-hook during webhook handling or
+	// cic-pay's challenge endpoint) — settle/admin only, no client signature
+	if (
+		k === 'customer' || k === 'subscriptionId' || k === 'sub' ||
+		k === 'lastPurchase' || k === 'lastInvoice' || k === 'lastChargeback' ||
+		k.startsWith('chal:')
+	) {
+		if (role !== 'admin' && role !== 'settle') return json({ error: 'meter: forbidden' }, 403);
+		if (k === 'customer') {
+			const cur = await s.get(k);
+			if (cur && cur !== b.value) return json({ error: 'customer already bound' }, 409);
+		}
+		return b.value ?? null;
+	}
+
+	const priv = k.startsWith('key:') ? 'key'
+		: k.startsWith('passkey:') ? 'passkey'
+		: k.startsWith('sponsored:') ? 'sponsored'
+		: k === 'limits' ? 'limits'
+		: null;
+	if (priv) {
+		// worker-side signCount bump on an existing passkey — same pubkey,
+		// same credId, monotonic count only; needs no fresh signature
+		if (priv === 'passkey' && b.value && typeof b.value === 'object') {
+			const cur = await s.get<{ pubSpki?: string; signCount?: number }>(k);
+			const v = b.value as { pubSpki?: string; signCount?: number };
+			if (cur?.pubSpki && v.pubSpki === cur.pubSpki && (v.signCount ?? 0) > (cur.signCount ?? 0))
+				return v;
+		}
+		if (!b.auth) return json({ error: 'signed write required' }, 401);
+		const v = await verifyClientAuth(s, acct, b.auth);
+		if (!v) return json({ error: 'auth failed' }, 401);
+		const body = JSON.parse(b.auth.body || '{}') as Record<string, unknown>;
+
+		if (priv === 'key') {
+			const kh = k.slice(4);
+			if (b.value == null) {
+				// device revocation — the signed body names the key hash
+				if (v.path !== '/pay/revoke' || body.pubHash !== kh)
+					return json({ error: 'bad_auth_path' }, 401);
+				return null;
+			}
+			// device linking — DO derives the stored record so the key hash
+			// provably matches the pubkey the signed body carries
+			if (v.path !== '/pay/link-approve') return json({ error: 'bad_auth_path' }, 401);
+			const pub = String(body.pub ?? '');
+			if (!/^[0-9a-f]+$/i.test(pub) || (await sha256hex(hexToBytes(pub))) !== kh)
+				return json({ error: 'key binding failed' }, 403);
+			return { pub, at: Date.now(), via: 'link' };
+		}
+		if (priv === 'passkey') {
+			if (v.path !== '/pay/passkey-register') return json({ error: 'bad_auth_path' }, 401);
+			const p = body.passkey as { credId?: string; pubSpki?: string; name?: string } | undefined;
+			if (!p || `passkey:${p.credId}` !== k || !p.pubSpki)
+				return json({ error: 'passkey binding failed' }, 403);
+			return { pubSpki: p.pubSpki, name: p.name, signCount: 0, at: Date.now() };
+		}
+		if (priv === 'sponsored') {
+			if (v.path !== '/pay/sponsor') return json({ error: 'bad_auth_path' }, 401);
+			if (body.room !== k.slice(10)) return json({ error: 'room binding failed' }, 403);
+			if (body.on !== true) return null; // sponsor off
+			const cur = (await s.get<{ spent?: number }>(k)) ?? null;
+			const budget = Math.min(
+				MAX_SPONSOR_BUDGET_S,
+				Math.max(0, Math.round(Number(body.budgetSeconds ?? DEFAULT_SPONSOR_BUDGET_S)))
+			);
+			return { budget, spent: typeof cur === 'object' && cur ? cur.spent ?? 0 : 0, at: Date.now() };
+		}
+		// limits — value comes from the signed body
+		if (v.path !== '/pay/limits') return json({ error: 'bad_auth_path' }, 401);
+		const cap = body.maxSecondsPerDay == null ? null : Math.max(0, Math.round(Number(body.maxSecondsPerDay)));
+		return cap ? { maxSecondsPerDay: cap } : null;
+	}
+
+	// anything else on a wallet instance is admin-only
+	if (role !== 'admin') return json({ error: 'meter: forbidden' }, 403);
+	return b.value ?? null;
+}
+
+/** append to the instance's 50-entry signed-ops ring + mirror to AE (the
+ *  mirror is append-only — an attacker can stop writing but can't erase) */
 async function auditLocal(
+	env: Env,
 	s: DurableObjectStorage,
 	entry: { op: string; amount?: number; via?: string; room?: string }
 ): Promise<void> {
 	const list = ((await s.get<unknown[]>('audit')) ?? []) as unknown[];
 	list.unshift({ ...entry, at: Date.now() });
 	await s.put('audit', list.slice(0, 50));
+	try {
+		env.AE?.writeDataPoint({
+			blobs: [entry.op, entry.via ?? '', entry.room ?? ''],
+			doubles: [entry.amount ?? 0],
+			indexes: ['meter']
+		});
+	} catch { /* telemetry is best-effort */ }
 }
 
 function toHex(bytes: Uint8Array): string {
