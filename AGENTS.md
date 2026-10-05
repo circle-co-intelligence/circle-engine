@@ -51,15 +51,10 @@ Zero-server, client-only P2P video circle app. SvelteKit (adapter-static, `ssr=f
 - Linux WebRTC runtime: Fedora's WebKitGTK compiles RTCPeerConnection out
   (verified 2.52.1 — settings API exists but the JS binding stays hidden
   even with webrtcbin/nice/dtls/srtp elements all present).
-  The machine-level workaround is a WebRTC-enabled WebKitGTK build at
-  `~/webkit-webrt` (prebuilt from manafishrov's webkitgtk-webrtc OCI image,
-  install prefix binary-patched from /usr/lib/Manafish/webkit to
-  /home/terex/webkit-webrt — equal-length path substitution) plus missing
-  deps in `~/webkit-webrtc/deps` (icu74, jpeg8, jxl→0.7 symlinks, woff2) and
-  `~/webkit-webrtc/gst-plugins/libgstnice.so` (nicesink/nicesrc — without
-  them webrtcbin closes and ICE negotiation dies). Launch via
-  `~/bin/circle-webrtc` which sets LD_LIBRARY_PATH + GST_PLUGIN_PATH;
-  `~/.local/bin/circle` symlinks to it. Release builds also need
+  The fix is a **locally-built WebKitGTK 2.52.6 with ENABLE_WEB_RTC=ON** —
+  see "Native runtime" below. The retired workaround (2.48.7 prebuilt
+  image at `~/webkit-webrt`, launcher `~/bin/circle-webrtc-2.48`) is kept
+  as a fallback. Release builds also need
   `cargo build --features custom-protocol`.
 
 ## Invariants (do not violate)
@@ -93,19 +88,33 @@ podman run --rm --userns=keep-id \
   --manifest-path /src/src-tauri/Cargo.toml
 ```
 
-### Known WebKitGTK caveat: this runtime is not stable (native parked)
-The WebRTC-enabled WebKitGTK 2.48.7 build (`scripts/setup-webkit-webrtc.sh`)
-has multiple webrtcbin failure modes, all outside app code:
+### Native runtime: locally-built WebKitGTK 2.52.6 (supersedes 2.48.7 image)
+Fedora ships webkit2gtk4.1-2.52.1 compiled WITHOUT WebRTC, and the
+manafishrov prebuilt image tops out at 2.48.7. The fix in place is a
+local source build of **webkitgtk-2.52.6 with ENABLE_WEB_RTC=ON** at
+`~/webkit-webrtc-new/` (lib64/ + libexec/), built against a sysroot of
+dnf-downloaded -devel RPMs at `~/webkit-sysroot/` (no sudo needed) with
+tool wrappers at `~/webkit-tools/env.sh`. Configure flags:
+`-DPORT=GTK -DENABLE_WEB_RTC=ON -DUSE_LIBRICE=OFF` (2.52 replaced libnice
+with librice internally; OFF keeps the proven gst `nice` plugin path)
+plus `-DUSE_GTK4=OFF -DENABLE_SPEECH_SYNTHESIS=OFF -DENABLE_GAMEPAD=OFF
+-DUSE_JPEGXL=OFF -DUSE_AVIF=OFF -DUSE_LCMS=OFF -DENABLE_INTROSPECTION=OFF`.
+Two source patches were needed for GCC16: `std::isnan` qualification in
+`JSCJSValue.h` / `RenderBox.h` / `ShapeOutsideInfo.cpp`. Build with
+`ninja -j6` — higher parallelism OOMs this 30GiB box on unified sources.
 
-- Applying a remote offer can stall webrtcbin's `_set_description_task`
-  (observed both wedging permanently AND succeeding — timing-dependent).
-- `pc.close()` on a PLAYING webrtcbin joins an rtpsession thread that may
-  never exit — deadlocks the main thread; >10s → WebKit IPC watchdog
-  `crashAfter10Seconds` SIGABRTs the whole WebProcess.
-- `addIceCandidate` → `descriptionsFromWebRTCBin` synchronously queries the
-  element and can block the same way.
-- Its offerer path IS healthy: offers negotiate, ICE/DTLS complete, media
-  flows (verified: browser↔native `connected`, inbound audio RTP bytes).
+Launch via `~/bin/circle-webrtc` (LD_LIBRARY_PATH=webkit-webrtc-new/lib64
++ sysroot lib64, GST_PLUGIN_PATH picks up the extracted libgstnice.so).
+The old 2.48.7 launcher is preserved as `~/bin/circle-webrtc-2.48`.
+
+Verified: 3/4 native↔browser production joins via probe-native.mjs with
+zero WebProcess aborts (the 2.48.7 build intermittently SIGABRT'd).
+probe-native.mjs accepts `CIC_NATIVE_LAUNCHER=<path>` to A/B runtimes.
+
+Legacy 2.48.7 caveats (kept for reference — likely moot on 2.52.6):
+- `pc.close()` on a PLAYING webrtcbin could deadlock the WebProcess.
+- `addIceCandidate` could block on synchronous element queries.
+- Its offerer path was healthy; alwaysInitiate mode routed around the rest.
 
 `src/lib/net/wsRoom.ts` therefore carries ALWAYS_INITIATE mode (activated by
 `window.__TAURI_INTERNALS__` present, `location.protocol === 'tauri:'`, or
@@ -130,9 +139,6 @@ libnice hard-caps TURN servers per agent
 (NICE_CANDIDATE_MAX_TURN_SERVERS); /api/ice returns 6 turn/turns URLs so
 `limitTurnUrls` in net/room.ts trims to one URL per transport family
 (TLS/udp/tcp) under the Tauri shell only — the assert that killed the
-WebProcess mid-gather is routed around. Remaining caveat: this runtime
-can still abort the WebProcess under load — the durable fix is a
-WebKitGTK build with ENABLE_WEB_RTC=ON against the host's GStreamer (or
-an upstream release that ships it) — the manafishrov image tops out at
-2.48.7. Browser↔browser is unaffected by any of this (all quirks are
-gated on `alwaysInitiate`/Tauri detection) and re-verified end-to-end.
+WebProcess mid-gather is routed around. Browser↔browser is unaffected by
+any of this (all quirks are gated on `alwaysInitiate`/Tauri detection)
+and re-verified end-to-end.

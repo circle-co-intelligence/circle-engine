@@ -20,7 +20,7 @@ await p.click('button:has-text("Join circle")');
 await p.waitForFunction((c) => window.__cicDebug?.(c)?.self, CODE, { timeout: 60000 });
 console.log('browser seated, self =', (await dbg(p))?.self);
 
-const app = spawn('/home/terex/bin/circle-webrtc', [], {
+const app = spawn(process.env.CIC_NATIVE_LAUNCHER ?? '/home/terex/bin/circle-webrtc', [], {
 	env: {
 		...process.env,
 		CIC_WEB_URL: ROOM,
