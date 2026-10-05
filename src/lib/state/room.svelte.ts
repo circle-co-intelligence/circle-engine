@@ -44,6 +44,10 @@ import {
 
 /** consent round wait — silent peers are excluded, not waited on forever */
 const CONSENT_WAIT_MS = 10_000;
+/** language tag on caption-update frames — the configured speech lane's
+ *  language (VITE_CIC_SPEECH_LANG); 'auto' when auto-detect is on */
+const CAPTION_LANG =
+	(import.meta.env as Record<string, string | undefined>).VITE_CIC_SPEECH_LANG ?? 'en';
 
 /** same MediaStreamTrack set (ids), regardless of order — used to dedupe
  *  onPeerStream refires that carry no actual track change */
@@ -1513,7 +1517,8 @@ export class RoomSession {
 		// excluded participant (denied/silent while recording): our speech is
 		// never broadcast as captions, never stored, never fed to Milo
 		const excluded = this.recording && !this.isConsented(this.selfId);
-		if (!excluded) this.handle.sendRealtime({ t: 'caption-update', text, final, lang: 'en' });
+		if (!excluded)
+			this.handle.sendRealtime({ t: 'caption-update', text, final, lang: CAPTION_LANG });
 		if (final && !excluded) {
 			this.storeTranscriptLine(this.names[this.selfId] ?? this.displayName, text);
 			void this.maybeMilo(text);

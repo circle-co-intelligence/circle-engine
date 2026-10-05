@@ -11,7 +11,7 @@ actually reads. It maps what the system *does* to what auditors ask.
 | Room media (mesh) | SFrame E2EE, epoch-fenced | peer browsers only |
 | Room media (paid SFU) | TLS hop; ciphertext unless edge lane opted in | Cloudflare SFU — never stored |
 | Edge denoise (opt-in) | PLAINTEXT by design — visible `edge-processed, not E2EE` badge | cic-dsp DO, frame-scoped only, zero persistence |
-| Sensory lane (opt-in) | PLAINTEXT PCM → Speechmatics/AssemblyAI | provider ZDR terms; worker retains nothing. Deployment modes: SaaS relay (default), SaaS direct (60 s temp JWT — the long-lived key never reaches a browser), on-prem appliance or Speechmatics On-Device local service in a native shell (`SPEECH_BASE_URL` / `VITE_CIC_SPEECH_URL` — same RT protocol, zero third-party egress) |
+| Sensory lane (opt-in) | PLAINTEXT PCM → Speechmatics/AssemblyAI/OpenAI (`SPEECH_PROVIDER`) | provider ZDR terms; worker retains nothing. Deployment modes: SaaS relay (default), SaaS direct (60 s temp JWT — the long-lived key never reaches a browser), on-prem appliance or Speechmatics On-Device local service in a native shell (`SPEECH_BASE_URL` / `VITE_CIC_SPEECH_URL` — same RT protocol, zero third-party egress). The `openai` relay uses the Realtime transcription session (server VAD); the key rides `Sec-WebSocket-Protocol` outbound, never the browser |
 | Cloud AI (paid) | ZDR provider terms (ai-gateway stores nothing) | Workers AI default — same CF boundary |
 | Recordings | XChaCha20-Poly1305 sealed client-side | R2 ciphertext; key never leaves the room |
 | Room secret | URL `#fragment` only — never transmitted | nowhere |

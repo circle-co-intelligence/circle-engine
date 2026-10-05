@@ -13,7 +13,7 @@ both — only build-time `VITE_CIC_*` env differs.
 | Paid SFU | `/api/sfu` → Cloudflare Realtime | `CALLS_APP_ID`, `CALLS_APP_SECRET` Pages secrets |
 | Sealed recording | `/api/rec` → R2 (ciphertext only) | `REC_BUCKET` binding |
 | AI gateway | `cic-ai-gateway` worker | `METER`, `GRANT_PUBKEY`, `AI_*` |
-| Sensory/DSP | `cic-dsp` worker | `SPEECH_API_KEY` |
+| Sensory/DSP | `cic-dsp` worker | `SPEECH_PROVIDER`, `SPEECH_API_KEY`, `SPEECH_LANG`, `SPEECH_MODEL` |
 | Metering | MeterBus DO on ai-gateway | `METER` binding |
 | Billing | `cic-pay` worker | `STRIPE_*`, `PAY_*`, `APP_ORIGIN`, `METER` (script_name) |
 | Admin console | `/admin/*` on ai-gateway | `CF_ACCESS_TEAM`, `CF_ACCESS_AUD`, `GRANT_SECRET` |
@@ -143,6 +143,44 @@ plan switching also means a customer can't be upsold into a charge they
 didn't initiate — the portal can never create a new charge. Recommended Cloudflare rate-limit rules:
 `/pay/checkout`, `/pay/link-begin`, `/pay/challenge` → ~10 req/min per IP;
 `/sessions/new` on cic-sfu → ~30/min per IP.
+
+### Speech + AI provider configuration (cic-dsp, cic-ai-gateway)
+
+**cic-dsp `/speech` relay** — `SPEECH_PROVIDER` picks the upstream:
+
+| `SPEECH_PROVIDER` | Upstream | Languages | Extras |
+|---|---|---|---|
+| `speechmatics` (default) | RT SaaS / `SPEECH_BASE_URL` on-prem | `SPEECH_LANG` (default `en`; `auto` = provider LID) | diarization + audio events |
+| `assemblyai` | streaming v3 | provider default | speaker labels |
+| `openai` | Realtime transcription session | **auto per-segment — EN/DE/ES code-switching works** | no diarization/audio events |
+
+```bash
+cd workers/dsp && wrangler deploy
+wrangler secret put SPEECH_API_KEY    # openai: sk-… / speechmatics: api key
+wrangler deploy --var SPEECH_PROVIDER:openai --var SPEECH_MODEL:gpt-4o-transcribe
+```
+
+`SPEECH_MODEL` defaults to `gpt-4o-transcribe`; `SPEECH_LANG` only applies
+to the speechmatics lane (the openai lane auto-detects). Client-side
+`VITE_CIC_SPEECH_LANG` mirrors `SPEECH_LANG` for direct-mode and
+`caption-update` lang tags.
+
+**cic-ai-gateway `/ai/chat` (cloud Milo)** — `AI_PROVIDER` picks the
+upstream (`workers-ai` | `groq` | `openrouter` | `anthropic` | `openai`).
+`AI_CHAT_MODEL` + `AI_API_KEY` set the default model; `AI_REASONING_EFFORT`
+(`low|medium|high`) is forwarded as `reasoning_effort` on
+reasoning-capable models. Callers can override per-request via
+`{model, effort}` in the body — the frontend sends operator-configured
+`VITE_CIC_MILO_MODEL` / `VITE_CIC_MILO_EFFORT` when set. Client-chosen
+models are honored **only** when present in `AI_MODEL_ALLOWLIST` (JSON
+array) — `/ai/chat` is unauthenticated, so without the allowlist any
+anonymous caller could pick arbitrarily expensive models on the
+operator's key; unset means overrides are silently ignored. `effort` is
+validated to a fixed set.
+
+**Zero-retention**: all providers are used inference-only; no worker
+persists audio or transcripts. Provider ZDR terms still apply on their
+side — see docs/COMPLIANCE.md.
 
 ### UX telemetry (opt-in analytics + masked replay)
 

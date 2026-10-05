@@ -16,6 +16,16 @@ export function aiEndpoint(): string | null {
 	return (import.meta.env as Record<string, string | undefined>).VITE_CIC_AI_ENDPOINT ?? null;
 }
 
+/** operator-picked model + reasoning intensity for cloud Milo
+ *  (VITE_CIC_MILO_MODEL / VITE_CIC_MILO_EFFORT; unset = gateway defaults) */
+function miloOpts(): { model?: string; effort?: string } {
+	const e = import.meta.env as Record<string, string | undefined>;
+	return {
+		...(e.VITE_CIC_MILO_MODEL ? { model: e.VITE_CIC_MILO_MODEL } : {}),
+		...(e.VITE_CIC_MILO_EFFORT ? { effort: e.VITE_CIC_MILO_EFFORT } : {})
+	};
+}
+
 async function post<T>(path: string, body: unknown): Promise<T> {
 	const base = aiEndpoint();
 	if (!base) throw new Error('ai endpoint unconfigured');
@@ -55,7 +65,10 @@ export class CloudMilo {
 		const { text } = await post<{ text: string }>('/ai/chat', {
 			system: SYSTEM,
 			context: transcriptWindow.slice(-40),
-			prompt
+			prompt,
+			// operator-picked model/reasoning intensity → per-call override on
+			// OpenAI-compatible providers (unset = gateway default)
+			...(miloOpts() as Record<string, string>)
 		});
 		if (gen !== this.generation) return '';
 		this.state = 'speaking';

@@ -10,7 +10,7 @@
  * inference inside the same trust boundary.
  *
  * Env/secrets:
- *   AI_PROVIDER      — 'workers-ai' (default) | 'groq' | 'openrouter' | 'anthropic'
+ *   AI_PROVIDER      — 'workers-ai' (default) | 'groq' | 'openrouter' | 'anthropic' | 'openai'
  *   AI_API_KEY       — upstream key for non-CF providers (wrangler secret put)
  *   AI_CHAT_MODEL    — default '@cf/meta/llama-3.2-3b-instruct' (CF) or provider model
  *   AI_STT_MODEL     — default '@cf/openai/whisper-large-v3-turbo'
@@ -33,6 +33,11 @@ export interface Env {
 	AI_STT_MODEL?: string;
 	AI_TTS_MODEL?: string;
 	AI_BASE_URL?: string;
+	/** default reasoning intensity for reasoning models (low|medium|high) */
+	AI_REASONING_EFFORT?: string;
+	/** JSON array of models callers may select per-request, e.g.
+	 *  '["gpt-5-mini","gpt-5"]' — unset = client model overrides ignored */
+	AI_MODEL_ALLOWLIST?: string;
 	METER?: DurableObjectNamespace<MeterBus>; // per-room metered pools
 	AE?: AnalyticsEngineDataset; // opt-in anonymous quality telemetry
 	TURNSTILE_SECRET?: string; // siteverify on paid lanes when set
@@ -44,10 +49,24 @@ export interface Env {
 	METER_ACL?: string; // JSON {sha256hex(token): 'admin'|'spend'|'probe'} — hardening gate
 }
 
+const EFFORTS = new Set(['minimal', 'low', 'medium', 'high']);
+
+/** JSON allowlist of caller-selectable models; null = overrides ignored */
+function parseModelAllowlist(raw?: string): Set<string> | null {
+	if (!raw) return null;
+	try {
+		const arr = JSON.parse(raw) as unknown;
+		return Array.isArray(arr) ? new Set(arr.filter((m): m is string => typeof m === 'string')) : null;
+	} catch {
+		return null;
+	}
+}
+
 const PROVIDER_URLS: Record<string, string> = {
 	groq: 'https://api.groq.com/openai/v1',
 	openrouter: 'https://openrouter.ai/api/v1',
-	anthropic: 'https://api.anthropic.com/v1'
+	anthropic: 'https://api.anthropic.com/v1',
+	openai: 'https://api.openai.com/v1'
 };
 
 const cors = {
@@ -103,11 +122,20 @@ export default {
 async function chat(req: Request, env: Env): Promise<Response> {
 	if (!(await humanOk(env, req.headers.get('cf-turnstile'), req.headers.get('cf-connecting-ip'))))
 		return json({ error: 'turnstile' }, 403);
-	const { system, context, prompt } = (await req.json()) as {
+	const { system, context, prompt, model, effort } = (await req.json()) as {
 		system: string;
 		context?: string[];
 		prompt: string;
+		/** per-call model override — honored only when the model is in
+		 *  AI_MODEL_ALLOWLIST (unset = overrides ignored); keeps anonymous
+		 *  callers from choosing arbitrary expensive models on our key */
+		model?: string;
+		/** reasoning intensity — validated against a fixed set */
+		effort?: string;
 	};
+	const allowed = parseModelAllowlist(env.AI_MODEL_ALLOWLIST);
+	const modelOverride = model && allowed?.has(model) ? model : undefined;
+	const effortClean = effort && EFFORTS.has(effort) ? effort : undefined;
 	const user = `Transcript window:\n${(context ?? []).join('\n')}\n\nQuestion: ${prompt}`;
 	const provider = env.AI_PROVIDER ?? 'workers-ai';
 
@@ -134,14 +162,17 @@ async function chat(req: Request, env: Env): Promise<Response> {
 		return json({ text: body.content?.[0]?.text ?? '' });
 	}
 
-	// OpenAI-compatible (groq / openrouter / custom base)
+	// OpenAI-compatible (groq / openrouter / openai / custom base)
+	const reasoning = effortClean ?? env.AI_REASONING_EFFORT;
 	const res = await upstream(env, '/chat/completions', {
-		model: env.AI_CHAT_MODEL ?? 'llama-3.1-8b-instant',
+		model: modelOverride ?? env.AI_CHAT_MODEL ?? 'llama-3.1-8b-instant',
 		max_tokens: 128,
 		messages: [
 			{ role: 'system', content: system },
 			{ role: 'user', content: user }
-		]
+		],
+		// only forwarded when configured — non-reasoning models reject it
+		...(reasoning ? { reasoning_effort: reasoning } : {})
 	});
 	const body = (await res.json()) as { choices?: { message?: { content?: string } }[] };
 	return json({ text: body.choices?.[0]?.message?.content ?? '' });

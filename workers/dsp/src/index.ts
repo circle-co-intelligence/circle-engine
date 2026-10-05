@@ -20,12 +20,17 @@
 
 export interface Env {
 	DSP: DurableObjectNamespace<DspBus>;
-	/** paid sensory lane: 'speechmatics' | 'assemblyai' — unset = lane off */
+	/** paid sensory lane: 'speechmatics' | 'assemblyai' | 'openai' — unset = lane off */
 	SPEECH_PROVIDER?: string;
 	SPEECH_API_KEY?: string;
 	/** self-hosted Speechmatics RT endpoint (on-prem appliance, container —
 	 *  same protocol as SaaS); default eu2 SaaS */
 	SPEECH_BASE_URL?: string;
+	/** speechmatics language code (default 'en'); 'auto' = provider LID */
+	SPEECH_LANG?: string;
+	/** openai transcription model (default 'gpt-4o-transcribe' — multilingual,
+	 *  handles EN/DE/ES code-switching) */
+	SPEECH_MODEL?: string;
 }
 
 export default {
@@ -83,41 +88,57 @@ export default {
  */
 async function relaySpeech(req: Request, env: Env): Promise<Response> {
 	const provider = env.SPEECH_PROVIDER ?? 'speechmatics';
-	let upstream: string;
-	const headers: Record<string, string> = { upgrade: 'websocket' };
-	if (provider === 'assemblyai') {
-		upstream = `https://streaming.assemblyai.com/v3/ws?sample_rate=16000&token=${env.SPEECH_API_KEY}&speaker_labels=true`;
+	let upWs: WebSocket | undefined;
+	if (provider === 'openai') {
+		if (!env.SPEECH_API_KEY) return new Response('openai key unset', { status: 503 });
+		// Realtime transcription session. workerd's fetch-upgrade drops
+		// arbitrary headers (see speechmatics note below), so the
+		// Authorization header can't ride it — OpenAI's documented browser
+		// auth carries the key in Sec-WebSocket-Protocol instead, which the
+		// outbound WebSocket constructor does send.
+		upWs = new WebSocket('wss://api.openai.com/v1/realtime?intent=transcription', [
+			'realtime',
+			`openai-insecure-api-key.${env.SPEECH_API_KEY}`,
+			'openai-beta.realtime=v1'
+		]);
+		upWs.accept();
 	} else {
-		// Speechmatics RT — SaaS or self-hosted/on-prem (same protocol).
-		// Workers' outbound-WS fetch drops arbitrary headers, so Bearer
-		// auth can't ride the upgrade — mint a 60s temp JWT server-side
-		// and connect with ?jwt= instead (the only RT auth that works
-		// header-less). On-prem endpoints (SPEECH_BASE_URL) need no key.
-		// workerd outbound-WS wants https:// + Upgrade header, not wss://
-		upstream = (env.SPEECH_BASE_URL ?? 'https://eu2.rt.speechmatics.com/v2')
-			.replace(/^wss:/, 'https:');
-		if (env.SPEECH_API_KEY) {
-			const mint = await fetch('https://mp.speechmatics.com/v1/api_keys?type=rt', {
-				method: 'POST',
-				headers: {
-					'content-type': 'application/json',
-					authorization: `Bearer ${env.SPEECH_API_KEY}`
-				},
-				body: JSON.stringify({ ttl: 60 })
-			});
-			if (!mint.ok) return new Response(`mint failed: ${mint.status}`, { status: 502 });
-			const { key_value } = (await mint.json()) as { key_value?: string };
-			if (!key_value) return new Response('mint empty', { status: 502 });
-			upstream += `?jwt=${key_value}`;
+		let upstream: string;
+		const headers: Record<string, string> = { upgrade: 'websocket' };
+		if (provider === 'assemblyai') {
+			upstream = `https://streaming.assemblyai.com/v3/ws?sample_rate=16000&token=${env.SPEECH_API_KEY}&speaker_labels=true`;
+		} else {
+			// Speechmatics RT — SaaS or self-hosted/on-prem (same protocol).
+			// Workers' outbound-WS fetch drops arbitrary headers, so Bearer
+			// auth can't ride the upgrade — mint a 60s temp JWT server-side
+			// and connect with ?jwt= instead (the only RT auth that works
+			// header-less). On-prem endpoints (SPEECH_BASE_URL) need no key.
+			// workerd outbound-WS wants https:// + Upgrade header, not wss://
+			upstream = (env.SPEECH_BASE_URL ?? 'https://eu2.rt.speechmatics.com/v2')
+				.replace(/^wss:/, 'https:');
+			if (env.SPEECH_API_KEY) {
+				const mint = await fetch('https://mp.speechmatics.com/v1/api_keys?type=rt', {
+					method: 'POST',
+					headers: {
+						'content-type': 'application/json',
+						authorization: `Bearer ${env.SPEECH_API_KEY}`
+					},
+					body: JSON.stringify({ ttl: 60 })
+				});
+				if (!mint.ok) return new Response(`mint failed: ${mint.status}`, { status: 502 });
+				const { key_value } = (await mint.json()) as { key_value?: string };
+				if (!key_value) return new Response('mint empty', { status: 502 });
+				upstream += `?jwt=${key_value}`;
+			}
 		}
+		const up = await fetch(upstream, { headers }).catch((e: Error) => e);
+		if (up instanceof Error)
+			return new Response(`provider connect threw: ${up.message}`, { status: 502 });
+		upWs = up.webSocket;
+		if (!upWs)
+			return new Response(`provider connect failed: HTTP ${up.status}`, { status: 502 });
+		upWs.accept();
 	}
-	const up = await fetch(upstream, { headers }).catch((e: Error) => e);
-	if (up instanceof Error)
-		return new Response(`provider connect threw: ${up.message}`, { status: 502 });
-	const upWs = up.webSocket;
-	if (!upWs)
-		return new Response(`provider connect failed: HTTP ${up.status}`, { status: 502 });
-	upWs.accept();
 
 	const pair = new WebSocketPair();
 	const [client, server] = Object.values(pair);
@@ -129,7 +150,7 @@ async function relaySpeech(req: Request, env: Env): Promise<Response> {
 				message: 'StartRecognition',
 				audio_format: { type: 'raw', encoding: 'pcm_s16le', sample_rate: 16000 },
 				transcription_config: {
-					language: 'en',
+					language: env.SPEECH_LANG ?? 'en',
 					diarization: 'speaker',
 					enable_entities: true,
 					max_delay: 2
@@ -137,10 +158,31 @@ async function relaySpeech(req: Request, env: Env): Promise<Response> {
 				audio_events_config: { types: ['laughter', 'applause', 'music'] }
 			})
 		);
+	if (provider === 'openai')
+		upWs.send(
+			JSON.stringify({
+				type: 'transcription_session.update',
+				session: {
+					input_audio_format: 'pcm16',
+					input_audio_transcription: {
+						model: env.SPEECH_MODEL ?? 'gpt-4o-transcribe'
+						// language omitted → auto-detect per segment (code-switch ok)
+					},
+					turn_detection: { type: 'server_vad', threshold: 0.5, silence_duration_ms: 500 },
+					input_audio_noise_reduction: { type: 'near_field' }
+				}
+			})
+		);
 
 	server.addEventListener('message', (ev) => {
 		const d = ev.data;
-		if (d instanceof ArrayBuffer) upWs.send(d); // raw PCM16 frame
+		if (!(d instanceof ArrayBuffer)) return;
+		if (provider === 'openai') {
+			// Realtime API takes audio as base64 JSON events, not raw frames
+			upWs.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: b64(d) }));
+		} else {
+			upWs.send(d); // raw PCM16 frame
+		}
 	});
 	upWs.addEventListener('message', (ev) => {
 		try {
@@ -157,11 +199,35 @@ async function relaySpeech(req: Request, env: Env): Promise<Response> {
 	return new Response(null, { status: 101, webSocket: client });
 }
 
+/** ArrayBuffer → base64 (workerd has btoa but it takes a binary string) */
+export function b64(buf: ArrayBuffer): string {
+	const bytes = new Uint8Array(buf);
+	let s = '';
+	for (let i = 0; i < bytes.length; i += 0x8000)
+		s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+	return btoa(s);
+}
+
 /** normalize provider messages → our sensory event contract */
-function mapProviderEvent(
+export function mapProviderEvent(
 	provider: string,
 	m: Record<string, unknown>
 ): Record<string, unknown> | null {
+	if (provider === 'openai') {
+		const t = m.type as string | undefined;
+		if (t === 'conversation.item.input_audio_transcription.completed')
+			return m.transcript ? { t: 'transcript', text: m.transcript, final: true } : null;
+		if (t === 'conversation.item.input_audio_transcription.delta')
+			return m.delta ? { t: 'transcript', text: m.delta, final: false } : null;
+		// session/errors/errors surface as events for observability
+		if (t === 'error')
+			return {
+				t: 'event',
+				event: `provider-error:${(m.error as { code?: string })?.code ?? 'unknown'}`,
+				end: true
+			};
+		return null;
+	}
 	if (provider === 'assemblyai') {
 		if (m.message_type === 'FinalTranscript')
 			return { t: 'transcript', text: m.text, final: true, speaker: m.words ? undefined : undefined };

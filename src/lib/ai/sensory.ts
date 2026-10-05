@@ -31,10 +31,18 @@ export interface SensorySink {
 	ingestSensory(ev: SensoryEvent): void;
 }
 
+const SPEECH_LANG =
+	(import.meta.env as Record<string, string | undefined>).VITE_CIC_SPEECH_LANG ?? 'en';
+
 const START_RECOGNITION = {
 	message: 'StartRecognition',
 	audio_format: { type: 'raw', encoding: 'pcm_s16le', sample_rate: 16000 },
-	transcription_config: { language: 'en', diarization: 'speaker', enable_entities: true, max_delay: 2 },
+	transcription_config: {
+		language: SPEECH_LANG,
+		diarization: 'speaker',
+		enable_entities: true,
+		max_delay: 2
+	},
 	audio_events_config: { types: ['laughter', 'applause', 'music'] }
 };
 

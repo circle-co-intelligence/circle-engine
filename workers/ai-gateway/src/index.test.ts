@@ -381,3 +381,99 @@ describe('MeterBus hardened mode', () => {
 		expect(audit[0].via).toBe(`key:${dev.keyHash.slice(0, 8)}`);
 	});
 });
+
+// ------------------------------------------------------- chat passthrough
+
+import worker from './index';
+import { vi } from 'vitest';
+
+describe('/ai/chat model + reasoning-effort passthrough', () => {
+	const env = {
+		AI_PROVIDER: 'openai',
+		AI_API_KEY: 'test-key',
+		AI_CHAT_MODEL: 'gpt-5-mini',
+		AI_MODEL_ALLOWLIST: '["gpt-5-mini","gpt-5"]'
+	};
+
+	const post = (body: Record<string, unknown>) =>
+		new Request('https://gw.example/ai/chat', {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({ system: 's', prompt: 'p', ...body })
+		});
+
+	const stubUpstream = (seen: { url?: string; body?: Record<string, unknown> }) => {
+		vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+			seen.url = String(url);
+			seen.body = JSON.parse(init?.body as string);
+			return new Response(
+				JSON.stringify({ choices: [{ message: { content: 'ok' } }] }),
+				{ status: 200, headers: { 'content-type': 'application/json' } }
+			);
+		});
+	};
+
+	it('hits the OpenAI base when AI_PROVIDER=openai', async () => {
+		const seen: { url?: string; body?: Record<string, unknown> } = {};
+		stubUpstream(seen);
+		const res = await worker.fetch(post({}), env as never, {} as never);
+		expect(res.status).toBe(200);
+		expect(seen.url).toBe('https://api.openai.com/v1/chat/completions');
+		vi.unstubAllGlobals();
+	});
+
+	it('per-call model + effort override the env defaults', async () => {
+		const seen: { url?: string; body?: Record<string, unknown> } = {};
+		stubUpstream(seen);
+		await worker.fetch(post({ model: 'gpt-5', effort: 'high' }), env as never, {} as never);
+		expect(seen.body?.model).toBe('gpt-5');
+		expect(seen.body?.reasoning_effort).toBe('high');
+		vi.unstubAllGlobals();
+	});
+
+	it('ignores models outside the allowlist', async () => {
+		const seen: { url?: string; body?: Record<string, unknown> } = {};
+		stubUpstream(seen);
+		await worker.fetch(post({ model: 'gpt-4.1-nano' }), env as never, {} as never);
+		expect(seen.body?.model).toBe('gpt-5-mini');
+		vi.unstubAllGlobals();
+	});
+
+	it('drops invalid effort values', async () => {
+		const seen: { url?: string; body?: Record<string, unknown> } = {};
+		stubUpstream(seen);
+		await worker.fetch(post({ effort: 'maximal' }), env as never, {} as never);
+		expect(seen.body).not.toHaveProperty('reasoning_effort');
+		vi.unstubAllGlobals();
+	});
+
+	it('model overrides are ignored when no allowlist is configured', async () => {
+		const seen: { url?: string; body?: Record<string, unknown> } = {};
+		stubUpstream(seen);
+		const { AI_MODEL_ALLOWLIST: _drop, ...noList } = env;
+		await worker.fetch(post({ model: 'gpt-5' }), noList as never, {} as never);
+		expect(seen.body?.model).toBe('gpt-5-mini');
+		vi.unstubAllGlobals();
+	});
+
+	it('falls back to AI_CHAT_MODEL and omits reasoning_effort when unset', async () => {
+		const seen: { url?: string; body?: Record<string, unknown> } = {};
+		stubUpstream(seen);
+		await worker.fetch(post({}), env as never, {} as never);
+		expect(seen.body?.model).toBe('gpt-5-mini');
+		expect(seen.body).not.toHaveProperty('reasoning_effort');
+		vi.unstubAllGlobals();
+	});
+
+	it('AI_REASONING_EFFORT applies when the caller sends none', async () => {
+		const seen: { url?: string; body?: Record<string, unknown> } = {};
+		stubUpstream(seen);
+		await worker.fetch(
+			post({}),
+			{ ...env, AI_REASONING_EFFORT: 'low' } as never,
+			{} as never
+		);
+		expect(seen.body?.reasoning_effort).toBe('low');
+		vi.unstubAllGlobals();
+	});
+});
