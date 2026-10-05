@@ -34,6 +34,10 @@ const config = {
 					'ws://127.0.0.1:*',
 					'http://localhost:*',
 					'http://127.0.0.1:*',
+					// Tauri IPC transport — ipc://localhost on Linux/macOS,
+					// http://ipc.localhost on Windows. Inert in normal browsers.
+					'ipc:',
+					'http://ipc.localhost',
 					// edge services the build scripts point at (entitlement/AI,
 					// DSP relay, SFU) — fetch/WebSocket to these must pass CSP
 					'https://cic-ai-gateway.regenleadership.workers.dev',

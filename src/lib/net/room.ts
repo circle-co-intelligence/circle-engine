@@ -177,7 +177,55 @@ async function fetchIceServers(): Promise<RTCConfiguration> {
 	} catch {
 		// no broker configured — STUN/env only
 	}
-	return { iceServers, bundlePolicy: 'max-bundle' };
+	// libnice (WebKitGTK's ICE backend) aborts on an assertion once an agent
+	// exceeds NICE_CANDIDATE_MAX_TURN_SERVERS — the broker returns 6
+	// turn/turns URLs, which kills the native WebProcess mid-gather.
+	// Chromium tolerates the full set; cap only on the Tauri shell.
+	const native = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+	return {
+		iceServers: native ? limitTurnUrls(iceServers, 3) : iceServers,
+		bundlePolicy: 'max-bundle'
+	};
+}
+
+/**
+ * Keep at most `max` turn:/turns: URLs across the whole list, covering the
+ * three failure modes first — turns: (TLS), turn:?transport=udp,
+ * turn:?transport=tcp — then filling the remaining budget by port
+ * reachability (443/80 before high ports). STUN entries are untouched;
+ * the same credentials keep covering the kept URLs.
+ */
+export function limitTurnUrls(servers: RTCIceServer[], max = 3): RTCIceServer[] {
+	const all: string[] = [];
+	for (const s of servers)
+		for (const u of Array.isArray(s.urls) ? s.urls : [s.urls])
+			if (/^turns?:/.test(u) && !all.includes(u)) all.push(u);
+	if (all.length <= max) return servers;
+	const portRank = (u: string): number => {
+		const port = Number(/:(\d+)/.exec(u)?.[1] ?? 0);
+		return port === 443 ? 0 : port === 80 ? 1 : port === 3478 ? 2 : 3;
+	};
+	const kind = (u: string): number =>
+		u.startsWith('turns:') ? 0 : u.includes('transport=udp') ? 1 : 2;
+	const kept = new Set<string>();
+	// one of each transport family first, in family order
+	for (const k of [0, 1, 2]) {
+		const best = all.filter((u) => kind(u) === k).sort((a, b) => portRank(a) - portRank(b))[0];
+		if (best && kept.size < max) kept.add(best);
+	}
+	// fill remaining budget by port reachability
+	for (const u of [...all].sort((a, b) => portRank(a) - portRank(b) || kind(a) - kind(b))) {
+		if (kept.size >= max) break;
+		kept.add(u);
+	}
+	return servers
+		.map((s) => {
+			const wasArray = Array.isArray(s.urls);
+			const urls = wasArray ? (s.urls as string[]) : [s.urls as string];
+			const filtered = urls.filter((u) => !/^turns?:/.test(u) || kept.has(u));
+			return { ...s, urls: wasArray ? filtered : filtered[0] };
+		})
+		.filter((s) => (Array.isArray(s.urls) ? s.urls.length > 0 : Boolean(s.urls)));
 }
 
 interface Lane {

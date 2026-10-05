@@ -38,6 +38,18 @@ fn enable_webrtc(app: &tauri::App) {
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.with_webview(move |platform| {
             let wv = platform.inner();
+            // Camera/mic requests come from our own site only — allow them
+            // in-app instead of relying on the GTK permission infobar.
+            wv.connect_permission_request(|_, req| {
+                use webkit2gtk::{
+                    glib::Cast, PermissionRequestExt, UserMediaPermissionRequest
+                };
+                if let Some(media) = req.downcast_ref::<UserMediaPermissionRequest>() {
+                    media.allow();
+                    return true;
+                }
+                false
+            });
             if let Some(s) = wv.settings() {
                 s.set_enable_webrtc(true);
                 s.set_enable_media_stream(true);
@@ -86,6 +98,45 @@ pub fn run() {
         .setup(|app| {
             #[cfg(target_os = "linux")]
             enable_webrtc(app);
+            // CIC_WEB_URL on non-Linux shells (Linux navigates inside
+            // enable_webrtc after the settings flip)
+            #[cfg(not(target_os = "linux"))]
+            if let Ok(url) = std::env::var("CIC_WEB_URL") {
+                if let (Some(win), Ok(u)) =
+                    (app.get_webview_window("main"), url.parse::<tauri::Url>())
+                {
+                    let _ = win.navigate(u);
+                }
+            }
+            // CIC_SELFTEST=1: verify the native seams from inside the page —
+            // the Tauri bridge on the remote origin (invoke → speechd
+            // endpoint) and the WebRTC DOM surface. Results land on stderr
+            // via console forwarding.
+            if std::env::var_os("CIC_SELFTEST").is_some() {
+                if let Some(win) = app.get_webview_window("main") {
+                    tauri::async_runtime::spawn(async move {
+                        let js = r#"(() => {
+                            const t = window.__TAURI_INTERNALS__;
+                            const probe = {
+                                bridge: !!t,
+                                invoke: typeof t?.invoke === 'function',
+                                rtc: typeof RTCPeerConnection,
+                                gUM: typeof navigator.mediaDevices?.getUserMedia
+                            };
+                            if (probe.invoke) {
+                                t.invoke('speech_endpoint')
+                                    .then(ep => console.log('[selftest] speech_endpoint=' + ep))
+                                    .catch(e => console.log('[selftest] speech_endpoint FAILED: ' + e));
+                            }
+                            console.log('[selftest] ' + JSON.stringify(probe));
+                        })()"#;
+                        for _ in 0..15 {
+                            let _ = win.eval(js);
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        }
+                    });
+                }
+            }
             // CIC_AUTOJOIN=1: periodically submit the room join form so
             // headless/two-peer test harnesses can get the shell seated
             // without synthetic input events

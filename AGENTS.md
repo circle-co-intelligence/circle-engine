@@ -120,10 +120,19 @@ Native status: native↔browser production join verified end-to-end via
 `probe-native.mjs` (browser + Tauri shell in the same live room —
 `ws welcome`/TURN, `sfu conn connected`, peer visible in the mesh, remote
 audio+video streams arriving). Test hooks in the shell, all env-gated:
-`CIC_WEB_URL` (frontend URL), `CIC_AUTOJOIN` (clicks the join form),
-`CIC_MOCK_CAPTURE` (synthetic cam/mic), `WEBKIT_INSPECTOR_SERVER`.
-Remaining caveat: this runtime can still abort the WebProcess under load —
-the durable fix is a WebKitGTK build with ENABLE_WEB_RTC=ON against the
-host's GStreamer (or an upstream release that ships it) — the manafishrov
-image tops out at 2.48.7. Browser↔browser is unaffected by any of this
-(all quirks are gated on `alwaysInitiate`) and re-verified end-to-end.
+`CIC_WEB_URL` (frontend URL, all platforms), `CIC_AUTOJOIN` (clicks the
+join form), `CIC_MOCK_CAPTURE` (synthetic cam/mic), `CIC_SELFTEST`
+(logs Tauri-bridge/speechd/RTC probes to stderr),
+`WEBKIT_INSPECTOR_SERVER`. Cam/mic permission requests from the loaded
+site are auto-allowed in Rust (connect_permission_request →
+UserMediaPermissionRequest.allow) — the GTK infobar is bypassed.
+libnice hard-caps TURN servers per agent
+(NICE_CANDIDATE_MAX_TURN_SERVERS); /api/ice returns 6 turn/turns URLs so
+`limitTurnUrls` in net/room.ts trims to one URL per transport family
+(TLS/udp/tcp) under the Tauri shell only — the assert that killed the
+WebProcess mid-gather is routed around. Remaining caveat: this runtime
+can still abort the WebProcess under load — the durable fix is a
+WebKitGTK build with ENABLE_WEB_RTC=ON against the host's GStreamer (or
+an upstream release that ships it) — the manafishrov image tops out at
+2.48.7. Browser↔browser is unaffected by any of this (all quirks are
+gated on `alwaysInitiate`/Tauri detection) and re-verified end-to-end.
