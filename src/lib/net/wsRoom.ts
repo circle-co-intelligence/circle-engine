@@ -606,8 +606,15 @@ export async function openWsRoom(
 						abandonToAcceptor(p);
 						pc = p.pc;
 					}
-				} else if (sig.sdp.type === 'answer' && (!p.initiator || !p.offered)) {
-					return; // answer we never asked for — protocol violation, drop
+				} else if (
+					sig.sdp.type === 'answer' &&
+					(!p.initiator || !p.offered || p.pc.signalingState !== 'have-local-offer')
+				) {
+					// answer we never asked for, or a stale/retransmitted answer
+					// arriving after this pc already reached stable (or was
+					// rebuilt by abandonToAcceptor) — JSEP says answers are only
+					// valid in have-local-offer; anything else is noise, drop it
+					return;
 				}
 				// Firefox numbers extmap ids per m-line; under BUNDLE the same id
 				// can map different URIs across m-lines and Chromium then rejects
