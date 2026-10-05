@@ -346,6 +346,73 @@ describe('signed billing endpoints', () => {
 	});
 });
 
+describe('webhook event re-verification', () => {
+	const mkWebhook = (body: object, secret: string) =>
+		sign(JSON.stringify(body), secret).then(
+			(sig) =>
+				new Request('https://pay.test/pay/webhook', {
+					method: 'POST',
+					headers: { 'content-type': 'application/json', 'stripe-signature': sig },
+					body: JSON.stringify(body)
+				})
+		);
+
+	it('rejects events Stripe cannot confirm — leaked secret ≠ minted credits', async () => {
+		vi.stubGlobal('fetch', async (u: unknown) =>
+			String(u).includes('/v1/events/') ? new Response('{}', { status: 404 }) : new Response('{}')
+		);
+		try {
+			const m = fakeMeter();
+			const e = env({ METER: m.ns, STRIPE_WEBHOOK_SECRET: SECRET, STRIPE_SECRET_KEY: 'rk_test_x' });
+			const evt = { id: 'evt_forge', type: 'checkout.session.completed', data: { object: { id: 'cs_x', metadata: { accountId: ACCT, seconds: '8000' } } } };
+			const res = await worker.fetch(await mkWebhook(evt, SECRET), e);
+			expect(res.status).toBe(400);
+			expect(m.stores.get(`acct:${ACCT}`)).toBeUndefined();
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	});
+
+	it('rejects tampered payloads even when the event id is real', async () => {
+		vi.stubGlobal('fetch', async (u: unknown) =>
+			String(u).includes('/v1/events/')
+				? new Response(JSON.stringify({ id: 'evt_real', type: 'checkout.session.completed', data: { object: { id: 'cs_REAL' } } }))
+				: new Response('{}')
+		);
+		try {
+			const m = fakeMeter();
+			const e = env({ METER: m.ns, STRIPE_WEBHOOK_SECRET: SECRET, STRIPE_SECRET_KEY: 'rk_test_x' });
+			// real event id but swapped object → data.object.id mismatch
+			const evt = { id: 'evt_real', type: 'checkout.session.completed', data: { object: { id: 'cs_FORGED', metadata: { accountId: ACCT, seconds: '8000' } } } };
+			const res = await worker.fetch(await mkWebhook(evt, SECRET), e);
+			expect(res.status).toBe(400);
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	});
+
+	it('processes a Stripe-confirmed event and credits once', async () => {
+		vi.stubGlobal('fetch', async (u: unknown) =>
+			String(u).includes('/v1/events/')
+				? new Response(JSON.stringify({ id: 'evt_ok', type: 'checkout.session.completed', data: { object: { id: 'cs_ok' } } }))
+				: new Response('{}')
+		);
+		try {
+			const m = fakeMeter();
+			const e = env({ METER: m.ns, STRIPE_WEBHOOK_SECRET: SECRET, STRIPE_SECRET_KEY: 'rk_test_x' });
+			const evt = { id: 'evt_ok', type: 'checkout.session.completed', data: { object: { id: 'cs_ok', mode: 'payment', customer: 'cus_9', metadata: { accountId: ACCT, kind: 'pack', seconds: '8000' } } } };
+			expect((await worker.fetch(await mkWebhook(evt, SECRET), e)).status).toBe(200);
+			expect(m.stores.get(`acct:${ACCT}`)!.get('balance')).toBe(8000);
+			// replayed verbatim → dedupe
+			const dup = await worker.fetch(await mkWebhook(evt, SECRET), e);
+			expect((await dup.json() as { duplicate?: boolean }).duplicate).toBe(true);
+			expect(m.stores.get(`acct:${ACCT}`)!.get('balance')).toBe(8000);
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	});
+});
+
 describe('webauthn step-up', () => {
 	const b64urlBytes = (u: Uint8Array) => b64url(u);
 	async function makeAssertion(accountId: string, cred: Awaited<ReturnType<typeof deviceKey>>, credId: string, challenge: string, rpHost: string, signCount = 1) {

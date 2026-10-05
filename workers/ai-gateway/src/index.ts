@@ -38,6 +38,8 @@ export interface Env {
 	GRANT_SECRET?: string; // Ed25519 hex seed — /admin/mint signs grants
 	CF_ACCESS_TEAM?: string; // e.g. 'yourteam.cloudflareaccess.com'
 	CF_ACCESS_AUD?: string; // Access application AUD tag
+	METER_TOKEN?: string; // this worker's MeterBus capability token (spend role)
+	METER_ACL?: string; // JSON {sha256hex(token): 'admin'|'spend'|'probe'} — hardening gate
 }
 
 const PROVIDER_URLS: Record<string, string> = {
@@ -84,7 +86,8 @@ export default {
 					ok: true,
 					provider: env.AI_PROVIDER ?? 'workers-ai',
 					models: { chat: env.AI_CHAT_MODEL, stt: env.AI_STT_MODEL, tts: env.AI_TTS_MODEL },
-					entitlements: !!env.METER
+					entitlements: !!env.METER,
+					meterAcl: !!env.METER_ACL
 				});
 			return json({ error: 'not found' }, 404);
 		} catch (e) {
@@ -218,7 +221,23 @@ async function usage(req: Request, env: Env, ctx?: ExecutionContext): Promise<Re
 	const debit = Math.max(0, Math.min(3600, Math.round(seconds ?? 0))) +
 		Math.max(0, Math.min(1000, Math.round(calls ?? 0))) * CALL_COST;
 	const pick = await pickPool(env, room, verified ? account : null);
-	const res = await meter(env, pick.pool, 'debit', { amount: debit });
+	// Wallet debits carry the client's own signature through to the DO — the
+	// ledger re-verifies it against the account's registered keys, so a
+	// compromised worker here still can't move wallet funds. Auth is only
+	// forwarded when it proves THIS wallet (sponsor lanes use the room record).
+	const auth =
+		verified && pick.pool === `acct:${account}`
+			? {
+					pub: req.headers.get('x-cic-pub') ?? undefined,
+					ts: Number(req.headers.get('x-cic-ts')),
+					nonce: req.headers.get('x-cic-nonce') ?? undefined,
+					sig: req.headers.get('x-cic-sig') ?? undefined,
+					method: 'POST',
+					path: '/ai/usage',
+					body: raw
+				}
+			: undefined;
+	const res = await meter(env, pick.pool, 'debit', { amount: debit, room, auth });
 	indexReport(env, ctx, pick.pool, res.clone());
 	return res;
 }
@@ -431,8 +450,11 @@ function meter(env: Env, room: string, op: string, body: object): Promise<Respon
 	const stub = env.METER!.get(env.METER!.idFromName(room));
 	return stub.fetch(`https://meter/${op}`, {
 		method: 'POST',
-		headers: { 'content-type': 'application/json' },
-		body: JSON.stringify(body)
+		headers: {
+			'content-type': 'application/json',
+			'x-meter-token': env.METER_TOKEN ?? ''
+		},
+		body: JSON.stringify({ ...body, inst: room })
 	});
 }
 
@@ -442,11 +464,60 @@ function meter(env: Env, room: string, op: string, body: object): Promise<Respon
  * needed. The shared '__grants__' instance holds redeemed grant nonces.
  * Hibernates idle; storage is KV-backed (per-key, no schema).
  */
+type MeterRole = 'admin' | 'spend' | 'probe';
+
+/**
+ * Ops each role may invoke when METER_ACL is configured.
+ *   probe — cic-sfu: balance reads + key lookup + nonce claims (its
+ *           account-signature verifier needs them)
+ *   spend — cic-ai-gateway: usage debits, grant-redemption credits on
+ *           non-acct pools, telemetry/index writes
+ *   admin — cic-pay: everything, incl. wallet credits, kv writes,
+ *           sponsorship, transfers
+ */
+const ROLE_OPS: Record<MeterRole, Set<string>> = {
+	probe: new Set(['/get', '/kvget', '/claim']),
+	spend: new Set(['/get', '/kvget', '/kvlist', '/claim', '/debit', '/credit', '/report', '/list', '/audit']),
+	admin: new Set(['/get', '/kvget', '/kvlist', '/kvput', '/claim', '/debit', '/credit', '/report', '/list', '/audit', '/sponsor', '/transfer'])
+};
+
+/** per-call ceiling for unsigned sponsored-room debits on a wallet */
+const SPONSORED_DEBIT_MAX_S = 7200;
+
 export class MeterBus implements DurableObject {
 	constructor(
 		private ctx: DurableObjectState,
 		private env: Env
 	) {}
+
+	/** sha256(token) lookup against METER_ACL — env stores hashes only, so a
+	 *  leaked worker env can't yield usable tokens for sibling workers */
+	private async role(req: Request): Promise<MeterRole | null> {
+		try {
+			const tok = req.headers.get('x-meter-token') ?? '';
+			if (!tok) return null;
+			const hash = await sha256hex(tok);
+			const acl = JSON.parse(this.env.METER_ACL ?? '{}') as Record<string, MeterRole>;
+			return acl[hash] ?? null;
+		} catch {
+			return null;
+		}
+	}
+
+	/** proves the body's claimed instance name resolves to THIS object —
+	 *  idFromName is deterministic, so a caller can't lie about which
+	 *  pool/wallet it's mutating */
+	private async isSelf(name: string): Promise<boolean> {
+		try {
+			const id = this.env.METER!.idFromName(name);
+			const mine = this.ctx.id as unknown as { toString(): string };
+			return typeof (id as { equals?: unknown }).equals === 'function'
+				? (id as { equals(o: DurableObjectId): boolean }).equals(this.ctx.id)
+				: String(id) === String(mine);
+		} catch {
+			return false;
+		}
+	}
 
 	async fetch(req: Request): Promise<Response> {
 		const op = new URL(req.url).pathname;
@@ -459,8 +530,32 @@ export class MeterBus implements DurableObject {
 			account?: string | null;
 			to?: string;
 			entry?: unknown;
+			inst?: string;
+			room?: string;
+			creditId?: string;
+			clawbackOf?: string;
+			auth?: SignedAuth;
 		};
 		const s = this.ctx.storage;
+
+		// Internal trust boundary. MeterBus has no public route — only sibling
+		// workers holding the METER binding can call it — but a compromised
+		// worker shouldn't be able to drain wallets, so in hardened mode
+		// (METER_ACL set): the caller authenticates a role token, proves which
+		// instance it's addressing, and money ops on acct:* additionally need
+		// a client signature, a sponsorship record, or a matching credit.
+		const hardened = !!this.env.METER_ACL;
+		let role: MeterRole = 'admin';
+		if (hardened) {
+			const r = await this.role(req);
+			if (!r) return json({ error: 'meter: unauthorized' }, 401);
+			role = r;
+			if (!b.inst || !(await this.isSelf(b.inst)))
+				return json({ error: 'meter: instance mismatch' }, 400);
+			if (!ROLE_OPS[role].has(op)) return json({ error: 'meter: forbidden' }, 403);
+		}
+		const acct = hardened && (b.inst ?? '').startsWith('acct:') ? b.inst!.slice(5) : null;
+
 		if (op === '/get') {
 			const balance = (await s.get<number>('balance')) ?? 0;
 			const spent = (await s.get<number>('spent')) ?? 0;
@@ -468,17 +563,29 @@ export class MeterBus implements DurableObject {
 			return json({ paid: balance > 0, balanceSeconds: balance, spentSeconds: spent, sponsor });
 		}
 		if (op === '/debit') {
-			const amount = b.amount ?? 0;
+			let amount = Math.max(0, Math.round(b.amount ?? 0));
+			let via = 'pool';
+			if (acct) {
+				const gate = await authorizeSpend(s, acct, b);
+				if (gate instanceof Response) return gate;
+				via = gate.via;
+				amount = gate.amount;
+			}
 			const capHit = await spendCapHit(s, amount);
 			if (capHit) return json({ ok: false, status: 'cap', ...capHit }, 402);
 			const balance = Math.max(0, ((await s.get<number>('balance')) ?? 0) - amount);
 			const spent = ((await s.get<number>('spent')) ?? 0) + amount;
 			await s.put({ balance, spent });
-			return json({ paid: balance > 0, balanceSeconds: balance, spentSeconds: spent });
+			if (acct) await auditLocal(s, { op: 'debit', amount, via, room: b.room });
+			return json({ paid: balance > 0, balanceSeconds: balance, spentSeconds: spent, debitedSeconds: amount });
 		}
 		if (op === '/credit') {
-			const balance = ((await s.get<number>('balance')) ?? 0) + (b.amount ?? 0);
+			if (acct && role !== 'admin') return json({ error: 'meter: forbidden' }, 403);
+			const amount = Math.max(0, Math.round(b.amount ?? 0));
+			const balance = ((await s.get<number>('balance')) ?? 0) + amount;
 			await s.put('balance', balance);
+			if (b.creditId) await s.put(`credit:${b.creditId}`, amount);
+			if (acct) await auditLocal(s, { op: 'credit', amount, via: 'settlement', room: b.room });
 			return json({ ok: true, balanceSeconds: balance });
 		}
 		if (op === '/claim') {
@@ -531,23 +638,40 @@ export class MeterBus implements DurableObject {
 		}
 		if (op === '/transfer') {
 			// acct:<id> instance → debit wallet only if it covers the amount,
-			// then credit the target pool — one DO turn, no double-spend
-			const amount = Math.max(0, Math.round(b.amount ?? 0));
+			// then credit the target pool — one DO turn, no double-spend.
+			// Hardened acct transfers take BOTH amount and destination from the
+			// client's signed /pay/convert body — op args can't inflate/redirect.
+			let to = b.to;
+			let amount = Math.max(0, Math.round(b.amount ?? 0));
+			let via = 'pool';
+			if (acct) {
+				const gate = await authorizeSpend(s, acct, b);
+				if (gate instanceof Response) return gate;
+				if (gate.auth?.path !== '/pay/convert')
+					return json({ ok: false, status: 'bad_auth_path' }, 401);
+				if (gate.auth?.room) to = gate.auth.room;
+				amount = gate.amount;
+				via = gate.via;
+			}
 			const balance = (await s.get<number>('balance')) ?? 0;
-			if (!b.to || amount <= 0) return json({ ok: false, status: 'bad_request' }, 400);
+			if (!to || amount <= 0) return json({ ok: false, status: 'bad_request' }, 400);
 			const capHit = await spendCapHit(s, amount);
 			if (capHit) return json({ ok: false, status: 'cap', ...capHit });
 			if (balance < amount)
 				return json({ ok: false, status: 'insufficient', available: balance });
 			const spent = ((await s.get<number>('spent')) ?? 0) + amount;
 			await s.put({ balance: balance - amount, spent });
-			const stub = this.env.METER!.get(this.env.METER!.idFromName(b.to));
+			const stub = this.env.METER!.get(this.env.METER!.idFromName(to));
 			const res = await stub.fetch('https://meter/credit', {
 				method: 'POST',
-				headers: { 'content-type': 'application/json' },
-				body: JSON.stringify({ amount })
+				headers: {
+					'content-type': 'application/json',
+					'x-meter-token': this.env.METER_TOKEN ?? ''
+				},
+				body: JSON.stringify({ amount, inst: to, creditId: b.creditId })
 			});
 			const credited = (await res.json()) as { balanceSeconds?: number };
+			if (acct) await auditLocal(s, { op: 'transfer', amount, via, room: to });
 			return json({ ok: true, balanceSeconds: credited.balanceSeconds ?? 0 });
 		}
 		if (op === '/audit') {
@@ -579,6 +703,133 @@ async function spendCapHit(
 	if (spent > cap) return { dailySpent: spent - amount, cap };
 	await s.put(key, spent);
 	return null;
+}
+
+/**
+ * SignedAuth — a client's signed request forwarded to the ledger so the DO
+ * can re-verify it against the account's own registered keys. This is the
+ * worker-compromise defense: a hijacked gateway/pay worker cannot debit an
+ * acct:* wallet without a live device signature, because the DO — not the
+ * worker — is the verifier of last resort for money movement.
+ */
+interface SignedAuth {
+	pub?: string;
+	ts?: number;
+	nonce?: string;
+	sig?: string;
+	method?: string;
+	path?: string;
+	body?: string;
+}
+
+/** paths whose signed bodies may authorize a wallet debit */
+const DEBIT_AUTH_PATHS = new Set(['/ai/usage', '/pay/convert']);
+
+/**
+ * verifyClientAuth — ECDSA-verify a forwarded signed request inside the DO
+ * (same canonical payload as cic-pay's authorize). Enforces key registration
+ * (primary sha256(pub)==acct, or key:<hash> record), ±300s freshness, and a
+ * single-use dauth:<nonce>. Returns {keyHash, amount, room} where amount is
+ * derived ONLY from the signed body — the worker's claimed amount is ignored.
+ */
+async function verifyClientAuth(
+	s: DurableObjectStorage,
+	acct: string,
+	auth: SignedAuth
+): Promise<{ keyHash: string; amount: number; path: string; room?: string } | null> {
+	try {
+		const { pub, ts, nonce, sig, method, path, body } = auth;
+		if (!pub || !ts || !nonce || !sig || !method || !path) return null;
+		if (!/^[0-9a-f]+$/i.test(pub) || !/^[0-9a-f]+$/i.test(sig)) return null;
+		if (Math.abs(Math.floor(Date.now() / 1000) - ts) > 300) return null;
+		const pubB = hexToBytes(pub);
+		const keyHash = toHex(await sha256bytes(pubB));
+		if (keyHash !== acct && !(await s.get(`key:${keyHash}`))) return null;
+		const key = await crypto.subtle.importKey(
+			'spki',
+			pubB as BufferSource,
+			{ name: 'ECDSA', namedCurve: 'P-256' },
+			false,
+			['verify']
+		);
+		const bodyHash = toHex(await sha256bytes(body ?? ''));
+		const payload = [acct, method.toUpperCase(), path, bodyHash, String(ts), nonce, keyHash].join('\n');
+		const ok = await crypto.subtle.verify(
+			{ name: 'ECDSA', hash: 'SHA-256' },
+			key,
+			hexToBytes(sig) as BufferSource,
+			new TextEncoder().encode(payload)
+		);
+		if (!ok) return null;
+		if (await s.get(`dauth:${nonce}`)) return null; // single-use, independent of req:<nonce>
+		await s.put(`dauth:${nonce}`, 1);
+		const parsed = JSON.parse(body || '{}') as Record<string, unknown>;
+		const claimed = (parsed.accountId ?? parsed.account) as string | undefined;
+		if (claimed && claimed !== acct) return null; // signed for a different wallet
+		const amount =
+			path === '/ai/usage'
+				? Math.max(0, Math.min(3600, Math.round(Number(parsed.seconds ?? 0)))) +
+					Math.max(0, Math.min(1000, Math.round(Number(parsed.calls ?? 0)))) * CALL_COST
+				: Math.max(0, Math.min(86_400_000, Math.round(Number(parsed.seconds ?? parsed.amount ?? 0))));
+		return { keyHash, amount, path, room: parsed.room as string | undefined };
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * authorizeSpend — the three lawful ways a debit/transfer may touch an
+ * acct:* wallet, checked by the DO itself:
+ *   1. auth       — client-signed spend (usage heartbeat or convert)
+ *   2. room       — the wallet's owner sponsors that room (sponsored:<room>)
+ *   3. clawbackOf — bounded by a previously recorded credit:<id>
+ * Anything else → 401; there is deliberately no role override.
+ */
+async function authorizeSpend(
+	s: DurableObjectStorage,
+	acct: string,
+	b: { amount?: number; room?: string; clawbackOf?: string; auth?: SignedAuth }
+): Promise<{ via: string; amount: number; auth?: { path: string; room?: string } } | Response> {
+	if (b.auth) {
+		const v = await verifyClientAuth(s, acct, b.auth);
+		if (!v || !DEBIT_AUTH_PATHS.has(v.path)) return json({ error: 'spend auth failed' }, 401);
+		return { via: `key:${v.keyHash.slice(0, 8)}`, amount: v.amount, auth: { path: v.path, room: v.room } };
+	}
+	if (b.room && (await s.get(`sponsored:${b.room}`)))
+		return { via: `sponsored:${b.room}`, amount: Math.min(Math.max(0, Math.round(b.amount ?? 0)), SPONSORED_DEBIT_MAX_S) };
+	if (b.clawbackOf) {
+		const credited = (await s.get<number>(`credit:${b.clawbackOf}`)) ?? 0;
+		const clawed = (await s.get<number>(`clawed:${b.clawbackOf}`)) ?? 0;
+		const remain = credited - clawed;
+		if (remain <= 0) return json({ error: 'no matching credit' }, 403);
+		const amt = Math.min(Math.max(0, Math.round(b.amount ?? 0)), remain);
+		await s.put(`clawed:${b.clawbackOf}`, clawed + amt);
+		return { via: `clawback:${b.clawbackOf}`, amount: amt };
+	}
+	return json({ error: 'wallet spend requires signature' }, 401);
+}
+
+/** append to the instance's 50-entry signed-ops ring (read via /pay/account) */
+async function auditLocal(
+	s: DurableObjectStorage,
+	entry: { op: string; amount?: number; via?: string; room?: string }
+): Promise<void> {
+	const list = ((await s.get<unknown[]>('audit')) ?? []) as unknown[];
+	list.unshift({ ...entry, at: Date.now() });
+	await s.put('audit', list.slice(0, 50));
+}
+
+function toHex(bytes: Uint8Array): string {
+	return [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function sha256bytes(d: Uint8Array | string): Promise<Uint8Array> {
+	const data = typeof d === 'string' ? new TextEncoder().encode(d) : d;
+	return new Uint8Array(await crypto.subtle.digest('SHA-256', data as BufferSource));
+}
+
+async function sha256hex(d: Uint8Array | string): Promise<string> {
+	return toHex(await sha256bytes(d));
 }
 
 function hexToBytes(hex: string): Uint8Array {

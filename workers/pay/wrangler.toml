@@ -22,5 +22,11 @@ script_name = "cic-ai-gateway"
 #                    "amountCents":800,"currency":"usd"}
 #
 # Secrets (`wrangler secret put` — never commit):
-#   STRIPE_SECRET_KEY      — sk_test_… / sk_live_…
+#   STRIPE_SECRET_KEY      — prefer a RESTRICTED key (rk_…) scoped to
+#                            Checkout Sessions:write, Billing Portal
+#                            Sessions:write, Charges:read, Events:read.
+#                            A full sk_ works but can charge saved cards —
+#                            /pay/status reports keyType so you can check.
 #   STRIPE_WEBHOOK_SECRET  — whsec_… for the /pay/webhook endpoint
+#   METER_TOKEN            — 'admin' role token for MeterBus (see
+#                            scripts/meter-acl.mjs)

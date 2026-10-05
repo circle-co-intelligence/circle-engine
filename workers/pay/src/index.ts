@@ -33,6 +33,7 @@ export interface Env {
 	APP_ORIGIN?: string;
 	PAY_PACKAGES?: string;
 	PAY_SUB?: string;
+	METER_TOKEN?: string; // admin-role capability token for MeterBus ops
 }
 
 const cors = {
@@ -97,7 +98,19 @@ export default {
 			if (url.pathname === '/pay/limits' && req.method === 'POST')
 				return await limits(req, env);
 			if (url.pathname === '/pay/status' && req.method === 'GET')
-				return json({ ok: true, stripe: !!env.STRIPE_SECRET_KEY, meter: !!env.METER });
+				return json({
+					ok: true,
+					stripe: !!env.STRIPE_SECRET_KEY,
+					// rk_* restricted keys can't charge saved cards — full sk_*
+					// keys work but widen the leak blast radius; see DEPLOYMENT.md
+					keyType: env.STRIPE_SECRET_KEY
+						? env.STRIPE_SECRET_KEY.startsWith('rk_')
+							? 'restricted'
+							: 'full'
+						: 'none',
+					meter: !!env.METER,
+					meterToken: !!env.METER_TOKEN
+				});
 			return json({ error: 'not found' }, 404);
 		} catch (e) {
 			return json({ error: e instanceof Error ? e.message : 'internal' }, 502);
@@ -235,7 +248,11 @@ async function convert(req: Request, env: Env): Promise<Response> {
 	if (auth instanceof Response) return auth;
 	const step = await needStepUp(env, accountId, 'convert', webauthn, amount);
 	if (step) return step;
-	const res = await meter(env, `acct:${accountId}`, 'transfer', { to: room, amount });
+	const res = await meter(env, `acct:${accountId}`, 'transfer', {
+		to: room,
+		amount,
+		auth: auth.forward
+	});
 	const body = (await res.json()) as {
 		ok?: boolean;
 		status?: string;
@@ -473,14 +490,32 @@ async function webhook(req: Request, env: Env): Promise<Response> {
 	const raw = await req.text();
 	const ok = await verifyStripeSignature(raw, req.headers.get('stripe-signature'), env.STRIPE_WEBHOOK_SECRET);
 	if (!ok) return json({ error: 'bad signature' }, 400);
-	const evt = JSON.parse(raw) as { id?: string; type?: string; data?: { object?: unknown } };
+	const evt = JSON.parse(raw) as { id?: string; type?: string; data?: { object?: { id?: string } } };
 	if (!evt.id || !evt.type) return json({ error: 'bad event' }, 400);
+
+	// Anti-forgery: a leaked webhook secret alone must not mint credits, so
+	// re-fetch the event from Stripe — fabricated ids 404, tampered payloads
+	// mismatch data.object.id. Done BEFORE the dedupe claim so a forgery
+	// can't burn a real event's slot.
+	if (env.STRIPE_SECRET_KEY) {
+		const chk = await fetch(`https://api.stripe.com/v1/events/${encodeURIComponent(evt.id)}`, {
+			headers: { authorization: `Bearer ${env.STRIPE_SECRET_KEY}` }
+		});
+		if (!chk.ok) return json({ error: 'event not verifiable' }, 400);
+		const real = (await chk.json()) as {
+			id?: string;
+			type?: string;
+			data?: { object?: { id?: string } };
+		};
+		if (real.id !== evt.id || real.type !== evt.type || real.data?.object?.id !== evt.data?.object?.id)
+			return json({ error: 'event mismatch' }, 400);
+	}
 
 	// replay guard — first claim wins, forever
 	const claim = await meter(env, `evt:${evt.id}`, 'claim', { nonce: evt.id });
 	if (!claim.ok) return json({ received: true, duplicate: true });
 
-	await handleEvent(env, evt.type, (evt.data?.object ?? {}) as Record<string, unknown>);
+	await handleEvent(env, evt.type, (evt.data?.object ?? {}) as Record<string, unknown>, evt.id);
 	return json({ received: true });
 }
 
@@ -522,9 +557,15 @@ function timingSafeEqual(a: string, b: string): boolean {
 export async function handleEvent(
 	env: Env,
 	type: string,
-	obj: Record<string, unknown>
+	obj: Record<string, unknown>,
+	evtId?: string
 ): Promise<void> {
 	const meta = (obj.metadata ?? {}) as Record<string, string>;
+	// a linkable id for the credit record — clawback debits must name a
+	// credit they unwind, so a compromised worker can't drain wallets
+	const creditId = obj.payment_intent
+		? `pi:${obj.payment_intent}`
+		: `tx:${evtId ?? String(obj.id ?? '')}`;
 
 	if (type === 'checkout.session.completed') {
 		const accountId = meta.accountId ?? (obj.client_reference_id as string | undefined);
@@ -534,7 +575,7 @@ export async function handleEvent(
 		const seconds = Math.round(Number(meta.seconds ?? 0));
 		if (!accountId || seconds <= 0) return;
 		const target = meta.kind === 'room' && meta.room ? meta.room : `acct:${accountId}`;
-		await meter(env, target, 'credit', { amount: seconds });
+		await meter(env, target, 'credit', { amount: seconds, creditId, room: meta.room });
 		await kvput(env, `acct:${accountId}`, 'lastPurchase', { seconds, at: Date.now() });
 		return;
 	}
@@ -551,7 +592,7 @@ export async function handleEvent(
 		const lastInvoice = await kvget(env, `acct:${accountId}`, 'lastInvoice');
 		if (lastInvoice === obj.id) return;
 		await kvput(env, `acct:${accountId}`, 'lastInvoice', obj.id);
-		await meter(env, `acct:${accountId}`, 'credit', { amount: sub.seconds });
+		await meter(env, `acct:${accountId}`, 'credit', { amount: sub.seconds, creditId });
 		return;
 	}
 
@@ -583,7 +624,10 @@ export async function handleEvent(
 		const accountId = m.accountId;
 		const seconds = Math.round(Number(m.seconds ?? 0));
 		if (!accountId || seconds <= 0) return;
-		await meter(env, `acct:${accountId}`, 'debit', { amount: seconds });
+		// the DO only unwinds up to the recorded credit:<id> — a clawback
+		// can't drain below what that purchase originally added
+		const clawbackOf = obj.payment_intent ? `pi:${obj.payment_intent}` : `tx:${evtId ?? String(obj.id)}`;
+		await meter(env, `acct:${accountId}`, 'debit', { amount: seconds, clawbackOf });
 		await kvput(env, `acct:${accountId}`, 'lastChargeback', { seconds, type, at: Date.now() });
 		return;
 	}
@@ -617,6 +661,17 @@ const CONVERT_STEP_UP_S = 3600; // converts above an hour also need the passkey
 
 interface AuthResult {
 	keyHash: string;
+	/** the verified request, re-packaged for MeterBus's own re-verification —
+	 *  the ledger trusts the client signature, not this worker's say-so */
+	forward: {
+		pub: string;
+		ts: number;
+		nonce: string;
+		sig: string;
+		method: string;
+		path: string;
+		body: string;
+	};
 }
 
 function hexBytes(hex: string): Uint8Array | null {
@@ -680,7 +735,10 @@ export async function authorize(
 	// replay guard — nonce claims once on the account instance
 	const claim = await meter(env, `acct:${claimed}`, 'claim', { nonce: `req:${nonce}` });
 	if (!claim.ok) return json({ error: 'replayed nonce' }, 409);
-	return { keyHash };
+	return {
+		keyHash,
+		forward: { pub: pubHex, ts, nonce, sig: sigHex, method: req.method, path, body: rawBody }
+	};
 }
 
 // ------------------------------------------------------------- passkeys
@@ -825,8 +883,11 @@ function meter(env: Env, instance: string, op: string, body: object): Promise<Re
 	const stub = env.METER!.get(env.METER!.idFromName(instance));
 	return stub.fetch(`https://meter/${op}`, {
 		method: 'POST',
-		headers: { 'content-type': 'application/json' },
-		body: JSON.stringify(body)
+		headers: {
+			'content-type': 'application/json',
+			'x-meter-token': env.METER_TOKEN ?? ''
+		},
+		body: JSON.stringify({ ...body, inst: instance })
 	});
 }
 

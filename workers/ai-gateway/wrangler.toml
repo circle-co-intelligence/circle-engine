@@ -16,6 +16,14 @@ binding = "AI"
 # MeterBus DO — metered paid pools, one instance per room ({balance,spent}
 # in KV storage; single-threaded → atomic debits by construction). The
 # '__grants__' instance stores redeemed grant nonces (replay guard).
+#
+# Ledger trust boundary (see docs/SECURITY.md):
+#   METER_TOKEN — this worker's 'spend' role token (wrangler secret put)
+#   METER_ACL   — JSON {sha256(token): 'admin'|'spend'|'probe'}; when set,
+#                 DO ops require a known token AND wallet debits/transfers
+#                 require a client-signed auth, a sponsored-room record, or
+#                 a matching credit — a compromised worker can't drain wallets.
+#                 Generate both via `node scripts/meter-acl.mjs`.
 [[durable_objects.bindings]]
 name = "METER"
 class_name = "MeterBus"

@@ -38,9 +38,44 @@ MeterBus DO via `script_name`, so wallets/room pools share one ledger.
 
 ```bash
 cd workers/pay && wrangler deploy
-wrangler secret put STRIPE_SECRET_KEY      # sk_test_… / sk_live_…
+wrangler secret put STRIPE_SECRET_KEY      # rk_… restricted key (see below)
 wrangler secret put STRIPE_WEBHOOK_SECRET  # whsec_… from the webhook below
+wrangler secret put METER_TOKEN            # 'admin' role — scripts/meter-acl.mjs
 ```
+
+**Use a restricted Stripe key (`rk_…`), not a full `sk_…`.** cic-pay only
+ever calls four endpoints, so the key needs exactly four permissions —
+Dashboard → Developers → API keys → Create restricted key:
+
+| Permission | Access | Used for |
+|---|---|---|
+| Checkout Sessions | Write | `/pay/checkout` |
+| Billing Portal Sessions | Write | `/pay/portal` |
+| Charges | Read | refund/dispute metadata lookup |
+| Events | Read | webhook event re-verification |
+
+Everything else stays `None` — in particular no PaymentIntents, no
+PaymentMethods, no Payouts — so a leaked key cannot charge saved payment
+methods or move money. `/pay/status` reports `keyType` (`restricted`/`full`)
+so you can verify.
+
+The webhook additionally re-fetches each event via `GET /v1/events/{id}`
+before crediting (Events:Read) — a leaked `whsec_` alone cannot forge
+credits, and forged/tampered events are rejected before they can burn a
+dedupe slot.
+
+**MeterBus capability tokens** — when `METER_ACL` is set on
+cic-ai-gateway, every ledger call needs a role token and `acct:*` money
+ops need a client signature / sponsorship / matching credit. Generate:
+
+```bash
+node scripts/meter-acl.mjs   # prints 3 tokens + the ACL JSON
+```
+
+Deploy order matters — set all three `METER_TOKEN` secrets (cic-pay=admin,
+cic-ai-gateway=spend, cic-sfu=probe) **before** setting `METER_ACL` on
+cic-ai-gateway, or calls start 401ing. `GET /ai/status` reports
+`meterAcl: true` when the gate is live.
 
 Vars in `workers/pay/wrangler.toml` (or `wrangler deploy --var`):
 `APP_ORIGIN` (site origin for checkout redirects), `PAY_PACKAGES` (JSON

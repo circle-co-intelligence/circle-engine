@@ -11,6 +11,7 @@ interface Env {
 	CALLS_APP_ID?: string;
 	CALLS_APP_SECRET?: string;
 	METER?: DurableObjectNamespace; // MeterBus via script_name — funding gate
+	METER_TOKEN?: string; // probe-role capability token (balance reads only)
 }
 
 const UPSTREAM = 'https://rtc.live.cloudflare.com/v1/apps';
@@ -91,7 +92,11 @@ async function funded(env: Env, inst: string): Promise<boolean> {
 
 async function roomInfo(env: Env, inst: string): Promise<PoolInfo> {
 	const stub = env.METER!.get(env.METER!.idFromName(inst));
-	const res = await stub.fetch('https://meter/get', { method: 'POST', body: '{}' });
+	const res = await stub.fetch('https://meter/get', {
+		method: 'POST',
+		headers: { 'content-type': 'application/json', 'x-meter-token': env.METER_TOKEN ?? '' },
+		body: JSON.stringify({ inst })
+	});
 	return (await res.json()) as PoolInfo;
 }
 
@@ -99,8 +104,8 @@ async function kvget(env: Env, inst: string, key: string): Promise<unknown> {
 	const stub = env.METER!.get(env.METER!.idFromName(inst));
 	const res = await stub.fetch('https://meter/kvget', {
 		method: 'POST',
-		headers: { 'content-type': 'application/json' },
-		body: JSON.stringify({ key })
+		headers: { 'content-type': 'application/json', 'x-meter-token': env.METER_TOKEN ?? '' },
+		body: JSON.stringify({ inst, key })
 	});
 	return ((await res.json()) as { value?: unknown }).value ?? null;
 }
@@ -155,8 +160,8 @@ async function verifyAccountSig(
 		const stub = env.METER!.get(env.METER!.idFromName(`acct:${claimed}`));
 		const claim = await stub.fetch('https://meter/claim', {
 			method: 'POST',
-			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify({ nonce: `req:${nonce}` })
+			headers: { 'content-type': 'application/json', 'x-meter-token': env.METER_TOKEN ?? '' },
+			body: JSON.stringify({ inst: `acct:${claimed}`, nonce: `req:${nonce}` })
 		});
 		return claim.ok;
 	} catch {
