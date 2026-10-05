@@ -48,7 +48,9 @@ const PROVIDER_URLS: Record<string, string> = {
 
 const cors = {
 	'access-control-allow-origin': '*',
-	'access-control-allow-methods': 'POST, OPTIONS',
+	'access-control-allow-methods': 'GET, POST, OPTIONS',
+	'access-control-allow-headers':
+		'content-type, x-cic-account, x-cic-pub, x-cic-ts, x-cic-nonce, x-cic-sig',
 	'cache-control': 'no-store'
 };
 
@@ -64,7 +66,7 @@ export default {
 			if (url.pathname === '/ai/tts' && req.method === 'POST')
 				return await tts(req, env);
 			if (url.pathname === '/ai/entitlement' && req.method === 'GET')
-				return await entitlement(url, env);
+				return await entitlement(req, env);
 			if (url.pathname === '/ai/usage' && req.method === 'POST')
 				return await usage(req, env, ctx);
 			if (url.pathname === '/ai/topup' && req.method === 'POST')
@@ -179,12 +181,16 @@ async function tts(req: Request, env: Env): Promise<Response> {
  *  metered account: paid while a covering balance > 0 (streaming spend).
  *  Precedence — host sponsorship → the caller's own account wallet → the
  *  room pool (direct top-ups / signed grants). */
-async function entitlement(url: URL, env: Env): Promise<Response> {
+async function entitlement(req: Request, env: Env): Promise<Response> {
+	const url = new URL(req.url);
 	const room = url.searchParams.get('room');
 	if (!room) return json({ error: 'room required' }, 400);
 	if (!env.METER) return json({ paid: false });
-	const account = url.searchParams.get('account');
-	const pick = await pickPool(env, room, account);
+	// account lane only counts when the caller proves the key — a bare
+	// accountId is a public identifier, not a credential
+	const claimed = req.headers.get('x-cic-account');
+	const verified = claimed ? await verifyAccountSig(env, req, '/ai/entitlement', '', claimed) : null;
+	const pick = await pickPool(env, room, verified ? claimed : null);
 	return json({ source: pick.source, ...pick.info });
 }
 
@@ -198,16 +204,20 @@ async function entitlement(url: URL, env: Env): Promise<Response> {
 const CALL_COST = 5;
 async function usage(req: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
 	if (!env.METER) return json({ balanceSeconds: 0 });
-	const { room, seconds, calls, account } = (await req.json()) as {
+	const raw = await req.text();
+	const { room, seconds, calls, account } = JSON.parse(raw || '{}') as {
 		room?: string;
 		seconds?: number;
 		calls?: number;
 		account?: string;
 	};
 	if (!room) return json({ error: 'room required' }, 400);
+	// account spend requires a valid signature — unsigned/invalid requests
+	// degrade to the room pool, they can never touch a wallet
+	const verified = account ? await verifyAccountSig(env, req, '/ai/usage', raw, account) : null;
 	const debit = Math.max(0, Math.min(3600, Math.round(seconds ?? 0))) +
 		Math.max(0, Math.min(1000, Math.round(calls ?? 0))) * CALL_COST;
-	const pick = await pickPool(env, room, account);
+	const pick = await pickPool(env, room, verified ? account : null);
 	const res = await meter(env, pick.pool, 'debit', { amount: debit });
 	indexReport(env, ctx, pick.pool, res.clone());
 	return res;
@@ -367,6 +377,56 @@ async function adminMint(req: Request, env: Env): Promise<Response> {
 	return json({ ok: true, room, grant });
 }
 
+/**
+ * verifyAccountSig — the shared account-key check (same scheme as cic-pay):
+ * x-cic-pub/ts/nonce/sig headers; the signing key is the account's primary
+ * (sha256(pub)==accountId) or a registered delegate (acct:<id>.key:<hash>).
+ * Returns true only when the request proves key possession — callers must
+ * treat unverified 'account' params as absent, never as credentials.
+ */
+async function verifyAccountSig(
+	env: Env,
+	req: Request,
+	path: string,
+	rawBody: string,
+	claimed: string
+): Promise<boolean> {
+	try {
+		const pubHex = req.headers.get('x-cic-pub');
+		const ts = Number(req.headers.get('x-cic-ts'));
+		const nonce = req.headers.get('x-cic-nonce');
+		const sigHex = req.headers.get('x-cic-sig');
+		if (!pubHex || !ts || !nonce || !sigHex) return false;
+		if (Math.abs(Math.floor(Date.now() / 1000) - ts) > 300) return false;
+		const pub = hexToBytes(pubHex);
+		const sig = hexToBytes(sigHex);
+		const enc = new TextEncoder();
+		const digest = async (d: Uint8Array | string) =>
+			new Uint8Array(await crypto.subtle.digest('SHA-256', (typeof d === 'string' ? enc.encode(d) : d) as BufferSource));
+		const toHexS = (b: Uint8Array) => [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
+		const keyHash = toHexS(await digest(pub));
+		if (keyHash !== claimed) {
+			const reg = await meter(env, `acct:${claimed}`, 'kvget', { key: `key:${keyHash}` });
+			if (!(((await reg.json()) as { value?: unknown }).value)) return false;
+		}
+		const key = await crypto.subtle.importKey(
+			'spki',
+			pub as BufferSource,
+			{ name: 'ECDSA', namedCurve: 'P-256' },
+			false,
+			['verify']
+		);
+		const bodyHash = toHexS(await digest(rawBody));
+		const payload = [claimed, req.method.toUpperCase(), path, bodyHash, String(ts), nonce, keyHash].join('\n');
+		if (!(await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, key, sig as BufferSource, enc.encode(payload))))
+			return false;
+		const claim = await meter(env, `acct:${claimed}`, 'claim', { nonce: `req:${nonce}` });
+		return claim.ok;
+	} catch {
+		return false;
+	}
+}
+
 function meter(env: Env, room: string, op: string, body: object): Promise<Response> {
 	const stub = env.METER!.get(env.METER!.idFromName(room));
 	return stub.fetch(`https://meter/${op}`, {
@@ -398,6 +458,7 @@ export class MeterBus implements DurableObject {
 			prefix?: string;
 			account?: string | null;
 			to?: string;
+			entry?: unknown;
 		};
 		const s = this.ctx.storage;
 		if (op === '/get') {
@@ -408,6 +469,8 @@ export class MeterBus implements DurableObject {
 		}
 		if (op === '/debit') {
 			const amount = b.amount ?? 0;
+			const capHit = await spendCapHit(s, amount);
+			if (capHit) return json({ ok: false, status: 'cap', ...capHit }, 402);
 			const balance = Math.max(0, ((await s.get<number>('balance')) ?? 0) - amount);
 			const spent = ((await s.get<number>('spent')) ?? 0) + amount;
 			await s.put({ balance, spent });
@@ -472,6 +535,8 @@ export class MeterBus implements DurableObject {
 			const amount = Math.max(0, Math.round(b.amount ?? 0));
 			const balance = (await s.get<number>('balance')) ?? 0;
 			if (!b.to || amount <= 0) return json({ ok: false, status: 'bad_request' }, 400);
+			const capHit = await spendCapHit(s, amount);
+			if (capHit) return json({ ok: false, status: 'cap', ...capHit });
 			if (balance < amount)
 				return json({ ok: false, status: 'insufficient', available: balance });
 			const spent = ((await s.get<number>('spent')) ?? 0) + amount;
@@ -485,8 +550,35 @@ export class MeterBus implements DurableObject {
 			const credited = (await res.json()) as { balanceSeconds?: number };
 			return json({ ok: true, balanceSeconds: credited.balanceSeconds ?? 0 });
 		}
+		if (op === '/audit') {
+			// signed-ops trail — last 50 {op, device, at, detail} on this instance
+			const list = ((await s.get<unknown[]>('audit')) ?? []) as unknown[];
+			list.unshift(b.entry ?? {});
+			await s.put('audit', list.slice(0, 50));
+			return json({ ok: true });
+		}
 		return json({ error: 'unknown op' }, 404);
 	}
+}
+
+/**
+ * Optional user-set daily spend cap (acct instances only) — 'limits' record
+ * holds {maxSecondsPerDay}; spend accumulates under 'spendDay:<utc-date>'.
+ * Unset = uncapped. Returns the breach detail or null.
+ */
+async function spendCapHit(
+	s: DurableObjectStorage,
+	amount: number
+): Promise<{ dailySpent: number; cap: number } | null> {
+	const limits = (await s.get<{ maxSecondsPerDay?: number }>('limits')) ?? null;
+	const cap = limits?.maxSecondsPerDay;
+	if (!cap || cap <= 0) return null;
+	const day = new Date().toISOString().slice(0, 10);
+	const key = `spendDay:${day}`;
+	const spent = ((await s.get<number>(key)) ?? 0) + amount;
+	if (spent > cap) return { dailySpent: spent - amount, cap };
+	await s.put(key, spent);
+	return null;
 }
 
 function hexToBytes(hex: string): Uint8Array {

@@ -52,12 +52,19 @@ Stripe Dashboard → Developers → Webhooks → add endpoint:
 `customer.subscription.updated`, `customer.subscription.deleted`,
 `charge.refunded`, `charge.dispute.created`.
 
-Spend model: `acct:<accountId>` wallet per user (bearer credential,
-browser-local); `POST /pay/sponsor` lets a funded host's wallet cover a
-whole circle; otherwise each participant's paid lanes draw their own
-wallet, falling back to the room pool. Frontend calls it via
-`VITE_CIC_PAY_ENDPOINT` (default path prefix `/pay` — set to
-`https://cic-pay.regenleadership.workers.dev/pay`).
+Spend model: `acct:<accountId>` wallet per user. The accountId is a public
+identifier (sha256 of the device's signing key); spend requires an
+x-cic-signed request — see docs/SECURITY.md. `POST /pay/sponsor` lets a
+funded host's wallet cover a whole circle; otherwise each participant's
+paid lanes draw their own wallet, falling back to the room pool.
+Frontend calls it via `VITE_CIC_PAY_ENDPOINT` (default path prefix `/pay`).
+
+Recommended Stripe portal configuration (Dashboard → Settings → Billing →
+Customer portal): enable invoice history, payment-method update, and
+subscription cancellation; disable plan switching (single plan — proration
+invoices aren't credited). Recommended Cloudflare rate-limit rules:
+`/pay/checkout`, `/pay/link-begin`, `/pay/challenge` → ~10 req/min per IP;
+`/sessions/new` on cic-sfu → ~30/min per IP.
 
 ## B. Self-host (no Cloudflare)
 

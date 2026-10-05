@@ -6,18 +6,31 @@
 	 * pollLink() (in the room tab) picks up → account-linked{accountId}.
 	 */
 	import { onMount } from 'svelte';
-	import { completeLink } from '$lib/bridge/account';
+	import { completeLink, deviceLinkApprove, localAccount } from '$lib/bridge/account';
 
-	let state = $state<'confirm' | 'done' | 'invalid'>('confirm');
+	let phase = $state<'confirm' | 'done' | 'invalid' | 'approve' | 'approved' | 'fail'>('confirm');
 	let challengeId = '';
+	let linkCode = $state('');
 
 	onMount(() => {
-		challengeId = new URL(location.href).searchParams.get('ch') ?? '';
-		if (!challengeId) state = 'invalid';
+		const q = new URL(location.href).searchParams;
+		linkCode = q.get('k') ?? '';
+		if (linkCode) {
+			// device-delegation link: this device must already hold the account
+			phase = localAccount() ? 'approve' : 'invalid';
+			return;
+		}
+		challengeId = q.get('ch') ?? '';
+		if (!challengeId) phase = 'invalid';
 	});
 
-	function confirm() {
-		state = completeLink(challengeId) ? 'done' : 'invalid';
+	async function confirm() {
+		phase = (await completeLink(challengeId)) ? 'done' : 'invalid';
+	}
+
+	async function approve() {
+		const r = await deviceLinkApprove(linkCode.toLowerCase());
+		phase = r.ok ? 'approved' : 'fail';
 	}
 </script>
 
@@ -25,11 +38,21 @@
 
 <main class="link-shell">
 	<div class="link-card">
-		{#if state === 'confirm'}
+		{#if phase === 'approve'}
+			<h1>Approve a new device</h1>
+			<p>A device showing code <code>{linkCode}</code> is asking to share this account's billing wallet. Its private key stays on that device — you can revoke it later from Billing.</p>
+			<button onclick={approve}>Approve device</button>
+		{:else if phase === 'approved'}
+			<h1>Device approved</h1>
+			<p>The new device is linked and shares your balance. Manage or revoke it anytime under Billing → Devices.</p>
+		{:else if phase === 'fail'}
+			<h1>Approval failed</h1>
+			<p>The code expired or the request couldn't be signed. Have the new device start again and retry.</p>
+		{:else if phase === 'confirm'}
 			<h1>Link this device</h1>
 			<p>Create a local account identity and attach it to your circle session. Nothing leaves this device — the identity lives in this browser's storage.</p>
 			<button onclick={confirm}>Link account</button>
-		{:else if state === 'done'}
+		{:else if phase === 'done'}
 			<h1>Linked</h1>
 			<p>This device is linked. You can close this tab — the circle tab picks it up automatically.</p>
 		{:else}

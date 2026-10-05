@@ -16,6 +16,9 @@
  */
 import type { RoomSession } from '../state/room.svelte';
 import { localAccount } from './account';
+import { signRequest } from '../crypto/accountKey';
+import { bytesToHex } from '@noble/hashes/utils.js';
+import { sha256 } from '@noble/hashes/sha2.js';
 
 type Frame = Record<string, unknown>;
 interface BridgeLike {
@@ -58,16 +61,26 @@ async function api<T = Record<string, unknown>>(
 	path: string,
 	body?: unknown,
 	method?: string,
-	auth?: { room?: string; account?: string }
+	auth?: { room?: string; roomSecret?: string; account?: string }
 ): Promise<T> {
+	const verb = method ?? (body === undefined ? 'GET' : 'POST');
+	const bodyStr = body === undefined ? undefined : JSON.stringify(body);
+	const headers: Record<string, string> = { 'content-type': 'application/json' };
+	if (auth?.room) headers['x-cic-room'] = auth.room;
+	// membership capability — only someone holding the room secret can mint it;
+	// the secret itself never leaves the device
+	if (auth?.room && auth?.roomSecret)
+		headers['x-cic-room-ticket'] = bytesToHex(
+			sha256(new TextEncoder().encode(`sfu:${auth.roomSecret}:${auth.room}`))
+		);
+	if (auth?.account) {
+		Object.assign(headers, await signRequest(verb, path, bodyStr, auth.account));
+		headers['x-cic-account'] = auth.account;
+	}
 	const res = await fetch(`${endpoint()}${path}`, {
-		method: method ?? (body === undefined ? 'GET' : 'POST'),
-		headers: {
-			'content-type': 'application/json',
-			...(auth?.room ? { 'x-cic-room': auth.room } : {}),
-			...(auth?.account ? { 'x-cic-account': auth.account } : {})
-		},
-		body: body === undefined ? undefined : JSON.stringify(body)
+		method: verb,
+		headers,
+		body: bodyStr
 	});
 	if (!res.ok) throw new Error(`sfu ${path} → ${res.status}`);
 	return (await res.json()) as T;
@@ -124,6 +137,7 @@ export class CloudSfu {
 			if (!this.sfuSessionId) {
 				const created = await api<{ sessionId: string }>('/sessions/new', undefined, 'POST', {
 					room: this.session?.roomCode,
+					roomSecret: this.session?.roomSecret,
 					account: localAccount()?.accountId
 				});
 				this.sfuSessionId = created.sessionId;
@@ -191,6 +205,7 @@ export class CloudSfu {
 					// without ever publishing (quadratic→linear egress at scale)
 					const created = await api<{ sessionId: string }>('/sessions/new', undefined, 'POST', {
 						room: this.session?.roomCode,
+						roomSecret: this.session?.roomSecret,
 						account: localAccount()?.accountId
 					});
 					this.sfuSessionId = created.sessionId;

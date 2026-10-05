@@ -18,7 +18,8 @@ const UPSTREAM = 'https://rtc.live.cloudflare.com/v1/apps';
 const cors = {
 	'access-control-allow-origin': '*',
 	'access-control-allow-methods': 'GET, POST, PUT, DELETE, OPTIONS',
-	'access-control-allow-headers': 'content-type, x-cic-room, x-cic-account'
+	'access-control-allow-headers':
+		'content-type, x-cic-room, x-cic-account, x-cic-room-ticket, x-cic-pub, x-cic-ts, x-cic-nonce, x-cic-sig'
 };
 
 export default {
@@ -33,8 +34,8 @@ export default {
 		if (path === 'sessions/new' && req.method === 'POST' && env.METER) {
 			const room = req.headers.get('x-cic-room');
 			if (!room) return json({ error: 'x-cic-room required' }, 400);
-			const funded = await coveringBalance(env, room, req.headers.get('x-cic-account'));
-			if (!funded) return json({ error: 'no funded pool for this room/account' }, 402);
+			if (!(await sessionAuthorized(env, req, room)))
+				return json({ error: 'no funded pool for this room/account' }, 402);
 		}
 		const res = await fetch(`${UPSTREAM}/${env.CALLS_APP_ID}/${path}`, {
 			method: req.method,
@@ -55,26 +56,119 @@ export default {
 };
 
 /**
- * coveringBalance — same precedence as the gateway's pickPool: a room's
- * sponsor wallet first, then the caller's own account wallet, then the
- * room pool. Returns true when any covers.
+ * sessionAuthorized — session creation spends real Calls capacity, so it
+ * needs one of two proofs:
+ *  a) x-cic-account + a valid x-cic-* signature over this request, and that
+ *     wallet (or the room's sponsor) is funded — the account lane; or
+ *  b) x-cic-room-ticket = sha256('sfu:'+roomSecret+':'+roomCode) — a
+ *     membership capability only room participants can compute — plus a
+ *     funded room pool or sponsor.
+ * A bare room name or accountId proves nothing (both are public).
  */
-async function coveringBalance(env: Env, room: string, account: string | null): Promise<boolean> {
-	const get = async (inst: string) => {
-		const stub = env.METER!.get(env.METER!.idFromName(inst));
-		const res = await stub.fetch('https://meter/get', { method: 'POST', body: '{}' });
-		return (await res.json()) as { balanceSeconds?: number; sponsor?: string | null };
-	};
-	const roomInfo = await get(room);
-	if (roomInfo.sponsor) {
-		const sp = await get(`acct:${roomInfo.sponsor}`);
-		if ((sp.balanceSeconds ?? 0) > 0) return true;
+async function sessionAuthorized(env: Env, req: Request, room: string): Promise<boolean> {
+	const account = req.headers.get('x-cic-account');
+	if (account && (await verifyAccountSig(env, req, 'sessions/new', '', account))) {
+		if (await funded(env, `acct:${account}`)) return true;
 	}
-	if (account) {
-		const a = await get(`acct:${account}`);
-		if ((a.balanceSeconds ?? 0) > 0) return true;
+	const ticket = req.headers.get('x-cic-room-ticket');
+	if (ticket && /^[0-9a-f]{64}$/i.test(ticket)) {
+		const info = await roomInfo(env, room);
+		if (info.sponsor && (await funded(env, `acct:${info.sponsor}`))) return true;
+		if ((info.balanceSeconds ?? 0) > 0) return true;
 	}
-	return (roomInfo.balanceSeconds ?? 0) > 0;
+	return false;
+}
+
+interface PoolInfo {
+	balanceSeconds?: number;
+	sponsor?: string | null;
+}
+
+async function funded(env: Env, inst: string): Promise<boolean> {
+	const info = await roomInfo(env, inst);
+	return (info.balanceSeconds ?? 0) > 0;
+}
+
+async function roomInfo(env: Env, inst: string): Promise<PoolInfo> {
+	const stub = env.METER!.get(env.METER!.idFromName(inst));
+	const res = await stub.fetch('https://meter/get', { method: 'POST', body: '{}' });
+	return (await res.json()) as PoolInfo;
+}
+
+async function kvget(env: Env, inst: string, key: string): Promise<unknown> {
+	const stub = env.METER!.get(env.METER!.idFromName(inst));
+	const res = await stub.fetch('https://meter/kvget', {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ key })
+	});
+	return ((await res.json()) as { value?: unknown }).value ?? null;
+}
+
+/** shared account-key check — same scheme as cic-pay/cic-ai-gateway */
+async function verifyAccountSig(
+	env: Env,
+	req: Request,
+	path: string,
+	rawBody: string,
+	claimed: string
+): Promise<boolean> {
+	try {
+		const pubHex = req.headers.get('x-cic-pub');
+		const ts = Number(req.headers.get('x-cic-ts'));
+		const nonce = req.headers.get('x-cic-nonce');
+		const sigHex = req.headers.get('x-cic-sig');
+		if (!pubHex || !ts || !nonce || !sigHex) return false;
+		if (Math.abs(Math.floor(Date.now() / 1000) - ts) > 300) return false;
+		const pub = hexBytes(pubHex);
+		const sig = hexBytes(sigHex);
+		if (!pub || !sig) return false;
+		const enc = new TextEncoder();
+		const digest = async (d: Uint8Array | string) =>
+			new Uint8Array(
+				await crypto.subtle.digest('SHA-256', (typeof d === 'string' ? enc.encode(d) : d) as BufferSource)
+			);
+		const hex = (b: Uint8Array) => [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
+		const keyHash = hex(await digest(pub));
+		if (keyHash !== claimed && !(await kvget(env, `acct:${claimed}`, `key:${keyHash}`)))
+			return false;
+		const key = await crypto.subtle.importKey(
+			'spki',
+			pub as BufferSource,
+			{ name: 'ECDSA', namedCurve: 'P-256' },
+			false,
+			['verify']
+		);
+		const bodyHash = hex(await digest(rawBody));
+		const payload = [claimed, req.method.toUpperCase(), path, bodyHash, String(ts), nonce, keyHash].join(
+			'\n'
+		);
+		if (
+			!(await crypto.subtle.verify(
+				{ name: 'ECDSA', hash: 'SHA-256' },
+				key,
+				sig as BufferSource,
+				enc.encode(payload)
+			))
+		)
+			return false;
+		const stub = env.METER!.get(env.METER!.idFromName(`acct:${claimed}`));
+		const claim = await stub.fetch('https://meter/claim', {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({ nonce: `req:${nonce}` })
+		});
+		return claim.ok;
+	} catch {
+		return false;
+	}
+}
+
+function hexBytes(hexS: string): Uint8Array | null {
+	if (!/^[0-9a-f]+$/i.test(hexS) || hexS.length % 2) return null;
+	const out = new Uint8Array(hexS.length / 2);
+	for (let i = 0; i < out.length; i++) out[i] = parseInt(hexS.slice(i * 2, i * 2 + 2), 16);
+	return out;
 }
 
 function json(body: unknown, status = 200): Response {

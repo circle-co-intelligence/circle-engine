@@ -39,6 +39,7 @@ const config = {
 					'https://cic-ai-gateway.regenleadership.workers.dev',
 					'https://cic-dsp.regenleadership.workers.dev',
 					'https://cic-sfu.regenleadership.workers.dev',
+					'https://cic-pay.regenleadership.workers.dev',
 					'wss://cic-signaling.regenleadership.workers.dev',
 					'https://github.com',
 					'https://*.githubusercontent.com',

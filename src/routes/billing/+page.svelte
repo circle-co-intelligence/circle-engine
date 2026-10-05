@@ -9,9 +9,12 @@
 	import { base } from '$app/paths';
 	import {
 		localAccount, ensureAccount, billingConfigured, billingConfig, billingAccount,
-		checkoutUrl, portalUrl, sponsorRoom,
+		checkoutUrl, portalUrl, sponsorRoom, deviceLinkBegin, deviceLinkStatus,
+		deviceLinkApprove, deviceRevoke, setLinkedAccount, passkeyRegister,
+		setSpendCap,
 		type BillingAccount, type PayPack, type PaySub
 	} from '$lib/bridge/account';
+	import { passkeysSupported } from '$lib/crypto/accountKey';
 
 	let account = $state<{ accountId: string } | null>(null);
 	let wallet = $state<BillingAccount | null>(null);
@@ -22,6 +25,10 @@
 	let error = $state('');
 	let sponsorCode = $state('');
 	let showRecovery = $state(false);
+	let approveCode = $state('');
+	let linkCode = $state('');
+	let linkState = $state<'idle' | 'waiting' | 'linked'>('idle');
+	let capHours = $state('');
 
 	onMount(async () => {
 		account = localAccount();
@@ -75,14 +82,89 @@
 
 	async function toggleSponsor(room: string, on: boolean) {
 		if (!(await sponsorRoom(room, on))) {
-			error = 'Sponsorship needs a funded balance.';
+			error = 'Sponsorship needs a funded balance and your device key.';
 			return;
 		}
 		wallet = await billingAccount();
 	}
 
-	function createAccount() {
-		account = ensureAccount();
+	async function createAccount() {
+		account = await ensureAccount();
+	}
+
+	// ---- device linking ----------------------------------------------------
+	// this device (has the account): approve a code another device is showing
+	async function approve() {
+		const r = await deviceLinkApprove(approveCode.trim().toLowerCase());
+		if (!r.ok) {
+			error = 'Approval failed — check the code and try again.';
+			return;
+		}
+		approveCode = '';
+		wallet = await billingAccount();
+	}
+
+	// this device (new, no account): park its key and show a code
+	async function beginLink() {
+		busy = true;
+		try {
+			const code = await deviceLinkBegin();
+			if (!code) {
+				error = 'Could not reach billing — try again.';
+				return;
+			}
+			linkCode = code;
+			linkState = 'waiting';
+			const until = Date.now() + 10 * 60_000;
+			while (linkState === 'waiting' && Date.now() < until) {
+				await new Promise((r) => setTimeout(r, 2500));
+				const accountId = await deviceLinkStatus(code);
+				if (accountId) {
+					setLinkedAccount(accountId);
+					account = { accountId };
+					linkState = 'linked';
+					wallet = await billingAccount();
+					break;
+				}
+			}
+			if (linkState === 'waiting') linkState = 'idle';
+		} finally {
+			busy = false;
+		}
+	}
+
+	async function revoke(keyHash: string) {
+		if (!(await deviceRevoke(keyHash))) {
+			error = 'Revoke failed — needs your passkey if one is enrolled.';
+			return;
+		}
+		wallet = await billingAccount();
+	}
+
+	// ---- passkey -----------------------------------------------------------
+	async function enrollPasskey() {
+		busy = true;
+		try {
+			if (!(await passkeyRegister(navigator.platform || 'this device'))) {
+				error = 'Passkey enrollment was canceled or is unsupported here.';
+				return;
+			}
+			wallet = await billingAccount();
+		} finally {
+			busy = false;
+		}
+	}
+
+	// ---- spend cap ---------------------------------------------------------
+	async function applyCap() {
+		const h = parseFloat(capHours);
+		const ok = await setSpendCap(Number.isFinite(h) && h > 0 ? Math.round(h * 3600) : null);
+		if (!ok) {
+			error = 'Could not update the spend cap.';
+			return;
+		}
+		capHours = '';
+		wallet = await billingAccount();
 	}
 </script>
 
@@ -101,8 +183,18 @@
 		{#if !billingConfigured()}
 			<p class="dim">Payments aren't configured on this deployment yet.</p>
 		{:else if !account}
-			<p>Your billing identity is a private account key that lives in this browser — no sign-up, no email on our servers. Stripe handles the card side.</p>
-			<button onclick={createAccount}>Create billing account</button>
+			<p>Your billing identity is a private key that lives only in this browser — no sign-up, no password, no email on our servers. Stripe handles the card side.</p>
+			<button onclick={createAccount} disabled={busy}>Create billing account</button>
+			<h2>Have an account on another device?</h2>
+			{#if linkState === 'waiting'}
+				<p>On your other device open <strong>Billing → Add a device</strong> and enter:</p>
+				<code class="recovery linkcode">{linkCode}</code>
+				<p class="dim">Waiting for approval… (10 min)</p>
+			{:else if linkState === 'linked'}
+				<p class="banner ok">Linked — this device now shares that account's balance.</p>
+			{:else}
+				<button class="ghost" onclick={beginLink} disabled={busy}>Link this device to it</button>
+			{/if}
 		{:else}
 			<dl class="wallet">
 				<div><dt>Balance</dt><dd>{wallet ? fmtSeconds(wallet.balanceSeconds) : '…'}</dd></div>
@@ -157,12 +249,63 @@
 				{/each}
 			{/if}
 
-			<h2>Account key</h2>
-			<p class="dim">This key is your billing identity — it lives only in this browser. Save it somewhere safe to recover your balance on another device.</p>
+			<h2>Devices</h2>
+			<p class="dim">Each device holds its own private key — approved by an existing device, revocable anytime. Losing your only device loses the balance.</p>
+			{#each wallet?.devices ?? [] as d (d.keyHash)}
+				<div class="pack">
+					<span><code>{d.keyHash.slice(0, 12)}…</code>{d.primary ? ' (this identity)' : ''}</span>
+					{#if !d.primary}
+						<button class="ghost" onclick={() => revoke(d.keyHash)}>Revoke</button>
+					{/if}
+				</div>
+			{/each}
+			<div class="sponsor-row">
+				<input placeholder="code shown on the new device" bind:value={approveCode} />
+				<button class="ghost" onclick={approve} disabled={!approveCode.trim()}>Approve device</button>
+			</div>
+
+			<h2>Passkey</h2>
+			{#if wallet?.passkeys?.length}
+				<p class="dim">Sensitive actions (portal, device approval, large transfers) require this device's biometric/PIN.</p>
+				{#each wallet.passkeys as p (p.credId)}
+					<div class="pack"><span>{p.name ?? 'passkey'}</span><span class="dim">enrolled</span></div>
+				{/each}
+			{:else if passkeysSupported()}
+				<p class="dim">Optional: require a fingerprint/face/PIN for sensitive actions.</p>
+				<button class="ghost" onclick={enrollPasskey} disabled={busy}>Enable passkey protection</button>
+			{:else}
+				<p class="dim">Passkeys aren't supported on this device.</p>
+			{/if}
+
+			<h2>Spend cap</h2>
+			<p class="dim">
+				Optional daily limit on paid-lane spend from this wallet
+				{wallet?.limits?.maxSecondsPerDay ? ` — currently ${fmtSeconds(wallet.limits.maxSecondsPerDay)}/day` : ' (off)'}.
+			</p>
+			<div class="sponsor-row">
+				<input placeholder="hours per day, e.g. 4" bind:value={capHours} inputmode="decimal" />
+				<button class="ghost" onclick={applyCap} disabled={!capHours.trim()}>Set cap</button>
+				{#if wallet?.limits?.maxSecondsPerDay}
+					<button class="ghost" onclick={() => { capHours = ' '; void setSpendCap(null).then(async () => (wallet = await billingAccount())); }}>Remove</button>
+				{/if}
+			</div>
+
+			{#if wallet?.activity?.length}
+				<h2>Recent activity</h2>
+				{#each wallet.activity.slice(0, 15) as a, i (i)}
+					<div class="pack">
+						<span>{a.op}{a.detail ? ` — ${a.detail}` : ''}</span>
+						<span class="dim">{a.device} · {new Date(a.at).toLocaleDateString()}</span>
+					</div>
+				{/each}
+			{/if}
+
+			<h2>Account</h2>
+			<p class="dim">Public account id (safe to show — spending requires this device's private key).</p>
 			{#if showRecovery}
 				<code class="recovery">{account.accountId}</code>
 			{:else}
-				<button class="ghost" onclick={() => (showRecovery = true)}>Reveal account key</button>
+				<button class="ghost" onclick={() => (showRecovery = true)}>Show account id</button>
 			{/if}
 		{/if}
 
@@ -190,6 +333,7 @@
 	.banner { padding: 0.6rem 0.9rem; border-radius: 8px; background: #f0ead9; }
 	.banner.ok { background: #dff0e2; } .banner.err { background: #f6dcd8; }
 	.recovery { display: block; word-break: break-all; background: #f6f3ee; padding: 0.75rem; border-radius: 8px; font-size: 0.8rem; }
+	.linkcode { font-size: 1.6rem; letter-spacing: 0.15em; text-align: center; }
 	.back { margin-top: 1.5rem; }
 	a { color: #1f4d3a; }
 </style>

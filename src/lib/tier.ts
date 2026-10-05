@@ -18,6 +18,7 @@
 
 import { budget } from './ledger/credits';
 import { localAccount } from './bridge/account';
+import { signRequest } from './crypto/accountKey';
 
 export type Tier = 'free' | 'paid';
 
@@ -71,13 +72,19 @@ export interface Entitlement {
 	source?: 'room' | 'account' | 'sponsor';
 }
 
-/** remaining pool + spend — null when the metered lane isn't deployed */
+/** remaining pool + spend — null when the metered lane isn't deployed.
+ *  The account lane is signed (x-cic-*) — a bare accountId is a public
+ *  identifier, never a credential, and never goes in a URL. */
 export async function entitlementInfo(roomCode: string, account?: string): Promise<Entitlement | null> {
 	const base = apiBase();
 	if (!base) return null;
 	const acc = callerAccount(account);
-	const q = acc ? `&account=${encodeURIComponent(acc)}` : '';
-	const res = await fetch(`${base}/entitlement?room=${encodeURIComponent(roomCode)}${q}`);
+	const headers: Record<string, string> = {};
+	if (acc) {
+		Object.assign(headers, await signRequest('GET', '/ai/entitlement', undefined, acc));
+		headers['x-cic-account'] = acc;
+	}
+	const res = await fetch(`${base}/entitlement?room=${encodeURIComponent(roomCode)}`, { headers });
 	if (!res.ok) return null;
 	return (await res.json()) as Entitlement;
 }
@@ -98,10 +105,18 @@ export async function reportUsage(
 	const base = apiBase();
 	if (!base || (seconds <= 0 && calls <= 0)) return null;
 	const acc = callerAccount(account);
+	const bodyStr = JSON.stringify({
+		room: roomCode,
+		seconds,
+		calls,
+		...(acc ? { account: acc } : {})
+	});
+	const headers: Record<string, string> = { 'content-type': 'application/json' };
+	if (acc) Object.assign(headers, await signRequest('POST', '/ai/usage', bodyStr, acc));
 	const res = await fetch(`${base}/usage`, {
 		method: 'POST',
-		headers: { 'content-type': 'application/json' },
-		body: JSON.stringify({ room: roomCode, seconds, calls, ...(acc ? { account: acc } : {}) })
+		headers,
+		body: bodyStr
 	}).catch(() => null);
 	if (!res?.ok) return null;
 	const body = (await res.json()) as { paid?: boolean; balanceSeconds?: number; source?: Entitlement['source'] };

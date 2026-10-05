@@ -12,6 +12,13 @@
 import { bytesToHex } from '@noble/hashes/utils.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { base } from '$app/paths';
+import {
+	accountKeys,
+	signRequest,
+	passkeyEnroll,
+	passkeyAssert,
+	type PasskeyAssertion
+} from '../crypto/accountKey';
 
 interface Challenge {
 	challengeId: string;
@@ -30,8 +37,10 @@ function randomToken(): string {
 	return bytesToHex(b);
 }
 
-/** stable device-local identity — created only when the user actually links */
-export function localAccount(): { accountId: string } | null {
+/** stable device-local identity — the public accountId (a pubkey hash,
+ *  safe to expose; spend requires the non-extractable device key's
+ *  signature — see crypto/accountKey.ts). Sync read from localStorage. */
+export function localAccount(): { accountId: string; delegate?: boolean } | null {
 	try {
 		const raw = localStorage.getItem('cic.account');
 		return raw ? JSON.parse(raw) : null;
@@ -40,14 +49,32 @@ export function localAccount(): { accountId: string } | null {
 	}
 }
 
-export function ensureAccount(): { accountId: string } {
-	const found = localAccount();
-	if (found) return found;
-	const accountId = bytesToHex(sha256(new TextEncoder().encode(`cic:${crypto.randomUUID()}`))).slice(0, 32);
+/** create or load this device's keypair and publish its derived accountId.
+ *  Async — key generation/storage is WebCrypto+IDB. A delegate (linked)
+ *  device's stored accountId differs from its key hash by design. */
+export async function ensureAccount(): Promise<{ accountId: string }> {
+	const stored = localAccount();
+	const keys = await accountKeys();
+	// legacy random ids and stale primaries yield to the key-derived account;
+	// a delegate accountId (set by setLinkedAccount) is kept as-is
+	if (!stored || (stored.accountId !== keys.accountId && !stored.delegate)) {
+		const account = { accountId: keys.accountId, at: Date.now() };
+		try {
+			localStorage.setItem('cic.account', JSON.stringify(account));
+		} catch {}
+		return account;
+	}
+	return stored;
+}
+
+/** device-link completed — act as `accountId` from this device onward */
+export function setLinkedAccount(accountId: string): void {
 	try {
-		localStorage.setItem('cic.account', JSON.stringify({ accountId, at: Date.now() }));
+		localStorage.setItem(
+			'cic.account',
+			JSON.stringify({ accountId, at: Date.now(), delegate: true })
+		);
 	} catch {}
-	return { accountId };
 }
 
 // ------------------------------------------------------------- billing
@@ -83,6 +110,10 @@ export interface BillingAccount {
 	} | null;
 	customerId: string | null;
 	sponsoredRooms: string[];
+	devices: { keyHash: string; name?: string; at?: number; primary?: boolean }[];
+	passkeys: { credId: string; name?: string; at?: number }[];
+	limits: { maxSecondsPerDay?: number } | null;
+	activity: { op: string; device: string; at: number; detail?: string }[];
 }
 
 export function payBase(): string | null {
@@ -93,10 +124,30 @@ export function billingConfigured(): boolean {
 	return payBase() !== null;
 }
 
-async function payFetch(path: string, init?: RequestInit): Promise<Response | null> {
+/**
+ * payFetch — signed requests carry x-cic-pub/ts/nonce/sig over the canonical
+ * worker path (/pay/*); the accountId claim travels in the signed payload or
+ * x-cic-account header, never in a URL (URLs land in logs/history).
+ */
+async function payFetch(
+	path: string,
+	init?: RequestInit,
+	sign = false
+): Promise<Response | null> {
 	const b = payBase();
 	if (!b) return null;
-	return fetch(`${b}${path}`, init).catch(() => null);
+	let headers = new Headers(init?.headers);
+	if (sign) {
+		const acc = localAccount();
+		if (!acc) return null;
+		const body = typeof init?.body === 'string' ? init.body : undefined;
+		for (const [k, v] of Object.entries(
+			await signRequest(init?.method ?? 'GET', `/pay${path}`, body, acc.accountId)
+		))
+			headers.set(k, v);
+		headers.set('x-cic-account', acc.accountId);
+	}
+	return fetch(`${b}${path}`, { ...init, headers }).catch(() => null);
 }
 
 export async function billingConfig(): Promise<{ packages: PayPack[]; subscription: PaySub | null }> {
@@ -106,19 +157,18 @@ export async function billingConfig(): Promise<{ packages: PayPack[]; subscripti
 }
 
 export async function billingAccount(): Promise<BillingAccount | null> {
-	const acc = localAccount();
-	if (!acc) return null;
-	const res = await payFetch(`/account?account=${encodeURIComponent(acc.accountId)}`);
+	const res = await payFetch('/account', { method: 'GET' }, true);
 	if (!res?.ok) return null;
 	return (await res.json()) as BillingAccount;
 }
 
-/** → Stripe Checkout URL for a pack / subscription / direct room top-up */
+/** → Stripe Checkout URL for a pack / subscription / direct room top-up.
+ *  Unsigned by design — funding an account only ever helps its owner. */
 export async function checkoutUrl(
 	kind: 'pack' | 'sub' | 'room',
 	opts: { packId?: string; room?: string } = {}
 ): Promise<string | null> {
-	const acc = ensureAccount();
+	const acc = await ensureAccount();
 	const res = await payFetch('/checkout', {
 		method: 'POST',
 		headers: { 'content-type': 'application/json' },
@@ -128,15 +178,29 @@ export async function checkoutUrl(
 	return ((await res.json()) as { url?: string }).url ?? null;
 }
 
-/** → Stripe Billing Portal URL (manage/cancel subscription, invoices) */
+/**
+ * Step-up: when the account has passkeys enrolled, fetch a one-time
+ * challenge and answer it with a WebAuthn assertion (Touch ID etc).
+ * Returns undefined when no passkey is enrolled or the ceremony fails —
+ * the worker decides whether that's acceptable for the op.
+ */
+async function assertionFor(): Promise<PasskeyAssertion | undefined> {
+	const ch = await passkeyChallenge();
+	if (!ch || ch.credIds.length === 0) return undefined;
+	return (await passkeyAssert(ch.credIds, ch.challenge)) ?? undefined;
+}
+
+/** → Stripe Billing Portal URL (manage/cancel subscription, invoices).
+ *  Signed; passkey-asserted when one is enrolled. */
 export async function portalUrl(): Promise<string | null> {
 	const acc = localAccount();
 	if (!acc) return null;
-	const res = await payFetch('/portal', {
-		method: 'POST',
-		headers: { 'content-type': 'application/json' },
-		body: JSON.stringify({ accountId: acc.accountId })
-	});
+	const body = JSON.stringify({ accountId: acc.accountId, webauthn: await assertionFor() });
+	const res = await payFetch(
+		'/portal',
+		{ method: 'POST', headers: { 'content-type': 'application/json' }, body },
+		true
+	);
 	if (!res?.ok) return null;
 	return ((await res.json()) as { url?: string }).url ?? null;
 }
@@ -145,15 +209,19 @@ export async function portalUrl(): Promise<string | null> {
 export async function convertCredits(
 	room: string,
 	seconds: number
-): Promise<{ status: 'purchased'; seconds: number; balance: number } | { status: 'insufficient' | 'no_paid_funding' | 'unavailable'; credits?: number; available?: number } | null> {
+): Promise<{ status: 'purchased'; seconds: number; balance: number } | { status: 'insufficient' | 'no_paid_funding' | 'unavailable' | 'unauthorized' | 'passkey_required'; credits?: number; available?: number } | null> {
 	const acc = localAccount();
 	if (!acc) return null;
-	const res = await payFetch('/convert', {
-		method: 'POST',
-		headers: { 'content-type': 'application/json' },
-		body: JSON.stringify({ accountId: acc.accountId, room, seconds })
-	});
+	const webauthn = seconds > 3600 ? await assertionFor() : undefined;
+	const body = JSON.stringify({ accountId: acc.accountId, room, seconds, webauthn });
+	const res = await payFetch(
+		'/convert',
+		{ method: 'POST', headers: { 'content-type': 'application/json' }, body },
+		true
+	);
 	if (!res) return null;
+	if (res.status === 401) return { status: 'unauthorized' };
+	if (res.status === 428) return { status: 'passkey_required' };
 	return (await res.json()) as Awaited<ReturnType<typeof convertCredits>>;
 }
 
@@ -161,11 +229,112 @@ export async function convertCredits(
 export async function sponsorRoom(room: string, on: boolean): Promise<boolean> {
 	const acc = localAccount();
 	if (!acc) return false;
-	const res = await payFetch('/sponsor', {
+	const body = JSON.stringify({ room, accountId: acc.accountId, on });
+	const res = await payFetch(
+		'/sponsor',
+		{ method: 'POST', headers: { 'content-type': 'application/json' }, body },
+		true
+	);
+	return res?.ok === true;
+}
+
+// --------------------------------------------------------- device linking
+//
+// New device parks its pubkey behind a short code; an already-linked device
+// approves it with a signature (passkey-asserted when enrolled) — the code
+// only ever carries a public key, so the channel needn't be trusted.
+
+export async function deviceLinkBegin(): Promise<string | null> {
+	const keys = await accountKeys();
+	const res = await payFetch('/link-begin', {
 		method: 'POST',
 		headers: { 'content-type': 'application/json' },
-		body: JSON.stringify({ room, accountId: acc.accountId, on })
+		body: JSON.stringify({ pub: bytesToHex(keys.pub) })
 	});
+	if (!res?.ok) return null;
+	return ((await res.json()) as { code?: string }).code ?? null;
+}
+
+/** poll until an existing device approves this device's key → its accountId */
+export async function deviceLinkStatus(code: string): Promise<string | null> {
+	const res = await payFetch(`/link-status?code=${encodeURIComponent(code)}`);
+	if (!res?.ok) return null;
+	return ((await res.json()) as { accountId?: string }).accountId ?? null;
+}
+
+/** existing device: approve the device that parked code (signed + passkey) */
+export async function deviceLinkApprove(
+	code: string
+): Promise<{ ok: boolean; accountId?: string; keyHash?: string }> {
+	const acc = localAccount();
+	if (!acc) return { ok: false };
+	const body = JSON.stringify({ accountId: acc.accountId, code, webauthn: await assertionFor() });
+	const res = await payFetch(
+		'/link-approve',
+		{ method: 'POST', headers: { 'content-type': 'application/json' }, body },
+		true
+	);
+	if (!res?.ok) return { ok: false };
+	return (await res.json()) as { ok: boolean; accountId?: string; keyHash?: string };
+}
+
+/** revoke a linked device's key (signed + passkey-asserted) */
+export async function deviceRevoke(pubHash: string): Promise<boolean> {
+	const acc = localAccount();
+	if (!acc) return false;
+	const body = JSON.stringify({ accountId: acc.accountId, pubHash, webauthn: await assertionFor() });
+	const res = await payFetch(
+		'/revoke',
+		{ method: 'POST', headers: { 'content-type': 'application/json' }, body },
+		true
+	);
+	return res?.ok === true;
+}
+
+// ----------------------------------------------------------- passkey+limits
+
+/** fetch a one-time challenge for a WebAuthn assertion on this account */
+export async function passkeyChallenge(): Promise<{ challenge: string; credIds: string[] } | null> {
+	const acc = localAccount();
+	if (!acc) return null;
+	const res = await payFetch('/challenge', {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ accountId: acc.accountId })
+	});
+	if (!res?.ok) return null;
+	return (await res.json()) as { challenge: string; credIds: string[] };
+}
+
+/** enroll a platform passkey as the step-up factor for high-risk ops */
+export async function passkeyRegister(name: string): Promise<boolean> {
+	const acc = localAccount();
+	if (!acc) return false;
+	const cred = await passkeyEnroll(acc.accountId, name);
+	if (!cred) return false;
+	const body = JSON.stringify({ accountId: acc.accountId, passkey: cred });
+	const res = await payFetch(
+		'/passkey-register',
+		{ method: 'POST', headers: { 'content-type': 'application/json' }, body },
+		true
+	);
+	return res?.ok === true;
+}
+
+/** set/clear the optional daily spend cap (seconds/day; null disables) */
+export async function setSpendCap(maxSecondsPerDay: number | null): Promise<boolean> {
+	const acc = localAccount();
+	if (!acc) return false;
+	const body = JSON.stringify({
+		accountId: acc.accountId,
+		maxSecondsPerDay,
+		webauthn: await assertionFor()
+	});
+	const res = await payFetch(
+		'/limits',
+		{ method: 'POST', headers: { 'content-type': 'application/json' }, body },
+		true
+	);
 	return res?.ok === true;
 }
 
@@ -207,13 +376,13 @@ export function pollLink(challengeId: string, pollSecret: string): string | null
 }
 
 /** link tab: resolve a challenge — proves the tab is same-origin + consented */
-export function completeLink(challengeId: string): boolean {
+export async function completeLink(challengeId: string): Promise<boolean> {
 	let ch: { roomCode: string; expiresAt: number } | null = null;
 	try {
 		ch = JSON.parse(localStorage.getItem(`cic.link.${challengeId}`) ?? 'null');
 	} catch {}
 	if (!ch || Date.now() > ch.expiresAt) return false;
-	const acc = ensureAccount();
+	const acc = await ensureAccount();
 	try {
 		localStorage.setItem(donePrefix + challengeId, JSON.stringify({ accountId: acc.accountId }));
 	} catch {}
