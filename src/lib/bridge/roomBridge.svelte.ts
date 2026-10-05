@@ -23,7 +23,7 @@ import { budget as creditsBudget, quote as creditsQuote, confirm as creditsConfi
 import { startLink, pollLink, sessionToken } from './account';
 import { artifactsFor, noteArtifact, type Artifact } from './artifacts';
 import { initRoomPush, ringRoom } from './push';
-import { paidEntitled } from '../tier';
+import { paidEntitled, invalidateTier } from '../tier';
 import type { Op } from '../wire/messages';
 
 type Frame = Record<string, unknown>;
@@ -405,7 +405,9 @@ class RoomBridge {
 			chat: s.chatLog.map((c) => ({ from: this.prodId(c.from), name: c.from === s.selfId ? s.displayName : s.names[c.from] ?? 'Peer', text: c.text, at: Date.now(), whisper: c.whisper })),
 			transcript: [],
 			feedbackPermit: true,
-			dashboardUrl: null
+			// prod's "Open billing dashboard" builds new URL('/billing', this) —
+			// point it at our origin so it lands on the real billing route
+			dashboardUrl: typeof location === 'undefined' ? null : location.origin
 		};
 	}
 
@@ -699,8 +701,14 @@ class RoomBridge {
 				}
 				this.frame({ t: 'recording-purchase', requestId: m.requestId, result });
 				if (result.status === 'purchased') {
-					// prod's credits delta op — the ledger balance is the source
-					const remaining = await creditsBalance(this.code);
+					// wallet→room conversion credited the pool — re-check lanes
+					invalidateTier(this.code);
+					// prod's credits delta op — the wallet convert returns the
+					// credited room-pool balance; local path reads the ledger
+					const remaining =
+						typeof (result as { balance?: unknown }).balance === 'number'
+							? ((result as { balance: number }).balance as number)
+							: await creditsBalance(this.code);
 					this.delta([{ op: 'credits', remaining, reference: Date.now(), lowWarned: false, sttMinutesLeft: null, sttLowWarned: false }]);
 				}
 				break;

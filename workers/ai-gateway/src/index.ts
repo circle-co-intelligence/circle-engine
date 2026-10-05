@@ -175,36 +175,69 @@ async function tts(req: Request, env: Env): Promise<Response> {
 
 // ------------------------------------------------------------- entitlement + telemetry
 
-/** GET /ai/entitlement?room= → {paid, balanceSeconds, spentSeconds}
- *  metered account: paid while balance > 0 (streaming spend) */
+/** GET /ai/entitlement?room=&account= → {paid, balanceSeconds, spentSeconds, source}
+ *  metered account: paid while a covering balance > 0 (streaming spend).
+ *  Precedence — host sponsorship → the caller's own account wallet → the
+ *  room pool (direct top-ups / signed grants). */
 async function entitlement(url: URL, env: Env): Promise<Response> {
 	const room = url.searchParams.get('room');
 	if (!room) return json({ error: 'room required' }, 400);
 	if (!env.METER) return json({ paid: false });
-	return meter(env, room, 'get', {});
+	const account = url.searchParams.get('account');
+	const pick = await pickPool(env, room, account);
+	return json({ source: pick.source, ...pick.info });
 }
 
 /**
- * POST /ai/usage {room, seconds, calls?} — the streaming-spend lane.
+ * POST /ai/usage {room, seconds, calls?, account?} — the streaming-spend lane.
  * Clients heartbeat paid-resource seconds (SFU fanout, sensory, edge DSP)
- * and AI call counts; the room's MeterBus DO debits atomically (single-
- * threaded per room — atomic by construction) and returns the balance —
+ * and AI call counts; the covering MeterBus pool debits atomically (single-
+ * threaded per instance — atomic by construction) and returns the balance —
  * at zero, paid lanes drop back to on-device. Each call = CALL_COST s.
  */
 const CALL_COST = 5;
 async function usage(req: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
 	if (!env.METER) return json({ balanceSeconds: 0 });
-	const { room, seconds, calls } = (await req.json()) as {
+	const { room, seconds, calls, account } = (await req.json()) as {
 		room?: string;
 		seconds?: number;
 		calls?: number;
+		account?: string;
 	};
 	if (!room) return json({ error: 'room required' }, 400);
 	const debit = Math.max(0, Math.min(3600, Math.round(seconds ?? 0))) +
 		Math.max(0, Math.min(1000, Math.round(calls ?? 0))) * CALL_COST;
-	const res = await meter(env, room, 'debit', { amount: debit });
-	indexReport(env, ctx, room, res.clone());
+	const pick = await pickPool(env, room, account);
+	const res = await meter(env, pick.pool, 'debit', { amount: debit });
+	indexReport(env, ctx, pick.pool, res.clone());
 	return res;
+}
+
+interface PoolInfo {
+	paid?: boolean;
+	balanceSeconds?: number;
+	spentSeconds?: number;
+	sponsor?: string | null;
+}
+
+/** which pool covers this room+caller — sponsor's wallet, then the caller's
+ *  own wallet, then the room pool itself */
+async function pickPool(
+	env: Env,
+	room: string,
+	account?: string | null
+): Promise<{ pool: string; source: 'sponsor' | 'account' | 'room'; info: PoolInfo }> {
+	const roomInfo = (await (await meter(env, room, 'get', {})).json()) as PoolInfo;
+	if (roomInfo.sponsor) {
+		const sp = (await (await meter(env, `acct:${roomInfo.sponsor}`, 'get', {})).json()) as PoolInfo;
+		if ((sp.balanceSeconds ?? 0) > 0)
+			return { pool: `acct:${roomInfo.sponsor}`, source: 'sponsor', info: sp };
+	}
+	if (account) {
+		const a = (await (await meter(env, `acct:${account}`, 'get', {})).json()) as PoolInfo;
+		if ((a.balanceSeconds ?? 0) > 0) return { pool: `acct:${account}`, source: 'account', info: a };
+	}
+	return { pool: room, source: 'room', info: roomInfo };
 }
 
 /**
@@ -350,19 +383,28 @@ function meter(env: Env, room: string, op: string, body: object): Promise<Respon
  * Hibernates idle; storage is KV-backed (per-key, no schema).
  */
 export class MeterBus implements DurableObject {
-	constructor(private ctx: DurableObjectState) {}
+	constructor(
+		private ctx: DurableObjectState,
+		private env: Env
+	) {}
 
 	async fetch(req: Request): Promise<Response> {
 		const op = new URL(req.url).pathname;
 		const b = (await req.json().catch(() => ({}))) as {
 			amount?: number;
 			nonce?: string;
+			key?: string;
+			value?: unknown;
+			prefix?: string;
+			account?: string | null;
+			to?: string;
 		};
 		const s = this.ctx.storage;
 		if (op === '/get') {
 			const balance = (await s.get<number>('balance')) ?? 0;
 			const spent = (await s.get<number>('spent')) ?? 0;
-			return json({ paid: balance > 0, balanceSeconds: balance, spentSeconds: spent });
+			const sponsor = (await s.get<string>('sponsor')) ?? null;
+			return json({ paid: balance > 0, balanceSeconds: balance, spentSeconds: spent, sponsor });
 		}
 		if (op === '/debit') {
 			const amount = b.amount ?? 0;
@@ -400,6 +442,48 @@ export class MeterBus implements DurableObject {
 			for await (const [k, v] of await s.list<unknown>({ prefix: 'room:' }))
 				rooms[k.slice(5)] = v;
 			return json({ rooms });
+		}
+		// --- billing KV records (cic-pay): cust:/sub:/evt: instances store
+		// customer maps, subscription state and webhook dedupe via these ---
+		if (op === '/kvget') {
+			if (!b.key) return json({ error: 'key required' }, 400);
+			return json({ value: (await s.get(b.key)) ?? null });
+		}
+		if (op === '/kvput') {
+			if (!b.key) return json({ error: 'key required' }, 400);
+			await s.put(b.key, b.value ?? null);
+			return json({ ok: true });
+		}
+		if (op === '/kvlist') {
+			const items: Record<string, unknown> = {};
+			for await (const [k, v] of await s.list<unknown>({ prefix: b.prefix ?? '' }))
+				items[k] = v;
+			return json({ items });
+		}
+		if (op === '/sponsor') {
+			// room instance: a funded account wallet pays for everyone here
+			if (b.account) await s.put('sponsor', b.account);
+			else await s.delete('sponsor');
+			return json({ ok: true, sponsor: b.account ?? null });
+		}
+		if (op === '/transfer') {
+			// acct:<id> instance → debit wallet only if it covers the amount,
+			// then credit the target pool — one DO turn, no double-spend
+			const amount = Math.max(0, Math.round(b.amount ?? 0));
+			const balance = (await s.get<number>('balance')) ?? 0;
+			if (!b.to || amount <= 0) return json({ ok: false, status: 'bad_request' }, 400);
+			if (balance < amount)
+				return json({ ok: false, status: 'insufficient', available: balance });
+			const spent = ((await s.get<number>('spent')) ?? 0) + amount;
+			await s.put({ balance: balance - amount, spent });
+			const stub = this.env.METER!.get(this.env.METER!.idFromName(b.to));
+			const res = await stub.fetch('https://meter/credit', {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ amount })
+			});
+			const credited = (await res.json()) as { balanceSeconds?: number };
+			return json({ ok: true, balanceSeconds: credited.balanceSeconds ?? 0 });
 		}
 		return json({ error: 'unknown op' }, 404);
 	}

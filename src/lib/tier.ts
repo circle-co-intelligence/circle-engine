@@ -17,10 +17,11 @@
  */
 
 import { budget } from './ledger/credits';
+import { localAccount } from './bridge/account';
 
 export type Tier = 'free' | 'paid';
 
-let cache: { code: string; paid: boolean } | null = null;
+let cache: { key: string; paid: boolean } | null = null;
 
 function gateOn(): boolean {
 	return (import.meta.env as Record<string, string | undefined>).VITE_CIC_AI_PAID_ONLY !== 'false';
@@ -30,28 +31,36 @@ function apiBase(): string | null {
 	return (import.meta.env as Record<string, string | undefined>).VITE_CIC_AI_ENDPOINT ?? null;
 }
 
-/** true when this room carries a paid entitlement — metered pool (D1) when
- *  bound, local purchased-credits ledger otherwise */
-export async function paidEntitled(roomCode: string): Promise<boolean> {
+/** the caller's billing identity — bearer accountId from the local link, or
+ *  an explicit override (tests/headless). Never broadcast to peers. */
+function callerAccount(account?: string): string | undefined {
+	return account ?? localAccount()?.accountId;
+}
+
+/** true when paid lanes are covered — the room pool, a host sponsor's
+ *  wallet, or the caller's own account balance */
+export async function paidEntitled(roomCode: string, account?: string): Promise<boolean> {
 	if (!gateOn()) return true; // dev override — everything cloud-assisted
-	if (cache?.code === roomCode) return cache.paid;
-	const paid = await serverEntitled(roomCode).catch(() => null);
+	const acc = callerAccount(account);
+	const key = `${roomCode}:${acc ?? ''}`;
+	if (cache?.key === key) return cache.paid;
+	const paid = await serverEntitled(roomCode, acc).catch(() => null);
 	if (paid !== null) {
-		cache = { code: roomCode, paid };
+		cache = { key, paid };
 		return paid;
 	}
 	try {
 		const b = await budget(roomCode);
-		cache = { code: roomCode, paid: b.budget.purchasedSeconds > 0 };
+		cache = { key, paid: b.budget.purchasedSeconds > 0 };
 		return cache.paid;
 	} catch {
 		return false; // ledger unreadable → stay free/device-side
 	}
 }
 
-/** server-verified entitlement (D1 behind the ai-gateway); null = lane absent */
-async function serverEntitled(roomCode: string): Promise<boolean | null> {
-	const info = await entitlementInfo(roomCode);
+/** server-verified entitlement (MeterBus behind the ai-gateway); null = lane absent */
+async function serverEntitled(roomCode: string, account?: string): Promise<boolean | null> {
+	const info = await entitlementInfo(roomCode, account);
 	return info === null ? null : info.paid;
 }
 
@@ -59,38 +68,50 @@ export interface Entitlement {
 	paid: boolean;
 	balanceSeconds: number;
 	spentSeconds: number;
+	source?: 'room' | 'account' | 'sponsor';
 }
 
 /** remaining pool + spend — null when the metered lane isn't deployed */
-export async function entitlementInfo(roomCode: string): Promise<Entitlement | null> {
+export async function entitlementInfo(roomCode: string, account?: string): Promise<Entitlement | null> {
 	const base = apiBase();
 	if (!base) return null;
-	const res = await fetch(`${base}/entitlement?room=${encodeURIComponent(roomCode)}`);
+	const acc = callerAccount(account);
+	const q = acc ? `&account=${encodeURIComponent(acc)}` : '';
+	const res = await fetch(`${base}/entitlement?room=${encodeURIComponent(roomCode)}${q}`);
 	if (!res.ok) return null;
 	return (await res.json()) as Entitlement;
 }
 
 /**
  * Report paid-lane usage — the streaming-spend heartbeat. Callers pass
- * active seconds per period; AI calls accrue as `calls`. Returns the
- * remaining balance; also invalidates the paid memo when the pool empties.
+ * active seconds per period; AI calls accrue as `calls`. The gateway picks
+ * the covering pool: host sponsor → the caller's own account → room pool.
+ * Returns the remaining balance; also invalidates the paid memo when the
+ * pool empties.
  */
 export async function reportUsage(
 	roomCode: string,
 	seconds: number,
-	calls = 0
+	calls = 0,
+	account?: string
 ): Promise<Entitlement | null> {
 	const base = apiBase();
 	if (!base || (seconds <= 0 && calls <= 0)) return null;
+	const acc = callerAccount(account);
 	const res = await fetch(`${base}/usage`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/json' },
-		body: JSON.stringify({ room: roomCode, seconds, calls })
+		body: JSON.stringify({ room: roomCode, seconds, calls, ...(acc ? { account: acc } : {}) })
 	}).catch(() => null);
 	if (!res?.ok) return null;
-	const body = (await res.json()) as { paid?: boolean; balanceSeconds?: number };
-	if (body.paid === false) cache = { code: roomCode, paid: false };
-	return { paid: body.paid === true, balanceSeconds: body.balanceSeconds ?? 0, spentSeconds: 0 };
+	const body = (await res.json()) as { paid?: boolean; balanceSeconds?: number; source?: Entitlement['source'] };
+	if (body.paid === false) cache = { key: `${roomCode}:${acc ?? ''}`, paid: false };
+	return {
+		paid: body.paid === true,
+		balanceSeconds: body.balanceSeconds ?? 0,
+		spentSeconds: 0,
+		source: body.source
+	};
 }
 
 /** credit the pool with a signed grant (from the payment rail webhook) */
@@ -152,5 +173,5 @@ export class UsageMeter {
 
 /** clear the per-code memo (e.g. after a top-up confirms mid-session) */
 export function invalidateTier(roomCode?: string) {
-	if (!roomCode || cache?.code === roomCode) cache = null;
+	if (!roomCode || cache?.key.startsWith(`${roomCode}:`)) cache = null;
 }

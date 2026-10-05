@@ -15,6 +15,7 @@ both — only build-time `VITE_CIC_*` env differs.
 | AI gateway | `cic-ai-gateway` worker | `METER`, `GRANT_PUBKEY`, `AI_*` |
 | Sensory/DSP | `cic-dsp` worker | `SPEECH_API_KEY` |
 | Metering | MeterBus DO on ai-gateway | `METER` binding |
+| Billing | `cic-pay` worker | `STRIPE_*`, `PAY_*`, `APP_ORIGIN`, `METER` (script_name) |
 | Admin console | `/admin/*` on ai-gateway | `CF_ACCESS_TEAM`, `CF_ACCESS_AUD`, `GRANT_SECRET` |
 
 **Verified deployment (regenleadership account, `circle-engine.pages.dev`):**
@@ -29,6 +30,34 @@ Calls app) — without them `/api/ice` and `/api/sfu` degrade gracefully
 (`turn-unconfigured`/`sfu-unconfigured`). Until TURN creds exist the free
 path runs STUN-only, which covers most consumer NATs but not symmetric
 NATs/corporate firewalls.
+
+### Billing (cic-pay + Stripe)
+
+`workers/pay/` deploys `cic-pay` — the Stripe bridge. It binds ai-gateway's
+MeterBus DO via `script_name`, so wallets/room pools share one ledger.
+
+```bash
+cd workers/pay && wrangler deploy
+wrangler secret put STRIPE_SECRET_KEY      # sk_test_… / sk_live_…
+wrangler secret put STRIPE_WEBHOOK_SECRET  # whsec_… from the webhook below
+```
+
+Vars in `workers/pay/wrangler.toml` (or `wrangler deploy --var`):
+`APP_ORIGIN` (site origin for checkout redirects), `PAY_PACKAGES` (JSON
+pack catalog: id/label/seconds/priceId), `PAY_SUB` (JSON monthly plan).
+
+Stripe Dashboard → Developers → Webhooks → add endpoint:
+`https://cic-pay.regenleadership.workers.dev/pay/webhook` with events
+`checkout.session.completed`, `invoice.paid`,
+`customer.subscription.updated`, `customer.subscription.deleted`,
+`charge.refunded`, `charge.dispute.created`.
+
+Spend model: `acct:<accountId>` wallet per user (bearer credential,
+browser-local); `POST /pay/sponsor` lets a funded host's wallet cover a
+whole circle; otherwise each participant's paid lanes draw their own
+wallet, falling back to the room pool. Frontend calls it via
+`VITE_CIC_PAY_ENDPOINT` (default path prefix `/pay` — set to
+`https://cic-pay.regenleadership.workers.dev/pay`).
 
 ## B. Self-host (no Cloudflare)
 

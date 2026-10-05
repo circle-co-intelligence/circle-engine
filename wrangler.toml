@@ -1,6 +1,8 @@
 name = "circle-engine"
 pages_build_output_dir = "build"
 compatibility_date = "2025-01-01"
+# account pinning: Pages rejects account_id in wrangler.toml — deploys must
+# use the regenleadership-scoped API token (the only account it can see)
 
 [[r2_buckets]]
 binding = "REC_BUCKET"

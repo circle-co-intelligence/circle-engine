@@ -1,0 +1,26 @@
+name = "cic-pay"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+# pinned: all circle-engine resources live on the regenleadership account
+account_id = "cf1f279501abeda01c1260a60cf95f5f"
+
+# MeterBus DO lives in cic-ai-gateway — bind by script name so room pools,
+# account wallets, grant nonces and billing records share one ledger.
+[[durable_objects.bindings]]
+name = "METER"
+class_name = "MeterBus"
+script_name = "cic-ai-gateway"
+
+# Vars (set here or via `wrangler deploy --var`):
+#   APP_ORIGIN    — site origin for checkout success/cancel, e.g.
+#                   https://circle-engine-7ny.pages.dev
+#   PAY_PACKAGES  — JSON array of one-time credit packs:
+#                   [{"id":"pack8k","label":"8,000 seconds","seconds":8000,
+#                     "priceId":"price_…","amountCents":500,"currency":"usd"}]
+#   PAY_SUB       — JSON monthly plan:
+#                   {"priceId":"price_…","seconds":20000,"label":"Circle Pro",
+#                    "amountCents":800,"currency":"usd"}
+#
+# Secrets (`wrangler secret put` — never commit):
+#   STRIPE_SECRET_KEY      — sk_test_… / sk_live_…
+#   STRIPE_WEBHOOK_SECRET  — whsec_… for the /pay/webhook endpoint

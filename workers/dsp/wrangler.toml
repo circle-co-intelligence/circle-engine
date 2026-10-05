@@ -1,6 +1,8 @@
 name = "cic-dsp"
 main = "src/index.ts"
 compatibility_date = "2025-01-01"
+# pinned: all circle-engine resources live on the regenleadership account
+account_id = "cf1f279501abeda01c1260a60cf95f5f"
 
 # Edge-side audio enhancement for paid, opted-in rooms.
 # Cloudflare Realtime Media Transport Adapters POST adapters/new against the

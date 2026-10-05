@@ -1,6 +1,8 @@
 name = "cic-ai-gateway"
 main = "src/index.ts"
 compatibility_date = "2025-01-01"
+# pinned: all circle-engine resources live on the regenleadership account
+account_id = "cf1f279501abeda01c1260a60cf95f5f"
 
 # Workers AI binding — the default provider; other providers set AI_PROVIDER
 # + AI_API_KEY (wrangler secret put). ZDR: pick upstreams with zero-retention

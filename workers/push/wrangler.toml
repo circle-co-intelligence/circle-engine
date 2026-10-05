@@ -1,6 +1,8 @@
 name = "cic-push"
 main = "src/index.ts"
 compatibility_date = "2025-01-01"
+# pinned: all circle-engine resources live on the regenleadership account
+account_id = "cf1f279501abeda01c1260a60cf95f5f"
 
 # Secrets:
 #   wrangler secret put VAPID_PRIVATE   (JWK JSON of the P-256 private key)

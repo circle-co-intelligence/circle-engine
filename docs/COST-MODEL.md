@@ -74,6 +74,24 @@ Suggested pricing: pool seconds ≈ blended paid-lane cost + margin —
 a 6-seat SFU room-hour costs ~$0.74 egress, so $0.001/s pool ≈ $3.60/hr
 covers egress + AI with margin.
 
+## Customer-facing billing (cic-pay + Stripe)
+
+Money settles through Stripe; the `cic-pay` worker converts settlements
+into wallet/pool seconds (verified webhook → MeterBus credit). Wallets are
+keyed by the user's bearer `accountId`; spend attribution is sponsor
+wallet → participant wallet → room pool (`/pay/sponsor` = host covers the
+circle). Suggested retail defaults (set via `PAY_PACKAGES`/`PAY_SUB`
+worker vars, Stripe prices carry the real amounts):
+
+| Offer | Price | Seconds | ≈ $/participant-hour |
+|---|---|---|---|
+| Subscription | $8/mo | 20,000/mo | $1.44 |
+| Pack | $5 | 8,000 | $2.25 |
+| Pack | $10 | 18,000 | $2.00 |
+| Pack | $20 | 40,000 | $1.80 |
+
+Stripe takes ~2.9% + $0.30 per charge — pack margins above absorb it.
+
 ## Cost levers
 
 | Lever | Effect |
