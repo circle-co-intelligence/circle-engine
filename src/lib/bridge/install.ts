@@ -49,6 +49,11 @@ export function installCicShims(roomKey?: string) {
 		(code) => roomSockets.get(code)?.session?.debugView() ?? null;
 	(window as unknown as { __sfuDebug: (code: string) => unknown }).__sfuDebug =
 		(code) => roomSockets.get(code)?.sfuDebug ?? null;
+	// test seam: invoke engine methods on the live session (askQuestion,
+	// eraseSelf, announceStream, emitOp…) — same session object the bridge
+	// drives, so probes exercise the real apply/broadcast path
+	(window as unknown as { __cicSession: (code: string) => RoomSession | null }).__cicSession =
+		(code) => roomSockets.get(code)?.session ?? null;
 }
 
 /**

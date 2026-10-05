@@ -77,9 +77,13 @@ export class RoomSession {
 	roles = $state<Record<Role, string | null> | null>(null);
 	// authority = lex-min among SEATED peers (see `authorityId` below — declared
 	// after waitingSelf/admitted because $derived reads them)
-	stickHolderId = $derived(this.stick.getSnapshot().context.holderId);
-	stickState = $derived(this.stick.getSnapshot().value);
-	stickCtx = $derived(this.stick.getSnapshot().context);
+	// XState snapshots are not reactive — getSnapshot() has no $state deps, so
+	// a $derived over it would freeze at the initial snapshot forever. Mirror
+	// the actor's snapshot into $state via stick.subscribe instead.
+	private stickSnap = $state(this.stick.getSnapshot());
+	stickHolderId = $derived(this.stickSnap.context.holderId);
+	stickState = $derived(this.stickSnap.value);
+	stickCtx = $derived(this.stickSnap.context);
 	chatLog = $state<{ from: string; text: string; whisper?: boolean; milo?: boolean }[]>([]);
 	captions = $state<{ from: string; text: string; final: boolean }[]>([]);
 	raisedHands = $state<Set<string>>(new Set());
@@ -239,6 +243,7 @@ export class RoomSession {
 		// feeds /talktime → the notes doc's Talk time section
 		let heldSince: { id: string | null; at: number } = { id: null, at: 0 };
 		this.stick.subscribe((snap) => {
+			this.stickSnap = snap; // reactive mirror — $derived views follow
 			const id = snap.context.holderId ?? null;
 			if (heldSince.id && heldSince.id !== id)
 				this.talkMs.set(
@@ -531,9 +536,23 @@ export class RoomSession {
 			peers: [...this.peers], waiting: [...this.waiting.map((w) => w.id)],
 			held: [...this.heldPeers], denied: [...this.deniedPeers],
 			selfLang: this.selfLang, selfLangs: this.selfLangs, peerLangs: this.peerLangs,
-			recording: this.recording,
+			recording: this.recording, recordingStartedBy: this.recordingStartedBy,
 			isoRunning: !!this.iso?.running,
 			consent: this.consents[this.selfId] ?? null,
+			consents: { ...this.consents },
+			epoch: this.oplog.epoch, opCount: this.oplog.entries.length,
+			stick: {
+				state: this.stickState,
+				holder: this.stickCtx.holderId,
+				atSeatOf: this.stickCtx.atSeatOf,
+				resumeTo: this.stickCtx.resumeTo
+			},
+			mode: this.mode, direction: this.direction, heartMode: this.heartMode,
+			streamHls: this.streamHls, streamKeys: Object.keys(this.remoteStreams),
+			captions: this.captions.map((c) => `${c.from}:${c.text}`),
+			chatLog: this.chatLog.map((c) => `${c.from}:${c.text}`),
+			selfMuted: this.selfMuted, peerMuted: { ...this.peerMuted },
+			talkMs: Object.fromEntries(this.talkMs),
 			media: {
 				local:
 					(this.localMedia?.stream ?? localFeed())?.getTracks().map((t) => `${t.kind}:${t.readyState}`) ??
@@ -1077,9 +1096,14 @@ export class RoomSession {
 			case 'recording-start': this.recording = true; this.recordingStartedBy = env.senderId; this.consentAsked = false; void this.maybeRecord(); break;
 			case 'consent':
 				// self-attributed: the op is signed by senderId — consent can
-				// never be forged for another participant
-				if (env.op.kind === 'recording')
+				// never be forged for another participant. Mirror the realtime
+				// path so the op-log alone (op-sync replay) reproduces the
+				// same start/exclusion decisions.
+				if (env.op.kind === 'recording') {
 					this.consents[env.senderId] = env.op.state;
+					if (this.recording) this.recorder.setConsented(this.consentedPeers);
+					this.maybeStartRecording();
+				}
 				break;
 			case 'erasure': {
 				// self: purge own contributions; participant: authority purges

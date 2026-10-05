@@ -28,8 +28,12 @@ Zero-server, client-only P2P video circle app. SvelteKit (adapter-static, `ssr=f
   focused lobby+password lane). Dev server must be running (`pnpm dev`).
   Probe seams: `window.__cicSend(code, frame)` injects a prod-protocol frame
   through the real RoomSocket dispatch; `window.__cicDebug(code)` returns the
-  session's authority/lobby/password/waiting view — use it to find the
-  authority page (`self === auth`) since manager ops are policy-gated.
+  session's debugView (authority/lobby/waiting + stick/consents/recording/
+  streamKeys/epoch) — use it to find the authority page (`self === auth`)
+  since manager ops are policy-gated. `window.__cicSession(code)` returns the
+  live RoomSession — call engine methods (requestStick/askQuestion/eraseSelf/
+  announceStream…) to exercise the real apply/broadcast path. Used by
+  e2e/room-real.spec.ts (two-browser real-room convergence tests).
   Prod's Lobby & access UI is gated on canManageRoom (drawer → Options tab).
 - `pnpm tauri:dev` / `pnpm tauri:build` / `pnpm build:native` — Tauri native
   shell (src-tauri/). Linux build host needs webkit2gtk4.1-devel etc — see
