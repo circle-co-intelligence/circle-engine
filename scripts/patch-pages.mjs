@@ -53,11 +53,28 @@ const HTML_ROUTE_RE = /(href|src)="\/(join|demo|billing|login|account)"/g;
 // site css kept prod's root-absolute /early-access/ refs — those files live
 // under /site/early-access/ in the vendored site tree
 const SITE_EARLY_RE = /url\((['"]?)\/early-access\//g;
+// orphaned vendored pages still carry private-beta copy — the SPA never
+// routes to them, but they're reachable by URL. site/login.html gets honest
+// copy; index14cf.html is a stale landing variant → bounce to the real one.
+const SITE_LOGIN_BETA = /<a class="btn btn-quiet btn-create"[^>]*>Request early access<\/a><p class="auth-create-note">[^<]*<\/p>/;
+const SITE_LOGIN_FIX = `<a class="btn btn-quiet btn-create" href="/join">Open a circle — free</a><p class="auth-create-note">No account needed for everyday circles.</p>`;
+const SITE_VARIANT_REDIRECT = (base) =>
+	`<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=${base || ''}/"><title>Co-Intelligence Circle</title></head><body><a href="${base || ''}/">Co-Intelligence Circle</a></body></html>`;
+
+// vendored device-check bug: denying the camera/mic permission prompt still
+// opens the preview dialog — the click handler's catch tail re-opens it
+// (`v(d,!0)`) after the failed capture. Flip the failure path so the dialog
+// stays closed (the success path's v(d,!0) lives inside try, untouched).
+const CAM_DENY_MARKER = 'Check camera & microphone';
+const CAM_DENY_TAIL = ',v(H,Ba(),!0),v(d,!0)}';
+const CAM_DENY_FIX = ',v(H,Ba(),!0),v(d,!1)}';
 
 function patchJsCss(src, file = '') {
+	if (file.endsWith('/site/index14cf.html')) return SITE_VARIANT_REDIRECT(BASE);
 	let out = src.replace(ABS_RE, (_m, q, p) => `${q}${BASE}${p}`);
 	if (file.includes('/cic/')) out = out.replace(CIC_CSS_ESCAPE_RE, (_m, q) => `url(${q}../../`);
 	if (file.includes('/site/')) out = out.replace(SITE_EARLY_RE, (_m, q) => `url(${q}${BASE}/site/early-access/`);
+	if (file.endsWith('/site/login.html')) out = out.replace(SITE_LOGIN_BETA, SITE_LOGIN_FIX);
 	if (file.endsWith('.html')) out = out.replace(HTML_ROUTE_RE, (_m, a, r) => `${a}="${BASE}/${r}"`);
 	return out;
 }
@@ -82,6 +99,15 @@ for (const file of jsFiles('build')) {
 		src = fixed;
 	}
 	if (!file.includes('/cic/')) continue;
+	if (src.includes(CAM_DENY_MARKER)) {
+		if (src.includes(CAM_DENY_TAIL)) {
+			writeFileSync(file, src.replace(CAM_DENY_TAIL, CAM_DENY_FIX));
+			src = readFileSync(file, 'utf8');
+			console.log(`[patch-pages] camera-deny dialog fix applied in ${file}`);
+		} else if (!src.includes(CAM_DENY_FIX)) {
+			console.warn(`[patch-pages] device-check chunk changed — camera-deny fix anchor missing in ${file}`);
+		}
+	}
 	if (src.includes(REPLACEMENT)) { sawGate = true; continue; } // already patched
 	if (!src.includes(MARKER)) continue;
 	sawGate = true;

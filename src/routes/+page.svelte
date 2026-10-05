@@ -32,7 +32,39 @@
 				'<a href="/site/imprint.html">Imprint</a>',
 				'<a href="/site/imprint.html">Imprint</a><a href="https://github.com/circle-co-intelligence/circle-engine" rel="noopener" target="_blank">GitHub</a>'
 			)
-			.replace('<section class="ea-faq', `${PRICING}<section class="ea-faq`);
+			.replace('<section class="ea-faq', `${PRICING}<section class="ea-faq`)
+			// general availability — the vendored page still carries its
+			// private-beta framing; rewrite it to the open release
+			.replaceAll('Private beta: request early access.', 'Free, end-to-end encrypted group circles — open to everyone.')
+			.replace(
+				/<p class="ea-status ea-ms">[\s\S]*?<\/p>/,
+				`<p class="ea-status ea-ms"><i aria-hidden="true"></i><span class="sr-only">Now available to everyone.</span><span class="ea-open-pill" aria-hidden="true">Open to everyone — start a circle free</span></p>`
+			)
+			.replace(
+				'<a class="ea-btn ea-btn-dark" href="#request">Request early access</a>',
+				`<a class="ea-btn ea-btn-dark" href="${base}/join">Start a circle — free</a>`
+			)
+			.replace(
+				/<div class="ea-request" id="request">[\s\S]*?<\/form><\/div><\/div>/,
+				`<div class="ea-request" id="request"><div class="ea-form"><a class="ea-btn ea-btn-dark ea-open-cta" href="${base}/join">Open a circle — free</a><p class="ea-fine ea-open-fine">No account, no download, no invite. The circle runs end-to-end encrypted in your browser — share the link or six-digit code and everyone joins free.</p></div></div>`
+			)
+			.replace(
+				/<section class="ea-invite ea-shell"[\s\S]*?<\/section>/,
+				INVITE
+			)
+			// FAQ — beta-gated answers rewritten for open availability
+			.replace(
+				'<summary><span>Is the beta available to everyone?</span><i class="ea-faq-icon" aria-hidden="true"></i></summary><div class="ea-faq-a"><p>Not yet. We invite people in small groups, so we can support each circle well and improve the product together with them.</p></div>',
+				'<summary><span>Is it available to everyone?</span><i class="ea-faq-icon" aria-hidden="true"></i></summary><div class="ea-faq-a"><p>Yes — circles are open to everyone. Open the app, start a circle, and share the link or six-digit code. There is no waitlist.</p></div>'
+			)
+			.replace(
+				'<summary><span>What happens after I apply?</span><i class="ea-faq-icon" aria-hidden="true"></i></summary><div class="ea-faq-a"><p>We review requests by hand. If we can offer you a place, we send a personal invitation to the email address you gave us. That invitation lets you create your account.</p></div>',
+				'<summary><span>Do I need an account?</span><i class="ea-faq-icon" aria-hidden="true"></i></summary><div class="ea-faq-a"><p>No. A circle runs entirely in the browser — start one and everyone joins free with a link or code, no account on either side. An optional account only unlocks paid host extras like larger circles and cloud recordings.</p></div>'
+			)
+			.replace(
+				'<p>Once you have access, your guests join free in their browser using a link or six-digit room code. Only the host needs an account.</p>',
+				'<p>Your guests join free in their browser using a link or six-digit room code — no account and no install on either side.</p>'
+			);
 	});
 
 	// Circle Host: $8/host undercuts Zoom Pro ($15.99), Butter Starter ($24/member),
@@ -77,7 +109,7 @@
 				<li>Priority human support</li>
 				<li>Early access to V2 rituals &amp; tools</li>
 			</ul>
-			<a class="ea-btn ea-price-cta" href="#request">Become a founding host</a>
+			<a class="ea-btn ea-price-cta" href="${base}/pricing">Become a host</a>
 		</article>
 	</div>
 	<div class="ea-compare">
@@ -91,27 +123,31 @@
 	</div>
 </section>`;
 
-	// the early-access form is static markup — record the request locally and
-	// acknowledge it, honestly (there is no list server behind it)
-	function onSubmit(e: SubmitEvent) {
-		e.preventDefault();
-		const form = e.target as HTMLFormElement;
-		const email = new FormData(form).get('email');
-		try {
-			const key = 'cic.earlyAccess';
-			const list = JSON.parse(localStorage.getItem(key) ?? '[]');
-			list.push({ email: String(email ?? ''), at: Date.now() });
-			localStorage.setItem(key, JSON.stringify(list));
-		} catch {}
-		const btn = form.querySelector('button');
-		if (btn) btn.textContent = 'Request noted — stored on this device';
-	}
+	// open-availability replacement for the vendored "Early access" invite
+	// section — the request/review/invitation flow no longer exists
+	const INVITE = `
+<section class="ea-invite ea-shell" aria-labelledby="invite-h">
+	<div class="ea-invite-copy">
+		<p class="ea-eyebrow">Open to everyone</p>
+		<h2 id="invite-h">What could your group understand together?</h2>
+		<p>Bring your people into a circle. Give each voice time, listen deeply, and discover what takes shape between you. Circles are open to everyone — start one whenever you're ready.</p>
+		<a class="ea-btn" href="${base}/join">Start a circle</a>
+	</div>
+	<div>
+		<ol class="ea-steps">
+			<li><span class="ea-step-rail" aria-hidden="true"><i></i></span><span class="ea-step-n" aria-hidden="true">1</span><div><strong>Start</strong><p>Open the app and start a circle — no account needed.</p></div></li>
+			<li><span class="ea-step-rail" aria-hidden="true"><i></i></span><span class="ea-step-n" aria-hidden="true">2</span><div><strong>Share</strong><p>Send your people the link or six-digit code.</p></div></li>
+			<li><span class="ea-step-n" aria-hidden="true">3</span><div><strong>Circle</strong><p>Everyone joins free in their browser, end-to-end encrypted.</p></div></li>
+		</ol>
+		<p class="ea-note">Everyday circles are free forever. Paid host extras — larger circles, cloud recordings — are metered by the second.</p>
+	</div>
+</section>`;
 </script>
 
 <svelte:head><title>Co-Intelligence Circle — Find coherence through human connection</title></svelte:head>
 
 <!-- eslint-disable-next-line svelte/no-at-html-tags -->
-<div bind:this={host} onsubmit={onSubmit}>{@html markup}</div>
+<div bind:this={host}>{@html markup}</div>
 
 <style>
 	/* Pricing section — authored addition injected into the vendored landing.
@@ -272,5 +308,29 @@
 	}
 	:global(.ea-compare-us span) {
 		color: var(--ea-ink);
+	}
+
+	/* Open-availability CTA replacing the early-access request form */
+	:global(.ea-open-pill) {
+		font-weight: 600;
+	}
+	:global(.ea-open-cta) {
+		display: inline-flex;
+		justify-content: center;
+		align-items: center;
+		min-height: 52px;
+		padding: 0 32px;
+		border-radius: 999px;
+		font-size: 17px;
+		font-weight: 600;
+		text-decoration: none;
+	}
+	:global(.ea-open-fine) {
+		text-align: center;
+	}
+	:global(.ea-request .ea-form) {
+		display: grid;
+		justify-items: center;
+		gap: 16px;
 	}
 </style>
