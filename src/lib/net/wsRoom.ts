@@ -184,7 +184,10 @@ export async function openWsRoom(
 	// Tauri custom-protocol origin; overridable for browser-based testing.
 	const alwaysInitiate =
 		(import.meta.env.VITE_CIC_ALWAYS_INITIATE ?? '') === '1' ||
-		(typeof location !== 'undefined' && location.protocol === 'tauri:');
+		(typeof location !== 'undefined' && location.protocol === 'tauri:') ||
+		// the native shell serves the remote site on https: — detect the Tauri
+		// IPC bridge itself rather than the URL scheme
+		(typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window);
 	// '~' sorts above every char in trystero's selfId alphabet, so this sid
 	// always wins the collision tiebreak — remote peers always yield and
 	// answer our offer instead of the reverse.

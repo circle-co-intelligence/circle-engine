@@ -249,18 +249,24 @@ on-prem Speechmatics appliance — plug in via `VITE_CIC_SPEECH_URL` /
 
 ## Native app (Tauri shell)
 
-`src-tauri/` wraps the same static build in a system webview — P2P media,
-E2EE, sherpa STT, wllama Milo all run identically; the shell adds a local
-speech endpoint and deep links.
+`src-tauri/` is a thin native shell that loads the **deployed site**
+(`frontendDist` is the production URL, not an embedded bundle) — the
+desktop app always matches the website, so frontend changes ship via a
+normal Pages deploy with no binary rebuild. P2P media, E2EE, sherpa STT,
+wllama Milo all run identically; the shell adds a local speech endpoint
+and deep links. `CIC_WEB_URL` overrides the frontend URL at runtime
+(preview deploys, local dev).
 
 ```bash
 pnpm icons          # regenerate src-tauri/icons (no ImageMagick needed)
-pnpm tauri:dev      # vite dev + webview window
-pnpm tauri:build    # pnpm build:native → bundled installers
+pnpm tauri:dev      # vite dev + webview window (devUrl → localhost:5173)
+pnpm tauri:build    # bundled installers — no frontend build needed
 ```
 
-`build:native` bakes the deployed worker endpoints (ai-gateway, dsp, sfu,
-signaling bus over `VITE_CIC_SIGNAL_WS`) — same lanes as the hosted site.
+The shell needs a rebuild only when `src-tauri/` itself changes (speechd,
+deep-link handling, WebRTC flags). `build:native` still exists for
+producing a self-contained static build with baked worker endpoints —
+it is no longer part of the Tauri build path.
 
 **What the shell adds**
 

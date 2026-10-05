@@ -32,16 +32,34 @@ fn speech_endpoint(state: tauri::State<'_, SpeechdState>) -> String {
 fn enable_webrtc(app: &tauri::App) {
     use tauri::Manager;
     use webkit2gtk::{SettingsExt, WebViewExt};
+    // CIC_WEB_URL points the shell at a different frontend (e.g. a Pages
+    // preview deployment); defaults to the configured production site.
+    let env_url = std::env::var("CIC_WEB_URL").ok();
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.with_webview(move |platform| {
             let wv = platform.inner();
             if let Some(s) = wv.settings() {
                 s.set_enable_webrtc(true);
                 s.set_enable_media_stream(true);
+                // lets WEBKIT_INSPECTOR_SERVER=<ip:port> attach targets for
+                // debugging; without the env var no inspector ever starts
+                s.set_enable_developer_extras(true);
+                // page console → stderr so load/JS failures are visible in
+                // logs without an inspector
+                s.set_enable_write_console_messages_to_stdout(true);
+                // CIC_MOCK_CAPTURE=1 swaps cam/mic for synthesized devices —
+                // automated two-peer tests run without hardware or prompts
+                if std::env::var_os("CIC_MOCK_CAPTURE").is_some() {
+                    s.set_enable_mock_capture_devices(true);
+                }
             }
             // reload() is a no-op before the first navigation commits;
-            // load_uri re-navigates so the new context sees the setting.
-            wv.load_uri("tauri://localhost");
+            // re-load the current URI so the new context sees the setting.
+            let current = wv.uri().map(|u| u.to_string()).unwrap_or_default();
+            let target = env_url.as_deref().unwrap_or(current.as_str());
+            if !target.is_empty() && !target.starts_with("about:") {
+                wv.load_uri(target);
+            }
         });
     }
 }
@@ -68,6 +86,32 @@ pub fn run() {
         .setup(|app| {
             #[cfg(target_os = "linux")]
             enable_webrtc(app);
+            // CIC_AUTOJOIN=1: periodically submit the room join form so
+            // headless/two-peer test harnesses can get the shell seated
+            // without synthetic input events
+            if std::env::var_os("CIC_AUTOJOIN").is_some() {
+                if let Some(win) = app.get_webview_window("main") {
+                    tauri::async_runtime::spawn(async move {
+                        let js = r#"(() => {
+                            const inp = document.querySelector('input');
+                            const btn = [...document.querySelectorAll('button')].find(b => /join/i.test(b.textContent))
+                                ?? document.querySelector('button[type="submit"], form button');
+                            let acted = [];
+                            if (inp && !inp.value) {
+                                inp.value = 'NativePeer';
+                                inp.dispatchEvent(new Event('input', {bubbles:true}));
+                                acted.push('filled');
+                            }
+                            if (btn) { btn.click(); acted.push('clicked:' + btn.textContent.trim()); }
+                            console.log('[autojoin] ' + location.pathname + ' ' + acted.join(',') + ' inputs=' + document.querySelectorAll('input').length + ' buttons=' + document.querySelectorAll('button').length);
+                        })()"#;
+                        for _ in 0..30 {
+                            let _ = win.eval(js);
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        }
+                    });
+                }
+            }
             Ok(())
         })
         .manage(state)

@@ -3,5 +3,8 @@
   "identifier": "default",
   "description": "default window capabilities",
   "windows": ["main"],
+  "remote": {
+    "urls": ["https://circle-engine-7ny.pages.dev"]
+  },
   "permissions": ["core:default", "deep-link:default"]
 }

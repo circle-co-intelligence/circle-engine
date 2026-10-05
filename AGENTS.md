@@ -35,14 +35,22 @@ Zero-server, client-only P2P video circle app. SvelteKit (adapter-static, `ssr=f
   announceStream…) to exercise the real apply/broadcast path. Used by
   e2e/room-real.spec.ts (two-browser real-room convergence tests).
   Prod's Lobby & access UI is gated on canManageRoom (drawer → Options tab).
-- `pnpm tauri:dev` / `pnpm tauri:build` / `pnpm build:native` — Tauri native
-  shell (src-tauri/). Linux build host needs webkit2gtk4.1-devel etc — see
-  docs/DEPLOYMENT.md "Native app". `cargo test --manifest-path
-  src-tauri/speechd/Cargo.toml` — local RT speech endpoint tests.
-  IMPORTANT: always `pnpm build:native` before `cargo build` so the embedded
-  bundle carries VITE_CIC_SIGNAL_WS (the ws signaling lane silently no-ops
-  when it's absent — `joinLane` returns null with no warning).
-- Linux WebRTC runtime: Fedora's WebKitGTK compiles RTCPeerConnection out.
+- `pnpm tauri:dev` / `pnpm tauri:build` — Tauri native shell (src-tauri/).
+  The shell serves the deployed site (`frontendDist` is the production URL,
+  not an embedded bundle) so the desktop app always matches the website —
+  no frontend rebuild needed for releases. `CIC_WEB_URL` overrides the URL
+  at runtime (preview deploys, local dev). `remote.urls` in
+  src-tauri/capabilities/default.json allowlists the site's domain for
+  `invoke`/`deep-link` IPC; add any new *.pages.dev hostname there if the
+  site moves. Linux build host needs
+  webkit2gtk4.1-devel etc — see docs/DEPLOYMENT.md "Native app" (host may
+  lack -devel pkgs: a `circle-native-build` podman image built from
+  /tmp/circle-build/Containerfile reproduces them; run cargo inside it with
+  --userns=keep-id + ~/.cargo + ~/.rustup mounted). `cargo test
+  --manifest-path src-tauri/speechd/Cargo.toml` — speech endpoint tests.
+- Linux WebRTC runtime: Fedora's WebKitGTK compiles RTCPeerConnection out
+  (verified 2.52.1 — settings API exists but the JS binding stays hidden
+  even with webrtcbin/nice/dtls/srtp elements all present).
   The machine-level workaround is a WebRTC-enabled WebKitGTK build at
   `~/webkit-webrt` (prebuilt from manafishrov's webkitgtk-webrtc OCI image,
   install prefix binary-patched from /usr/lib/Manafish/webkit to
@@ -67,20 +75,23 @@ Zero-server, client-only P2P video circle app. SvelteKit (adapter-static, `ssr=f
 `pnpm check && pnpm test && pnpm build && pnpm test:e2e` + gitleaks/semgrep clean.
 
 ## Native (Tauri) release builds
-Plain `cargo build --release` in `src-tauri/` does NOT embed the frontend —
-Cargo.toml's `custom-protocol` feature (`tauri/custom-protocol`) is normally
-auto-enabled by the `tauri` CLI; a raw `cargo build` serves `devUrl`/nothing
-and the app shows "asset not found: index.html" even though compilation
-succeeds cleanly. Always build with:
+`frontendDist` is a remote URL — the binary never embeds the frontend, so a
+plain `cargo build --release` is sufficient and there is no stale-bundle
+hazard (`generate_context!` no longer reads `../build`). The
+`custom-protocol` feature is retained in Cargo.toml but is now a no-op.
+Frontend changes ship by deploying the site; the shell only needs a rebuild
+when src-tauri/ itself changes (speechd, deep-link, WebRTC flags).
+
+Build on hosts without -devel packages via the `circle-native-build`
+podman image (Containerfile: /tmp/circle-build/Containerfile):
 ```
-cargo build --release --features custom-protocol
+podman run --rm --userns=keep-id \
+  -v "$PWD:/src:Z" -v ~/.cargo:/cargo-home:Z -v ~/.rustup:/rustup:Z \
+  -e CARGO_HOME=/cargo-home -e RUSTUP_HOME=/rustup \
+  -e PATH=/cargo-home/bin:/usr/bin:/bin \
+  circle-native-build cargo build --release --features custom-protocol \
+  --manifest-path /src/src-tauri/Cargo.toml
 ```
-Also: `tauri::generate_context!()` embeds `frontendDist` (`../build`) via a
-proc-macro file read that Cargo's incremental system does not track —
-rebuilding the frontend (`pnpm build:native`) and then `cargo build` again can
-silently keep serving the previous frontend snapshot. Force re-embedding by
-touching `src-tauri/src/lib.rs` (or `cargo clean -p circle`) before rebuilding
-whenever `build/` changed.
 
 ### Known WebKitGTK caveat: this runtime is not stable (native parked)
 The WebRTC-enabled WebKitGTK 2.48.7 build (`scripts/setup-webkit-webrtc.sh`)
@@ -97,16 +108,22 @@ has multiple webrtcbin failure modes, all outside app code:
   flows (verified: browser↔native `connected`, inbound audio RTP bytes).
 
 `src/lib/net/wsRoom.ts` therefore carries ALWAYS_INITIATE mode (activated by
-`location.protocol === 'tauri:'` or `VITE_CIC_ALWAYS_INITIATE=1`): native
+`window.__TAURI_INTERNALS__` present, `location.protocol === 'tauri:'`, or
+`VITE_CIC_ALWAYS_INITIATE=1`): native
 emits a `~`-prefixed sid so it always wins the glare tiebreak, ignores
 incoming offers and counter-offers instead (the remote's own tiebreak makes
 IT answer), proactively offers on bus `join` frames, and never calls
 `pc.close()` — peers are detached and parked (bounded `abandoned` ring)
 because closing is itself a crash hazard on this runtime.
 
-Native status: NOT demo-ready. Even with all hazards routed around, the
-WebProcess still intermittently aborts under load. The durable fix is a
-WebKitGTK build with ENABLE_WEB_RTC=ON built against the host's GStreamer
-(or an upstream release that ships it) — the manafishrov image tops out at
-2.48.7. Browser↔browser is unaffected by any of this (all quirks are
-gated on `alwaysInitiate`) and re-verified end-to-end.
+Native status: native↔browser production join verified end-to-end via
+`probe-native.mjs` (browser + Tauri shell in the same live room —
+`ws welcome`/TURN, `sfu conn connected`, peer visible in the mesh, remote
+audio+video streams arriving). Test hooks in the shell, all env-gated:
+`CIC_WEB_URL` (frontend URL), `CIC_AUTOJOIN` (clicks the join form),
+`CIC_MOCK_CAPTURE` (synthetic cam/mic), `WEBKIT_INSPECTOR_SERVER`.
+Remaining caveat: this runtime can still abort the WebProcess under load —
+the durable fix is a WebKitGTK build with ENABLE_WEB_RTC=ON against the
+host's GStreamer (or an upstream release that ships it) — the manafishrov
+image tops out at 2.48.7. Browser↔browser is unaffected by any of this
+(all quirks are gated on `alwaysInitiate`) and re-verified end-to-end.

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isNative, nativeSpeechEndpoint, initDeepLinks } from './native';
+import { isNative, nativeSpeechEndpoint, initDeepLinks, deepLinkTarget } from './native';
 
 describe('native seams', () => {
 	it('isNative is false outside the Tauri webview', () => {
@@ -18,5 +18,16 @@ describe('native seams', () => {
 		(globalThis as Record<string, unknown>).window = { __TAURI_INTERNALS__: {} };
 		expect(isNative()).toBe(true);
 		delete (globalThis as Record<string, unknown>).window;
+	});
+
+	it('maps circle:// urls preserving host segment, query, and fragment', () => {
+		// circle://room/184729?x=1#secret → /room/184729?x=1#secret —
+		// in a scheme URL the first path segment parses as the host
+		expect(deepLinkTarget('circle://room/184729#abc')).toBe('/room/184729#abc');
+		expect(deepLinkTarget('circle://room/934707?name=NativePeer')).toBe(
+			'/room/934707?name=NativePeer'
+		);
+		expect(deepLinkTarget('circle:///join?code=123456')).toBe('/join?code=123456');
+		expect(deepLinkTarget('circle://join?code=123456')).toBe('/join?code=123456');
 	});
 });

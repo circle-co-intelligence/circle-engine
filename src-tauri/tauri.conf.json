@@ -5,9 +5,8 @@
   "identifier": "com.cointelligence.circle",
   "build": {
     "beforeDevCommand": "pnpm dev",
-    "beforeBuildCommand": "pnpm build:native",
     "devUrl": "http://localhost:5173",
-    "frontendDist": "../build"
+    "frontendDist": "https://circle-engine-7ny.pages.dev"
   },
   "app": {
     "windows": [

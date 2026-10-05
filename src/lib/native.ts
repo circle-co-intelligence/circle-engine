@@ -23,6 +23,22 @@ export async function nativeSpeechEndpoint(): Promise<string | null> {
 	}
 }
 
+/**
+ * `circle://room/184729#secret` → `/room/184729#secret`. In a custom-scheme
+ * URL the resource's first segment parses as the host, so rejoin
+ * host+pathname+search+fragment.
+ */
+export function deepLinkTarget(raw: string): string | null {
+	try {
+		const u = new URL(raw);
+		const sub = u.pathname === '/' ? '' : u.pathname;
+		const path = u.host ? `/${u.host}${sub}` : u.pathname;
+		return `${path}${u.search}${u.hash}` || '/';
+	} catch {
+		return null;
+	}
+}
+
 /** route `circle://` open-url events into the app's normal URL flow */
 export function initDeepLinks(): void {
 	if (!isNative()) return;
@@ -30,15 +46,12 @@ export function initDeepLinks(): void {
 		.then(({ onOpenUrl }) =>
 			onOpenUrl((urls) => {
 				for (const raw of urls) {
-					try {
-						const u = new URL(raw);
-						// circle://room/184729#secret → /room/184729#secret
-						const target = `${u.pathname}${u.hash}` || '/';
-						if (location.pathname + location.hash !== target)
-							location.assign(target);
-					} catch {
-						/* malformed url — ignore */
-					}
+					const target = deepLinkTarget(raw);
+					if (
+						target &&
+						location.pathname + location.search + location.hash !== target
+					)
+						location.assign(target);
 				}
 			})
 		)
