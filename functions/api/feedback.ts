@@ -19,6 +19,8 @@
  * bucket, rate-limited at the edge if ever needed.
  */
 
+import { z } from 'zod';
+
 interface Env {
 	UX_REPLAY?: R2Bucket;
 	UX_ADMIN?: string;
@@ -27,6 +29,14 @@ interface Env {
 const KEY_PREFIX = 'feedback/';
 const MAX_TEXT = 1200;
 const MAX_BODY = 8 * 1024;
+
+const FeedbackBody = z.object({
+	sessionId: z.string().regex(/^[\w-]{3,80}$/),
+	roomCode: z.string().regex(/^\d{6}$/),
+	permit: z.string().regex(/^[0-9a-f-]{8,64}$/i),
+	rating: z.number().int().min(1).max(5),
+	text: z.string().max(100_000) // raw bound; truncated to MAX_TEXT below
+});
 
 const json = (body: unknown, status = 200): Response =>
 	new Response(JSON.stringify(body), {
@@ -44,15 +54,9 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
 	} catch {
 		return new Response(null, { status: 400 });
 	}
-	const { sessionId, roomCode, permit, rating, text } = body;
-	if (
-		typeof sessionId !== 'string' || !/^[\w-]{3,80}$/.test(sessionId) ||
-		typeof roomCode !== 'string' || !/^\d{6}$/.test(roomCode) ||
-		typeof permit !== 'string' || !/^[0-9a-f-]{8,64}$/i.test(permit) ||
-		typeof rating !== 'number' || !Number.isInteger(rating) || rating < 1 || rating > 5 ||
-		typeof text !== 'string'
-	)
-		return new Response(null, { status: 400 });
+	const parsed = FeedbackBody.safeParse(body);
+	if (!parsed.success) return new Response(null, { status: 400 });
+	const { sessionId, roomCode, permit, rating, text } = parsed.data;
 	await env.UX_REPLAY.put(
 		`${KEY_PREFIX}${roomCode}/${sessionId}/${permit.slice(0, 8)}-${Date.now()}`,
 		JSON.stringify({ roomCode, sessionId, rating, text: text.slice(0, MAX_TEXT), at: Date.now() }),

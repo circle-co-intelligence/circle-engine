@@ -25,6 +25,66 @@ const OBLIGATIONS = [
 const obligation = (lic) =>
 	OBLIGATIONS.find(([re]) => re.test(lic ?? ''))?.[1] ?? 'permissive';
 
+
+// --------------------------------------------------------- dep usage map
+// Every declared dep must have >=1 importer in authored source (or a
+// documented toolchain/reserved role) — otherwise the generator fails.
+// "No silent OSS removal / no zombie dep": deleting a dep leaves dangling
+// importers (build breaks); adding an unused dep fails here.
+const SCAN_DIRS = ['src', 'functions', 'workers', 'scripts', 'e2e', 'src-tauri'];
+const SCAN_FILES = ['vite.config.ts', 'svelte.config.js', 'playwright.config.ts', 'package.json'].filter((f) => fs.existsSync(f));
+const sourceFiles = [];
+const walk = (d) => {
+	for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+		const p = d + '/' + e.name;
+		if (e.isDirectory()) {
+			if (!/node_modules|\.git|target|dist|^build$/.test(e.name)) walk(p);
+		} else if (/\.(ts|svelte|js|mjs|json|toml)$/.test(e.name)) {
+			sourceFiles.push(p); // tests included — devDeps legitimately import there
+		}
+	}
+};
+for (const d of SCAN_DIRS) try { walk(d); } catch { /* dir absent */ }
+for (const f of SCAN_FILES) sourceFiles.push(f);
+for (const f of fs.readdirSync('.'))
+	if (/^(probe|.*\.config|.*-diag|.*-real)[^.]*\.(mjs|ts|js)$/.test(f)) sourceFiles.push(f);
+
+const esc = (s) => s.replace(/[.*+?^${}()|[\]\\/@-]/g, '\\$&');
+const importers = (name) => {
+	const re = new RegExp('[\\x27\\x22\\x60]' + esc(name) + '(/[\\w./-]*)?[\\x27\\x22\\x60]');
+	return sourceFiles.filter((f) => {
+		try { return re.test(fs.readFileSync(f, 'utf8')); } catch { return false; }
+	});
+};
+
+// Deps legitimately never imported in source — toolchain, type packages,
+// or runtime-loaded assets. Every entry needs a stated reason.
+const RESERVED = {
+	'@types/react': 'types only — react UMD globals for excalidraw',
+	'@types/react-dom': 'types only — react-dom UMD globals for excalidraw',
+	'@tauri-apps/cli': 'native shell build CLI',
+	'eslint-plugin-compat': 'eslint browser-compat rule set',
+	'browserslist': 'shared build target config (vite/babel read it)',
+	'eslint': 'lint CLI',
+	'prettier': 'format CLI',
+	'svelte-check': 'typecheck CLI (pnpm check)',
+	'typescript': 'compiler CLI (tsc via svelte-check/build)',
+	'vite': 'bundler CLI (invoked via vite.config.ts plugins)',
+};
+
+const usage = new Map();
+const unused = [];
+for (const name of [...Object.keys(pkg.dependencies ?? {}), ...Object.keys(pkg.devDependencies ?? {})]) {
+	const files = importers(name);
+	usage.set(name, files);
+	if (!files.length && !RESERVED[name] && !name.startsWith('@types/')) unused.push(name);
+}
+if (unused.length) {
+	console.error('[licenses] unused deps with no reserved justification: ' + unused.join(', '));
+	console.error('[licenses] wire them in, remove them, or add a RESERVED reason in scripts/licenses.mjs');
+	process.exit(1);
+}
+
 // ---------------------------------------------------------- npm direct deps
 const npmRows = [];
 for (const name of Object.keys(pkg.dependencies ?? {}).sort()) {
@@ -130,6 +190,17 @@ ${transitive}
 | Package | Version | License |
 |---|---|---|
 ${devRows.join('\n')}
+
+## Dependency usage map
+
+Every declared dependency must be imported in authored source or carry a
+documented reserved/toolchain reason — \`scripts/licenses.mjs\` fails
+regeneration otherwise. A dep can't be silently dropped (its importers
+break) and a zombie dep can't accumulate.
+
+| Package | Importers / role |
+|---|---|
+|${[...usage.entries()].sort().map(([name, files]) => '| `' + name + '` | ' + (files.length ? files.slice(0, 4).map((f) => '`' + f + '`').join(', ') + (files.length > 4 ? ' (+' + (files.length - 4) + ' more)' : '') : 'reserved — ' + RESERVED[name]) + ' |').join('\n')}
 
 ## Rust crates (src-tauri native shell + speechd)
 

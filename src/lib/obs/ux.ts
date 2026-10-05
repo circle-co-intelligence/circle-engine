@@ -22,6 +22,7 @@
  *               chunks server-side; events are anonymous by design)
  */
 import { base } from '$app/paths';
+import { UAParser } from 'ua-parser-js';
 
 // ------------------------------------------------------------- constants
 const CONSENT_KEY = 'cic.uxConsent.v1';
@@ -150,28 +151,11 @@ function pageFor(p: string): string {
 }
 
 const UA = typeof navigator === 'undefined' ? '' : navigator.userAgent;
+const _ua = UAParser(UA);
 function browserInfo(): { browser: string; major: number } {
-	const m =
-		UA.match(/Edg\/(\d+)/) ??
-		UA.match(/OPR\/(\d+)/) ??
-		UA.match(/Chrome\/(\d+)/) ??
-		UA.match(/Firefox\/(\d+)/) ??
-		UA.match(/Version\/(\d+)[.\d]* Safari\//);
-	const name = UA.includes('Edg/')
-		? 'Edge'
-		: UA.includes('OPR/')
-			? 'Opera'
-			: UA.includes('Chrome/')
-				? 'Chrome'
-				: UA.includes('Firefox/')
-					? 'Firefox'
-					: UA.includes('Safari/')
-						? 'Safari'
-						: 'other';
-	return { browser: name, major: m ? Number(m[1]) : 0 };
+	return { browser: _ua.browser.name ?? 'other', major: Number(_ua.browser.major ?? 0) };
 }
-const deviceInfo = (): string =>
-	/iPad|Tablet/i.test(UA) ? 'tablet' : /Mobi|Android/i.test(UA) ? 'mobile' : 'desktop';
+const deviceInfo = (): string => _ua.device.type ?? 'desktop';
 const RELEASE = (import.meta.env as Record<string, string | undefined>).VITE_CIC_RELEASE ?? 'dev';
 const CS_BASE = ((import.meta.env as Record<string, string | undefined>).VITE_CIC_ANALYTICS_URL ?? '').replace(
 	/\/$/,

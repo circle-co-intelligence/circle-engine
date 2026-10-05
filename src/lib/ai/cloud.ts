@@ -9,6 +9,8 @@
  *
  * Failure contract: every call throws → callers fall back to local paths.
  */
+import { base64 } from '@scure/base';
+
 
 export function aiEndpoint(): string | null {
 	return (import.meta.env as Record<string, string | undefined>).VITE_CIC_AI_ENDPOINT ?? null;
@@ -90,16 +92,9 @@ export async function cloudTts(
 	return { samples: b64ToF32(res.audio), sampleRate: res.sampleRate ?? 22050 };
 }
 
-function f32ToB64(f: Float32Array): string {
-	const bytes = new Uint8Array(f.buffer, f.byteOffset, f.byteLength);
-	let s = '';
-	for (let i = 0; i < bytes.length; i += 8192)
-		s += String.fromCharCode(...bytes.subarray(i, i + 8192));
-	return btoa(s);
-}
-function b64ToF32(b64: string): Float32Array {
-	const bin = atob(b64);
-	const bytes = new Uint8Array(bin.length);
-	for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-	return new Float32Array(bytes.buffer);
-}
+const f32ToB64 = (f: Float32Array) =>
+	base64.encode(new Uint8Array(f.buffer, f.byteOffset, f.byteLength));
+const b64ToF32 = (b64: string) => {
+	const u8 = base64.decode(b64);
+	return new Float32Array(u8.buffer, u8.byteOffset, u8.byteLength >> 2);
+};

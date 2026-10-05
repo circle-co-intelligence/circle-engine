@@ -52,7 +52,7 @@ const config = {
 				// blob:: sherpa scripts may be injected via blob URLs when packs are
 				// fetched+extracted from upstream remotes instead of /models
 				'script-src': ['self', 'wasm-unsafe-eval', 'blob:'],
-				// style-src: Svelte transitions + qr-code-styling inject inline styles
+				// style-src: Svelte transitions inject inline styles
 				'style-src': ['self', 'unsafe-inline'],
 				'worker-src': ['self', 'blob:'],
 				'font-src': ['self'],

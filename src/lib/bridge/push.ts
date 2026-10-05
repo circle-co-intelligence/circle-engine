@@ -12,6 +12,7 @@
  */
 import { base } from '$app/paths';
 
+import { base64url } from '@scure/base';
 const RING_COOLDOWN_MS = 5 * 60 * 1000;
 let patched = false;
 let activeCode = '';
@@ -32,10 +33,7 @@ function brokerUp(): Promise<boolean> {
 		.catch(() => false));
 }
 
-function b64ToBytes(b64url: string): Uint8Array {
-	const b64 = b64url.replace(/-/g, '+').replace(/_/g, '/');
-	return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-}
+const b64ToBytes = (b: string) => base64url.decode(b) as Uint8Array<ArrayBuffer>;
 
 async function subscribe(code: string, roomUrl: string): Promise<void> {
 	try {

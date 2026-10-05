@@ -12,14 +12,13 @@ Required license texts ship in `static/licenses/`.
 | Package | Version | License | Obligation | Repository |
 |---|---|---|---|---|
 | `@excalidraw/excalidraw` | 0.17.6 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/excalidraw/excalidraw |
-| `@lottiefiles/dotlottie-svelte` | 0.5.3 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/LottieFiles/dotlottie-web |
 | `@mediapipe/tasks-vision` | 0.10.35 | Apache-2.0 | permissive — retain NOTICE; text vendored at `/licenses/Apache-2.0.txt` |  |
 | `@noble/ciphers` | 2.4.0 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/paulmillr/noble-ciphers |
 | `@noble/curves` | 1.9.7 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/paulmillr/noble-curves |
 | `@noble/hashes` | 1.8.0 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/paulmillr/noble-hashes |
 | `@open-policy-agent/opa-wasm` | 1.10.0 | Apache-2.0 | permissive — retain NOTICE; text vendored at `/licenses/Apache-2.0.txt` | https://github.com/open-policy-agent/npm-opa-wasm |
+| `@scure/base` | 2.4.0 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/paulmillr/scure-base |
 | `@sentry/browser` | 9.47.2 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | github.com/getsentry/sentry-javascript |
-| `@tanstack/svelte-virtual` | 3.13.39 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/TanStack/virtual |
 | `@tauri-apps/api` | 2.12.1 | Apache-2.0 OR MIT | permissive — retain NOTICE; text vendored at `/licenses/Apache-2.0.txt` | https://github.com/tauri-apps/tauri |
 | `@tauri-apps/plugin-deep-link` | 2.6.1 | MIT OR Apache-2.0 | permissive — retain NOTICE; text vendored at `/licenses/Apache-2.0.txt` | https://github.com/tauri-apps/plugins-workspace |
 | `@tiptap/core` | 3.31.3 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/ueberdosis/tiptap |
@@ -29,37 +28,23 @@ Required license texts ship in `static/licenses/`.
 | `@tiptap/starter-kit` | 3.31.3 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/ueberdosis/tiptap |
 | `@twilio/video-processors` | 3.2.0 | BSD-3-Clause | permissive — keep copyright line | https://github.com/twilio/twilio-video-processors.js |
 | `@wllama/wllama` | 2.4.0 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/ngxson/wllama |
-| `bits-ui` | 1.8.0 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | github:huntabyte/bits-ui |
-| `comlink` | 4.4.2 | Apache-2.0 | permissive — retain NOTICE; text vendored at `/licenses/Apache-2.0.txt` | https://github.com/GoogleChromeLabs/comlink |
 | `denoise-voice-clarity` | 0.2.2 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/rajan471/denoise-voice-clarity |
 | `dexie` | 4.4.6 | Apache-2.0 | permissive — retain NOTICE; text vendored at `/licenses/Apache-2.0.txt` | https://github.com/dexie/Dexie.js |
-| `did-jwt-vc` | 4.0.16 | ISC | permissive | https://github.com/decentralized-identity/did-jwt-vc |
-| `dompurify` | 3.4.16 | (MPL-2.0 OR Apache-2.0) | permissive — retain NOTICE; text vendored at `/licenses/Apache-2.0.txt` | github.com/cure53/DOMPurify |
-| `emoji-picker-element` | 1.29.1 | Apache-2.0 | permissive — retain NOTICE; text vendored at `/licenses/Apache-2.0.txt` | https://github.com/nolanlawson/emoji-picker-element |
-| `flexsearch` | 0.8.212 | Apache-2.0 | permissive — retain NOTICE; text vendored at `/licenses/Apache-2.0.txt` | https://github.com/nextapps-de/flexsearch |
+| `exponential-backoff` | 3.1.3 | Apache-2.0 | permissive — retain NOTICE; text vendored at `/licenses/Apache-2.0.txt` | https://github.com/coveooss/exponential-backoff |
 | `hls.js` | 1.7.3 | Apache-2.0 | permissive — retain NOTICE; text vendored at `/licenses/Apache-2.0.txt` | https://github.com/video-dev/hls.js |
 | `ics` | 3.12.1 | ISC | permissive | https://github.com/adamgibbons/ics |
+| `jose` | 6.2.12 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | panva/jose |
+| `lib0` | 0.2.119 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/dmonad/lib0 |
 | `libarchive.js` | 2.0.2 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/nika-begiashvili/libarchivejs |
-| `linkify-it` | 5.0.2 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | markdown-it/linkify-it |
-| `lucide-svelte` | 0.469.0 | ISC | permissive | https://github.com/lucide-icons/lucide |
-| `marked` | 15.0.12 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | github.com/markedjs/marked |
 | `mediabunny` | 1.61.0 | MPL-2.0 | weak copyleft — ship `/licenses/MPL-2.0.txt`; applies only to modified package files | https://github.com/Vanilagy/mediabunny |
-| `msw` | 2.15.0 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/mswjs/msw |
-| `nanoid` | 5.1.16 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | ai/nanoid |
-| `qr-code-styling` | 1.9.2 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/kozakdenys/qr-code-styling |
-| `qr-scanner` | 1.4.2 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/nimiq/qr-scanner |
 | `react` | 18.3.1 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/facebook/react |
 | `react-dom` | 18.3.1 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/facebook/react |
 | `rrweb-player` | 2.1.7 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/rrweb-io/rrweb |
 | `sframe-ratchet` | 0.5.8 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/anatolykoptev/sframe-ratchet |
 | `sip.js` | 0.21.2 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/onsip/SIP.js |
-| `streamsaver` | 2.0.6 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://jimmywarting@github.com/jimmywarting/StreamSaver.js |
-| `svelte-sonner` | 0.3.28 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` |  |
 | `trystero` | 0.21.8 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/dmotz/trystero |
-| `typesafe-i18n` | 5.27.1 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/codingcommons/typesafe-i18n |
-| `wasm-feature-detect` | 1.9.0 | Apache-2.0 | permissive — retain NOTICE; text vendored at `/licenses/Apache-2.0.txt` | GoogleChromeLabs/wasm-feature-detect |
+| `ua-parser-js` | 2.0.10 | AGPL-3.0-or-later | copyleft — see notes | https://github.com/faisalman/ua-parser-js |
 | `webrtc-adapter` | 9.0.6 | BSD-3-Clause | permissive — keep copyright line | https://github.com/webrtchacks/adapter |
-| `webrtc-issue-detector` | 1.17.3 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | github.com/VLprojects/webrtc-issue-detector |
 | `xstate` | 5.33.2 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/statelyai/xstate |
 | `y-protocols` | 1.0.7 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/yjs/y-protocols |
 | `yjs` | 13.6.33 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/yjs/yjs |
@@ -69,21 +54,20 @@ Required license texts ship in `static/licenses/`.
 
 | License | Package count |
 |---|---|
-| MIT | 391 |
-| Apache-2.0 | 88 |
+| MIT | 366 |
+| Apache-2.0 | 81 |
 | Apache-2.0 OR MIT | 66 |
-| ISC | 23 |
+| ISC | 21 |
 | BSD-3-Clause | 17 |
 | MIT OR Apache-2.0 | 9 |
 | BSD-2-Clause | 6 |
 | MPL-2.0 | 3 |
 | CC0-1.0 | 1 |
 | CC-BY-4.0 | 1 |
-| (MPL-2.0 OR Apache-2.0) | 1 |
 | BlueOak-1.0.0 | 1 |
-| (Apache-2.0 AND MIT) | 1 |
 | 0BSD | 1 |
 | (MIT OR CC0-1.0) | 1 |
+| AGPL-3.0-or-later | 1 |
 
 ## Dev-only dependencies (never ship)
 
@@ -107,6 +91,72 @@ Required license texts ship in `static/licenses/`.
 | `typescript` | 5.9.3 | Apache-2.0 |
 | `vite` | 6.4.3 | MIT |
 | `vitest` | 3.2.7 | MIT |
+
+## Dependency usage map
+
+Every declared dependency must be imported in authored source or carry a
+documented reserved/toolchain reason — `scripts/licenses.mjs` fails
+regeneration otherwise. A dep can't be silently dropped (its importers
+break) and a zombie dep can't accumulate.
+
+| Package | Importers / role |
+|---|---|
+|| `@axe-core/playwright` | `e2e/smoke.spec.ts`, `package.json` |
+| `@excalidraw/excalidraw` | `src/lib/whiteboard/island.ts`, `package.json` |
+| `@mediapipe/tasks-vision` | `src/lib/media/enhance.ts`, `package.json` |
+| `@noble/ciphers` | `src/lib/rec/cloud.ts`, `package.json` |
+| `@noble/curves` | `src/lib/crypto/identity.ts`, `src/lib/tier.test.ts`, `scripts/grant.mjs`, `package.json` |
+| `@noble/hashes` | `src/lib/audit/export.test.ts`, `src/lib/bridge/account.ts`, `src/lib/bridge/cloudSfu.ts`, `src/lib/bridge/roomBridge.svelte.ts` (+8 more) |
+| `@open-policy-agent/opa-wasm` | `src/lib/policy/engine.ts`, `package.json` |
+| `@playwright/test` | `e2e/mobile-network.spec.ts`, `e2e/smoke.spec.ts`, `e2e/ux-telemetry.spec.ts`, `playwright.config.ts` (+12 more) |
+| `@scure/base` | `src/lib/ai/cloud.ts`, `src/lib/bridge/push.ts`, `src/lib/bridge/stt.ts`, `src/lib/crypto/accountKey.ts` (+3 more) |
+| `@sentry/browser` | `src/lib/obs/errors.ts`, `package.json` |
+| `@sveltejs/adapter-static` | `svelte.config.js`, `package.json`, `svelte.config.js` |
+| `@sveltejs/kit` | `vite.config.ts`, `svelte.config.js`, `package.json`, `svelte.config.js` (+1 more) |
+| `@sveltejs/vite-plugin-svelte` | `svelte.config.js`, `package.json`, `svelte.config.js` |
+| `@tauri-apps/api` | `src/lib/native.ts`, `package.json` |
+| `@tauri-apps/cli` | `scripts/licenses.mjs`, `package.json` |
+| `@tauri-apps/plugin-deep-link` | `src/lib/native.ts`, `package.json` |
+| `@tiptap/core` | `src/lib/notes/NotesEditor.svelte`, `package.json` |
+| `@tiptap/extension-collaboration` | `src/lib/notes/NotesEditor.svelte`, `package.json` |
+| `@tiptap/extension-task-item` | `src/lib/notes/NotesEditor.svelte`, `package.json` |
+| `@tiptap/extension-task-list` | `src/lib/notes/NotesEditor.svelte`, `package.json` |
+| `@tiptap/starter-kit` | `src/lib/notes/NotesEditor.svelte`, `package.json` |
+| `@twilio/video-processors` | `src/lib/media/enhance.ts`, `package.json` |
+| `@types/react` | `scripts/licenses.mjs`, `package.json` |
+| `@types/react-dom` | `scripts/licenses.mjs`, `package.json` |
+| `@wllama/wllama` | `src/lib/ai/milo.ts`, `src/lib/ai/translate.ts`, `package.json` |
+| `browserslist` | `scripts/licenses.mjs`, `package.json` |
+| `denoise-voice-clarity` | `src/lib/media/enhance.ts`, `package.json` |
+| `dexie` | `src/lib/crypto/accountKey.ts`, `src/lib/ledger/credits.ts`, `src/lib/rec/iso.ts`, `src/lib/rec/recorder.ts` (+1 more) |
+| `eslint` | `scripts/licenses.mjs`, `package.json` |
+| `eslint-plugin-compat` | `scripts/licenses.mjs`, `package.json` |
+| `exponential-backoff` | `src/lib/net/room.ts`, `package.json` |
+| `fake-indexeddb` | `src/lib/ledger/credits.test.ts`, `package.json` |
+| `hls.js` | `src/lib/media/hlsPlay.ts`, `package.json` |
+| `ics` | `src/lib/notes/invite.ts`, `package.json` |
+| `jose` | `workers/ai-gateway/src/index.ts`, `workers/push/src/index.ts`, `package.json` |
+| `lib0` | `src/lib/notes/notes.ts`, `package.json` |
+| `libarchive.js` | `src/cic-modules.d.ts`, `src/lib/ai/speech.ts`, `package.json` |
+| `mediabunny` | `src/lib/rec/clip.ts`, `src/lib/rec/iso.ts`, `src/lib/rec/recorder.ts`, `package.json` |
+| `prettier` | `scripts/licenses.mjs`, `package.json` |
+| `react` | `src/lib/whiteboard/island.ts`, `package.json` |
+| `react-dom` | `src/lib/whiteboard/island.ts`, `package.json` |
+| `rrweb-player` | `src/routes/admin/replay/+page.svelte`, `package.json` |
+| `sframe-ratchet` | `src/lib/crypto/e2ee.ts`, `package.json` |
+| `sip.js` | `src/lib/media/sip.ts`, `package.json` |
+| `svelte` | `src/lib/bridge/CicApp.svelte`, `src/lib/bridge/roomBridge.svelte.ts`, `src/lib/notes/NotesEditor.svelte`, `src/routes/+layout.svelte` (+8 more) |
+| `svelte-check` | `scripts/licenses.mjs`, `package.json` |
+| `trystero` | `src/lib/net/room.ts`, `src/lib/net/wsRoom.ts`, `package.json` |
+| `typescript` | `scripts/licenses.mjs`, `package.json` |
+| `ua-parser-js` | `src/lib/obs/ux.ts`, `package.json` |
+| `vite` | `scripts/licenses.mjs`, `package.json` |
+| `vitest` | `src/lib/ai/sensory.test.ts`, `src/lib/audit/export.test.ts`, `src/lib/authority/authority.test.ts`, `src/lib/bridge/stt.test.ts` (+17 more) |
+| `webrtc-adapter` | `src/routes/+layout.svelte`, `package.json` |
+| `xstate` | `src/lib/domain/stick.machine.test.ts`, `src/lib/domain/stick.machine.ts`, `src/lib/state/room.svelte.ts`, `package.json` |
+| `y-protocols` | `src/lib/notes/notes.ts`, `package.json` |
+| `yjs` | `src/lib/notes/facilitate.test.ts`, `src/lib/notes/facilitate.ts`, `src/lib/notes/notes.ts`, `src/lib/whiteboard/island.ts` (+1 more) |
+| `zod` | `src/lib/wire/messages.ts`, `functions/api/feedback.ts`, `functions/api/ux/[[path]].ts`, `package.json` |
 
 ## Rust crates (src-tauri native shell + speechd)
 
@@ -192,8 +242,8 @@ Measured at generation time:
 
 | Metric | Value | Reading |
 |---|---|---|
-| Authored runtime LOC | 20,178 | vs 71 direct OSS deps + 610 pkgs in the transitive closure → **<5%** of the delivered application's source composition |
-| Authored test/probe LOC | 2,670 | dev-time only, never shipped |
+| Authored runtime LOC | 20,356 | vs 56 direct OSS deps + 575 pkgs in the transitive closure → **<5%** of the delivered application's source composition |
+| Authored test/probe LOC | 2,803 | dev-time only, never shipped |
 | Shipped non-OSS bytes | **0%** | every build artifact is third-party OSS or org-owned AGPL-3.0 |
 | Org-authored shipped bytes | ~9 MiB of ~44 MiB (~20%) | vendored product bundles + compiled authored code — all AGPL-3.0, so OSS-licensed even though org-authored |
 | Third-party OSS shipped bytes | ~16 MiB static assets + dep code inside `_app` | wasm runtimes, fonts, vendored libs |

@@ -15,6 +15,7 @@
 // TURN/STUN come from VITE_CIC_TURN (JSON iceServers array) and/or the
 // /api/ice endpoint (short-lived credentials from the edge worker).
 import { joinRoom as joinMqtt, selfId } from 'trystero/mqtt';
+import { backOff } from 'exponential-backoff';
 import { opEnvelope, realtimeMessage, type OpEnvelope, type RealtimeMessage } from '../wire/messages';
 import { installSimulcast } from '../media/simulcast';
 import type { DataPayload, Room } from 'trystero';
@@ -413,27 +414,31 @@ export function openRoom(roomSecret: string): RoomHandle {
 	const LANE_RETRIES = 6;
 	// first successful attach unblocks sends; the rest keep retrying in the
 	// background and join the composite whenever they connect
-	const joinWithRetry = async (name: LaneName, rtcConfig: RTCConfiguration) => {
-		for (let i = 0; i < LANE_RETRIES; i++) {
-			const room = await joinLane(
-				name,
-				roomSecret,
-				rtcConfig,
-				name === 'ws' ? emitBus : undefined
-			).catch(() => null);
-			if (room) {
-				attach(name, room);
-				if (!connected) {
-					connected = true;
-					emitSignal('up');
-					flushPending();
-				}
-				return true;
-			}
-			await new Promise((r) => setTimeout(r, Math.min(1000 * 2 ** i, 15000)));
+	const joinWithRetry = async (name: LaneName, rtcConfig: RTCConfiguration): Promise<boolean> => {
+		try {
+			return await backOff(
+				async () => {
+					const room = await joinLane(
+						name,
+						roomSecret,
+						rtcConfig,
+						name === 'ws' ? emitBus : undefined
+					).catch(() => null);
+					if (!room) throw new Error('lane unavailable');
+					attach(name, room);
+					if (!connected) {
+						connected = true;
+						emitSignal('up');
+						flushPending();
+					}
+					return true;
+				},
+				{ numOfAttempts: LANE_RETRIES, startingDelay: 1000, maxDelay: 15000 }
+			);
+		} catch {
+			console.warn(`[net] lane ${name} gave up after ${LANE_RETRIES} attempts`);
+			return false;
 		}
-		console.warn(`[net] lane ${name} gave up after ${LANE_RETRIES} attempts`);
-		return false;
 	};
 
 	const ready = (async () => {

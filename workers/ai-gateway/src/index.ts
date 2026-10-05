@@ -22,6 +22,8 @@
  *   POST /ai/stt  {audio: b64-f32, sampleRate} → {text}
  *   POST /ai/tts  {text, voice?} → {audio: b64-f32, sampleRate}
  */
+import { createRemoteJWKSet, jwtVerify } from 'jose';
+
 
 export interface Env {
 	AI?: Ai; // workers-ai binding
@@ -328,42 +330,24 @@ function indexReport(env: Env, ctx: ExecutionContext | undefined, room: string, 
 //
 // Cloudflare Access fronts /admin/* — the JWT arrives as the
 // Cf-Access-Jwt-Assertion header; we verify RS256 against the team JWKS
-// (cached), check aud + exp, and reject anything else. Zero-dependency:
-// WebCrypto does RS256 verification natively. Pseudonymity is preserved —
-// the console only ever sees room codes and resource numbers.
-
-let jwksCache: { keys: JsonWebKey[]; at: number } | null = null;
+// via jose (built-in kid lookup + aud/exp validation + key caching), and
+// reject anything else. Pseudonymity is preserved — the console only ever
+// sees room codes and resource numbers.
 
 async function accessUser(req: Request, env: Env): Promise<string | null> {
 	if (!env.CF_ACCESS_TEAM || !env.CF_ACCESS_AUD) return null;
 	const jwt = req.headers.get('cf-access-jwt-assertion');
 	if (!jwt) return null;
-	const [h, p, sig] = jwt.split('.');
-	if (!h || !p || !sig) return null;
-	const header = JSON.parse(atob(h.replace(/-/g, '+').replace(/_/g, '/'))) as { kid?: string };
-	const payload = JSON.parse(atob(p.replace(/-/g, '+').replace(/_/g, '/'))) as {
-		aud?: string | string[];
-		exp?: number;
-		email?: string;
-	};
-	if (payload.exp && payload.exp * 1000 < Date.now()) return null;
-	const auds = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
-	if (!auds.includes(env.CF_ACCESS_AUD)) return null;
-	if (!jwksCache || Date.now() - jwksCache.at > 300_000) {
-		const r = await fetch(`https://${env.CF_ACCESS_TEAM}/cdn-cgi/access/certs`);
-		if (!r.ok) return null;
-		jwksCache = { keys: ((await r.json()) as { keys: JsonWebKey[] }).keys, at: Date.now() };
+	try {
+		const { payload } = await jwtVerify(
+			jwt,
+			createRemoteJWKSet(new URL(`https://${env.CF_ACCESS_TEAM}/cdn-cgi/access/certs`)),
+			{ audience: env.CF_ACCESS_AUD }
+		);
+		return typeof payload.email === 'string' ? payload.email : 'access-user';
+	} catch {
+		return null;
 	}
-	const jwk = jwksCache.keys.find((k) => (k as { kid?: string }).kid === header.kid);
-	if (!jwk) return null;
-	const key = await crypto.subtle.importKey('jwk', jwk, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify']);
-	const ok = await crypto.subtle.verify(
-		'RSASSA-PKCS1-v1_5',
-		key,
-		Uint8Array.from(atob(sig.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0)),
-		new TextEncoder().encode(`${h}.${p}`)
-	);
-	return ok ? (payload.email ?? 'access-user') : null;
 }
 
 /** GET /admin/overview — room spend table for the console UI */

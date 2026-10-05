@@ -58,6 +58,7 @@
 import { selfId } from 'trystero/mqtt';
 import type { Room } from 'trystero';
 import { normalizeExtmaps } from './sdp';
+import { base64 } from '@scure/base';
 
 interface BusFrame {
 	t: 'welcome' | 'join' | 'leave' | 'msg';
@@ -148,13 +149,9 @@ async function appKey(secret: string): Promise<CryptoKey> {
 		'decrypt'
 	]);
 }
-const b64 = (buf: ArrayBuffer | Uint8Array) => {
-	const b = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
-	let s = '';
-	for (const x of b) s += String.fromCharCode(x);
-	return btoa(s);
-};
-const unb64 = (s: string) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+const b64 = (buf: ArrayBuffer | Uint8Array) =>
+	base64.encode(buf instanceof Uint8Array ? buf : new Uint8Array(buf));
+const unb64 = (s: string) => base64.decode(s) as Uint8Array<ArrayBuffer>;
 
 export async function openWsRoom(
 	busUrl: string,

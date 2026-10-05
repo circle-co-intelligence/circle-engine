@@ -9,6 +9,7 @@ import { LocalSocket } from './localSocket';
 import { CaptionPipeline, LocalTts } from '../ai/speech';
 import { translateText } from '../ai/translate';
 import type { RoomSession } from '../state/room.svelte';
+import { base64 } from '@scure/base';
 
 type Frame = Record<string, unknown>;
 interface Emit {
@@ -190,7 +191,7 @@ export class SpeechStreamPipe {
 			} catch {}
 			return;
 		}
-		const bin = Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
+		const bin = base64.decode(data);
 		const pcm16 = new Int16Array(bin.buffer, bin.byteOffset, bin.byteLength >> 1);
 		const f32 = new Float32Array(pcm16.length);
 		for (let i = 0; i < pcm16.length; i++) f32[i] = pcm16[i] / 32768;
@@ -417,11 +418,7 @@ export class TranslationFanout {
 		const pcm16 = new Int16Array(f32.length);
 		for (let i = 0; i < f32.length; i++)
 			pcm16[i] = Math.max(-32768, Math.min(32767, Math.round(f32[i] * 32767)));
-		const bytes = new Uint8Array(pcm16.buffer);
-		let bin = '';
-		for (let i = 0; i < bytes.length; i += 8192)
-			bin += String.fromCharCode(...bytes.subarray(i, i + 8192));
-		return btoa(bin);
+		return base64.encode(new Uint8Array(pcm16.buffer));
 	}
 }
 

@@ -20,6 +20,9 @@
  *    so nothing written may identify a person (visitId is a per-load UUID)
  */
 
+import { z } from 'zod';
+import { base64urlnopad } from '@scure/base';
+
 interface Env {
 	UX_EVENTS?: AnalyticsEngineDataset;
 	UX_REPLAY?: R2Bucket;
@@ -32,23 +35,23 @@ interface Env {
 const enc = new TextEncoder();
 
 // ------------------------------------------------------------ vendored enums
-const PAGES = new Set(['setup', 'join', 'prejoin', 'room']);
-const EVENTS = new Set([
+const PAGES = ['setup', 'join', 'prejoin', 'room'] as const;
+const EVENTS = [
 	'visit_start', 'visit_end', 'activation', 'ack', 'success',
 	'failure', 'dead', 'rage', 'step', 'coverage'
-]);
-const STEPS = new Set([
+] as const;
+const STEPS = [
 	'setup_opened', 'room_created', 'prejoin_opened', 'join_succeeded',
 	'tool_opened', 'tool_acknowledged', 'tool_succeeded'
-]);
-const TARGETS = new Set([
+] as const;
+const TARGETS = [
 	'create_room', 'join_room', 'microphone', 'camera', 'settings',
 	'chat', 'recording', 'transcript', 'milo', 'share', 'layout', 'leave'
-]);
-const ROLES = new Set(['host', 'participant', 'unknown']);
-const DEVICES = new Set(['mobile', 'tablet', 'desktop']);
-const BROWSERS = new Set(['Chrome', 'Firefox', 'Safari', 'Edge', 'Opera', 'other']);
-const REPLAY_STATUS = new Set(['completed', 'capped', 'failed']);
+] as const;
+const ROLES = ['host', 'participant', 'unknown'] as const;
+const DEVICES = ['mobile', 'tablet', 'desktop'] as const;
+const BROWSERS = ['Chrome', 'Firefox', 'Safari', 'Edge', 'Opera', 'other'] as const;
+const REPLAY_STATUS = ['completed', 'capped', 'failed'] as const;
 
 const MAX_BODY = 64 * 1024;
 const MAX_CHUNK_BODY = 300 * 1024;
@@ -59,18 +62,9 @@ const TOKEN_TTL_S = 24 * 3600;
 const KEY_PREFIX = 'ux-replay/';
 
 // ------------------------------------------------------------------- utils
-const b64url = (buf: ArrayBuffer | Uint8Array): string => {
-	const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
-	let s = '';
-	for (const b of bytes) s += String.fromCharCode(b);
-	return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-};
-const unb64url = (s: string): Uint8Array => {
-	const b = atob(s.replace(/-/g, '+').replace(/_/g, '/'));
-	const out = new Uint8Array(b.length);
-	for (let i = 0; i < b.length; i++) out[i] = b.charCodeAt(i);
-	return out;
-};
+const b64url = (buf: ArrayBuffer | Uint8Array): string =>
+	base64urlnopad.encode(buf instanceof Uint8Array ? buf : new Uint8Array(buf));
+const unb64url = (s: string): Uint8Array => base64urlnopad.decode(s);
 
 const privacySignal = (req: Request): boolean =>
 	req.headers.get('sec-gpc') === '1' || req.headers.get('dnt') === '1';
@@ -123,56 +117,49 @@ async function verifyToken(secret: string, token: string): Promise<TokenPayload 
 }
 
 // ------------------------------------------------------------ event schema
+const EventSchema = z.object({
+	v: z.literal(1),
+	detector: z.literal(1),
+	visitId: z.string().regex(/^[0-9a-f-]{36}$/i),
+	eventId: z.string().max(80),
+	seq: z.number().int().min(0).max(1e6),
+	at: z.number().min(0).max(1e13),
+	page: z.enum(PAGES),
+	event: z.enum(EVENTS),
+	release: z.string().regex(/^[\w.+-]{1,40}$/),
+	device: z.enum(DEVICES),
+	browser: z.enum(BROWSERS),
+	browserMajor: z.number().min(0).max(999),
+	role: z.enum(ROLES),
+	target: z.enum(TARGETS).optional(),
+	actionId: z.number().min(0).max(1e6).optional(),
+	step: z.enum(STEPS).optional(),
+	incomplete: z.boolean().optional(),
+	dropped: z.number().min(0).max(1e6).optional()
+});
+
 function cleanEvent(e: unknown): Record<string, unknown> | null {
-	if (typeof e !== 'object' || e === null) return null;
-	const o = e as Record<string, unknown>;
-	if (o.v !== 1 || o.detector !== 1) return null;
-	if (typeof o.visitId !== 'string' || !/^[0-9a-f-]{36}$/i.test(o.visitId)) return null;
-	if (typeof o.eventId !== 'string' || o.eventId.length > 80) return null;
-	if (typeof o.seq !== 'number' || !Number.isInteger(o.seq) || o.seq < 0 || o.seq > 1e6) return null;
-	if (typeof o.at !== 'number' || o.at < 0 || o.at > 1e13) return null;
-	if (!PAGES.has(o.page as string) || !EVENTS.has(o.event as string)) return null;
-	if (typeof o.release !== 'string' || !/^[\w.+-]{1,40}$/.test(o.release)) return null;
-	if (!DEVICES.has(o.device as string) || !BROWSERS.has(o.browser as string)) return null;
-	if (typeof o.browserMajor !== 'number' || o.browserMajor < 0 || o.browserMajor > 999) return null;
-	if (!ROLES.has(o.role as string)) return null;
-	const out: Record<string, unknown> = {
-		visitId: o.visitId,
-		seq: o.seq,
-		at: o.at,
-		page: o.page,
-		event: o.event,
-		release: o.release,
-		device: o.device,
-		browser: o.browser,
-		browserMajor: o.browserMajor,
-		role: o.role
-	};
-	if (o.target !== undefined) {
-		if (!TARGETS.has(o.target as string)) return null;
-		out.target = o.target;
-	}
-	if (o.actionId !== undefined) {
-		if (typeof o.actionId !== 'number' || o.actionId < 0 || o.actionId > 1e6) return null;
-		out.actionId = o.actionId;
-	}
-	if (o.step !== undefined) {
-		if (!STEPS.has(o.step as string)) return null;
-		out.step = o.step;
-	}
-	if (o.incomplete !== undefined) {
-		if (typeof o.incomplete !== 'boolean') return null;
-		out.incomplete = o.incomplete;
-	}
-	if (o.dropped !== undefined) {
-		if (typeof o.dropped !== 'number' || o.dropped < 0 || o.dropped > 1e6) return null;
-		out.dropped = o.dropped;
-	}
+	const r = EventSchema.safeParse(e);
+	if (!r.success) return null;
+	const { v: _v, detector: _d, eventId: _e, ...out } = r.data;
 	return out;
 }
 
 // ------------------------------------------------------------------ replay
 const safeVisit = (v: string) => /^[0-9a-f-]{36}$/i.test(v);
+
+const ChunkBody = z.object({
+	visitId: z.string().regex(/^[0-9a-f-]{36}$/i),
+	chunkIndex: z.number().int().min(0).max(MAX_CHUNKS - 1),
+	events: z
+		.array(z.object({ type: z.number().int().min(0).max(4) }).passthrough())
+		.nonempty()
+		.max(MAX_CHUNK_EVENTS)
+});
+const CloseBody = z.object({
+	visitId: z.string().regex(/^[0-9a-f-]{36}$/i),
+	status: z.enum(REPLAY_STATUS)
+});
 
 async function deleteVisit(bucket: R2Bucket, visitId: string): Promise<number> {
 	let n = 0;
@@ -271,20 +258,12 @@ async function chunksRoute(req: Request, env: Env): Promise<Response> {
 	} catch {
 		return new Response(null, { status: 400 });
 	}
+	const parsed = ChunkBody.safeParse(body);
 	const tok = await verifyToken(env.UX_HMAC!, String(body.token ?? ''));
-	const visit = String(body.visitId ?? '');
-	if (
-		!tok || visit !== tok.visitId || !safeVisit(visit) ||
-		typeof body.chunkIndex !== 'number' || !Number.isInteger(body.chunkIndex) ||
-		body.chunkIndex < 0 || body.chunkIndex >= MAX_CHUNKS ||
-		!Array.isArray(body.events) || !body.events.length || body.events.length > MAX_CHUNK_EVENTS ||
-		!body.events.every((e) => {
-			const t = (e as { type?: unknown })?.type;
-			return typeof e === 'object' && e !== null && typeof t === 'number' && t >= 0 && t <= 4;
-		})
-	)
+	if (!tok || !parsed.success || parsed.data.visitId !== tok.visitId)
 		return new Response(null, { status: 400 });
-	await env.UX_REPLAY.put(`${KEY_PREFIX}${visit}/chunk-${String(body.chunkIndex).padStart(4, '0')}`, JSON.stringify(body.events), {
+	const { visitId: visit, chunkIndex, events } = parsed.data;
+	await env.UX_REPLAY.put(`${KEY_PREFIX}${visit}/chunk-${String(chunkIndex).padStart(4, '0')}`, JSON.stringify(events), {
 		httpMetadata: { contentType: 'application/json' }
 	});
 	return json({ ok: true });
@@ -298,13 +277,14 @@ async function closeRoute(req: Request, env: Env): Promise<Response> {
 	} catch {
 		return new Response(null, { status: 400 });
 	}
+	const parsed = CloseBody.safeParse(body);
 	const tok = await verifyToken(env.UX_HMAC!, String(body.token ?? ''));
-	const visit = String(body.visitId ?? '');
-	if (!tok || visit !== tok.visitId || !safeVisit(visit) || !REPLAY_STATUS.has(String(body.status)))
+	if (!tok || !parsed.success || parsed.data.visitId !== tok.visitId)
 		return new Response(null, { status: 400 });
+	const { visitId: visit, status } = parsed.data;
 	await env.UX_REPLAY.put(
 		`${KEY_PREFIX}${visit}/_meta`,
-		JSON.stringify({ status: body.status, closedAt: Date.now() }),
+		JSON.stringify({ status, closedAt: Date.now() }),
 		{ httpMetadata: { contentType: 'application/json' } }
 	);
 	return json({ ok: true });

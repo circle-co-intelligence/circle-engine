@@ -6,7 +6,7 @@
  * push; the client's service worker shows "A circle is waiting" and opens
  * /join?code=… — entry still goes through the normal lobby/secret flow.
  *
- * No npm deps: VAPID is a self-signed ES256 JWT (RFC 8292). Empty-payload
+ * VAPID is a self-signed ES256 JWT (RFC 8292) minted via jose. Empty-payload
  * pushes need no RFC 8291 body encryption — nothing sensitive is pushed.
  *
  * Env/secrets:
@@ -16,6 +16,8 @@
  *
  * Generate keys: `npx web-push generate-vapid-keys` or any P-256 pair.
  */
+import { SignJWT, importJWK } from 'jose';
+
 
 export interface Env {
 	PUSH: DurableObjectNamespace;
@@ -30,32 +32,14 @@ interface Subscription {
 	code: string;
 }
 
-const b64u = (buf: ArrayBuffer | Uint8Array | string) => {
-	const bytes =
-		typeof buf === 'string' ? new TextEncoder().encode(buf) : buf instanceof Uint8Array ? buf : new Uint8Array(buf);
-	return btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-};
-
 async function vapidJwt(endpoint: string, env: Env): Promise<string> {
-	const aud = new URL(endpoint).origin;
-	const header = b64u(JSON.stringify({ typ: 'JWT', alg: 'ES256' }));
-	const body = b64u(
-		JSON.stringify({ aud, exp: Math.floor(Date.now() / 1000) + 12 * 3600, sub: env.VAPID_SUB ?? 'mailto:admin@localhost' })
-	);
-	const key = await crypto.subtle.importKey(
-		'jwk',
-		JSON.parse(env.VAPID_PRIVATE) as JsonWebKey,
-		{ name: 'ECDSA', namedCurve: 'P-256' },
-		false,
-		['sign']
-	);
-	const sig = await crypto.subtle.sign(
-		{ name: 'ECDSA', hash: 'SHA-256' },
-		key,
-		new TextEncoder().encode(`${header}.${body}`)
-	);
-	// WebCrypto emits DER on some runtimes — push needs raw r||s
-	return `${header}.${body}.${b64u(sig)}`;
+	const key = await importJWK(JSON.parse(env.VAPID_PRIVATE) as JsonWebKey, 'ES256');
+	return new SignJWT({})
+		.setProtectedHeader({ typ: 'JWT', alg: 'ES256' })
+		.setAudience(new URL(endpoint).origin)
+		.setSubject(env.VAPID_SUB ?? 'mailto:admin@localhost')
+		.setExpirationTime('12h')
+		.sign(key);
 }
 
 export default {

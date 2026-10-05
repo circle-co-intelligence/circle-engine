@@ -16,10 +16,15 @@
  */
 import { bytesToHex } from '@noble/hashes/utils.js';
 import { sha256 } from '@noble/hashes/sha2.js';
+import { base64urlnopad } from '@scure/base';
+import Dexie from 'dexie';
 
-const DB_NAME = 'cic-keys';
-const STORE = 'keys';
 const SIG_WINDOW_S = 300;
+
+const keysDb = new Dexie('cic-keys') as Dexie & {
+	keys: Dexie.Table<{ priv: CryptoKey; pub: ArrayBuffer }, string>;
+};
+keysDb.version(1).stores({ keys: '' });
 
 export interface AccountKeys {
 	accountId: string; // sha256(spki) — also the primary keyHash
@@ -29,32 +34,7 @@ export interface AccountKeys {
 
 let cached: Promise<AccountKeys> | null = null;
 
-function openDb(): Promise<IDBDatabase> {
-	return new Promise((res, rej) => {
-		const r = indexedDB.open(DB_NAME, 1);
-		r.onupgradeneeded = () => r.result.createObjectStore(STORE);
-		r.onsuccess = () => res(r.result);
-		r.onerror = () => rej(r.error);
-	});
-}
 
-async function idbGet(key: string): Promise<unknown> {
-	const db = await openDb();
-	return new Promise((res, rej) => {
-		const r = db.transaction(STORE).objectStore(STORE).get(key);
-		r.onsuccess = () => res(r.result);
-		r.onerror = () => rej(r.error);
-	});
-}
-
-async function idbPut(key: string, value: unknown): Promise<void> {
-	const db = await openDb();
-	return new Promise((res, rej) => {
-		const r = db.transaction(STORE, 'readwrite').objectStore(STORE).put(value, key);
-		r.onsuccess = () => res();
-		r.onerror = () => rej(r.error);
-	});
-}
 
 export function keyHash(pub: Uint8Array): string {
 	return bytesToHex(sha256(pub));
@@ -63,9 +43,7 @@ export function keyHash(pub: Uint8Array): string {
 /** load-or-generate this device's account keypair; accountId derives from it */
 export async function accountKeys(): Promise<AccountKeys> {
 	return (cached ??= (async () => {
-		const stored = (await idbGet('account')) as
-			| { priv: CryptoKey; pub: ArrayBuffer }
-			| undefined;
+		const stored = await keysDb.keys.get('account');
 		if (stored?.priv && stored.pub) {
 			const pub = new Uint8Array(stored.pub);
 			return { accountId: keyHash(pub), pub, priv: stored.priv };
@@ -77,7 +55,7 @@ export async function accountKeys(): Promise<AccountKeys> {
 			['sign']
 		);
 		const pub = new Uint8Array(await crypto.subtle.exportKey('spki', pair.publicKey));
-		await idbPut('account', { priv: pair.privateKey, pub: pub.buffer });
+		await keysDb.keys.put({ priv: pair.privateKey, pub: pub.buffer }, 'account');
 		return { accountId: keyHash(pub), pub, priv: pair.privateKey };
 	})());
 }
@@ -143,12 +121,9 @@ export function passkeysSupported(): boolean {
 	return typeof PublicKeyCredential !== 'undefined' && !!navigator.credentials;
 }
 
-function b64url(buf: ArrayBuffer): string {
-	return btoa(String.fromCharCode(...new Uint8Array(buf)))
-		.replace(/\+/g, '-')
-		.replace(/\//g, '_')
-		.replace(/=+$/, '');
-}
+const b64url = (buf: ArrayBuffer) => base64urlnopad.encode(new Uint8Array(buf));
+const b64urlDecode = (s: string): Uint8Array<ArrayBuffer> =>
+	base64urlnopad.decode(s) as Uint8Array<ArrayBuffer>;
 
 export async function passkeyEnroll(accountIdHex: string, name: string): Promise<PasskeyCred | null> {
 	if (!passkeysSupported()) return null;
@@ -185,15 +160,13 @@ export async function passkeyAssert(
 	challengeB64: string
 ): Promise<PasskeyAssertion | null> {
 	if (!passkeysSupported()) return null;
-	const challenge = Uint8Array.from(atob(challengeB64.replace(/-/g, '+').replace(/_/g, '/')), (c) =>
-		c.charCodeAt(0)
-	);
+	const challenge = b64urlDecode(challengeB64);
 	const cred = (await navigator.credentials.get({
 		publicKey: {
 			challenge,
 			allowCredentials: credIds.map((id) => ({
 				type: 'public-key' as const,
-				id: Uint8Array.from(atob(id.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0))
+				id: b64urlDecode(id) as BufferSource
 			})),
 			userVerification: 'required'
 		}

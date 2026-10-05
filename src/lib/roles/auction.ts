@@ -12,7 +12,7 @@ export interface Capability {
 	batterySaver: boolean; // getBattery().charging === false && level < 0.3
 	webgpu: boolean;
 	models: string[]; // locally cached model-pack ids
-	uplinkKbps: number; // estimate from webrtc-issue-detector
+	uplinkKbps: number; // uplink estimate
 	isRecorderDevice: boolean; // dedicated recorder tab opt-in
 }
 
