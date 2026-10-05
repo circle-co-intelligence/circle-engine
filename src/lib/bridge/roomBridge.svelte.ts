@@ -305,11 +305,15 @@ class RoomBridge {
 	private stickObj() {
 		const s = this.session!;
 		const ctx = s.stickCtx;
+		// prod vocabulary knows held/on_table/question only — `offered` is our
+		// transient pass hop; render it as held by the destined seat
 		const state =
-			s.stickState === 'held' ? 'held' : s.stickState === 'question' ? 'question' : s.stickState === 'offered' ? 'offered' : 'on_table';
+			s.stickState === 'held' || s.stickState === 'offered' ? 'held' : s.stickState === 'question' ? 'question' : 'on_table';
 		return {
 			state,
-			holderId: ctx.holderId ? this.prodId(ctx.holderId) : null,
+			holderId: (s.stickState === 'offered' ? ctx.resumeTo : ctx.holderId)
+				? this.prodId((s.stickState === 'offered' ? ctx.resumeTo : ctx.holderId)!)
+				: null,
 			atSeatOf: ctx.atSeatOf ? this.prodId(ctx.atSeatOf) : null,
 			resumeTo: ctx.resumeTo ? this.prodId(ctx.resumeTo) : null,
 			since: null as number | null,
@@ -319,9 +323,9 @@ class RoomBridge {
 
 	private nextId(): string | null {
 		const s = this.session!;
-		const seated = [s.selfId, ...s.activePeers].sort(
-			(a, b) => (s.joinedAt[a] ?? 0) - (s.joinedAt[b] ?? 0)
-		);
+		// use the machine's seat order (sorted peer ids) — join order is
+		// client-subjective and would lie about the enforced pass destination
+		const seated = s.stickCtx.seats;
 		const cur = s.stickCtx.holderId ?? s.stickCtx.atSeatOf;
 		if (seated.length < 2) return null;
 		const order = s.direction === 'sunwise' ? seated : [...seated].reverse();

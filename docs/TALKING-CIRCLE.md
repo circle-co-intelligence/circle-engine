@@ -18,7 +18,7 @@ moment is a *brief floor loan*, never a transfer.
 
 | Mode | UI label | Rule |
 |---|---|---|
-| `circle_round` | Earthwise / Sunwise | The stick travels seat-to-seat in `direction` order. The holder may only **pass to the next occupied seat** — there is no event that can jump a seat. A recipient may decline, returning the stick to the table. |
+| `circle_round` | Earthwise / Sunwise | The stick travels seat-to-seat in `direction` order. `pass` transfers it **directly** to the next occupied seat — there is no event that can jump a seat. A recipient who doesn't wish to speak places it down or passes on. |
 | `open_round` | Open Round — "Everyone may speak" | Any seated participant may take the stick from the table; the holder may hand it to a chosen seat (`give`/`throw`) or return it. Free-floor mode. |
 
 Mode and direction are manager-gated (`canManageRoom`) — the circle's
@@ -27,15 +27,12 @@ keeper sets the form, not any participant. Wire: `set-mode{mode}` /
 
 ## 2. The seat ring
 
-- Seats are occupied positions in join order as rendered; the machine's
-  canonical ordering is `seatedIdsOf()` — sorted participant ids, updated
-  on every join/leave via `SEATS_SET`.
+- The machine's canonical ring is `seatedIdsOf()` — **sorted participant
+  ids**, updated on every join/leave via `SEATS_SET`. Sorted ids are the
+  only ordering every client can derive identically (join timestamps are
+  client-subjective), so they are both the enforced travel order and the
+  UI's `nextId` indicator.
 - `earthwise` traverses the ring reversed; `sunwise` traverses it forward.
-- **Known divergence (documented, not fixed):** the UI's "next" indicator
-  (`roomBridge.nextId()`) sorts seats by `joinedAt`, while the machine's
-  pass destination sorts by peer id. The displayed next speaker may
-  therefore differ from the actual pass destination when join order and
-  id order disagree. The *enforced* order is the machine's.
 - Lobby-held and password-denied peers are never seated — they cannot
   hold the stick, request it, or take authority (`seatedIdsOf` /
   `activePeersOf` exclude them).
@@ -48,7 +45,7 @@ or `on_table`.
 | Prod UI action | Wire frame | Signed op | Legal when |
 |---|---|---|---|
 | Take the stick | `take-stick` / `request-stick` | `stick-request` | stick `on_table`, requester is seated |
-| Pass (circle round) | `pass` | `stick-pass` | caller is the holder; destination is **forced** to the next seat in `direction` — the op's `to` field is ignored by the machine |
+| Pass (circle round) | `pass` | `stick-pass` | caller is the holder; destination is **forced** to the next seat in `direction` — applied as `PASS`→`GRANT` atomically, so the transfer is immediate and deterministic on every client |
 | Pass (open round) | `pass` | `stick-table` | returns the stick to the table |
 | Place the stick down | `place-down` | `stick-table` | caller holds it |
 | Hand to a chosen seat | `give-stick{id}` / `host-set-current{id}` | `stick-give{to}` | open round throw, or manager/host placement; target must be seated |
@@ -62,11 +59,13 @@ Structural guarantees (these are machine-level, not convention):
 - **Questions resume to the holder, never the asker.** `QUESTION_ASK`
   parks `atSeatOf = asker` and `resumeTo = holder`; `QUESTION_END` (or a
   lost asker) always restores `resumeTo`.
-- **Orphan rule.** If the holder's seat empties (leave/kick/crash), the
-  authority enforces the orphan deadline (`ORPHAN_STICK_MS = 30 s`) and
-  the stick returns to the table — it can never be stranded on a ghost.
-  Locally, every client also emits `HOLDER_LOST` on peer-leave as a
-  fast-path.
+- **Orphan rule.** If the holder's seat empties (leave/kick/crash), every
+  client emits `HOLDER_LOST` on peer-leave and the stick returns to the
+  table immediately — it can never be stranded on a ghost.
+- **`offered` is a transient internal hop.** A `circle_round` pass enters
+  it only until the same applied op's `GRANT` resolves the destination;
+  it is rendered to the wire as `held` by the destined seat — prod's
+  vocabulary (`on_table`/`held`/`question`) has no offered state.
 - **`THROW` is rejected in `circle_round`** — the machine literally has
   no transition for it.
 

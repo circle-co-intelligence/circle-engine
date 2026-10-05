@@ -16,7 +16,6 @@ import { canonicalBytes, type Identity } from '../crypto/identity';
  */
 
 export const LEASE_MS = 5_000;
-export const ORPHAN_STICK_MS = 30_000;
 
 export function authorityOf(seatedPeerIds: string[]): string | null {
 	const sorted = seatedPeerIds.filter(Boolean).sort();

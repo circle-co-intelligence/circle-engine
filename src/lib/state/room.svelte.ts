@@ -338,7 +338,7 @@ export class RoomSession {
 			dropPeerKey(peerId);
 			this.syncSeats();
 			void this.rotateKeys('leave', peerId); // FS: departed peer can't read new frames
-			this.sendStick({ type: 'HOLDER_LOST' }); // orphan deadline: authority refines timing
+			this.sendStick({ type: 'HOLDER_LOST' }); // orphan rule: departed holder can't keep the stick
 		});
 		this.handle.onPeerStream((stream, peerId) => {
 			// trystero can refire onPeerStream for a peer with an equivalent
@@ -909,7 +909,16 @@ export class RoomSession {
 	private applyOp(env: OpEnvelope, replay = false) {
 		switch (env.op.t) {
 			case 'stick-request': this.sendStick({ type: 'REQUEST', by: env.senderId }); break;
-			case 'stick-pass': this.sendStick({ type: 'PASS' }); break;
+			case 'stick-pass':
+				this.sendStick({ type: 'PASS' });
+				// circle_round parks in `offered` pending GRANT — pass is a
+				// direct transfer (decline path is place-down), so grant the
+				// destination seat immediately; every client applies the same
+				// op→event sequence and converges identically
+				if (this.stick.getSnapshot().value === 'offered')
+					this.sendStick({ type: 'GRANT', to: this.stick.getSnapshot().context.resumeTo ?? '' });
+				break;
+			case 'stick-grant': this.sendStick({ type: 'GRANT', to: env.op.to }); break;
 			case 'stick-give': this.sendStick({ type: 'GIVE', to: env.op.to }); break;
 			case 'stick-table': this.sendStick({ type: 'TABLE' }); break;
 			case 'stick-resume': this.sendStick({ type: 'QUESTION_END' }); break;
@@ -1525,7 +1534,7 @@ export class RoomSession {
 	requestStick() { this.emitOp({ t: 'stick-request' }); }
 	passStick() {
 		this.emitOp(this.stick.getSnapshot().context.mode === 'circle_round'
-			? { t: 'stick-pass', to: '' }
+			? { t: 'stick-pass' }
 			: { t: 'stick-table' });
 	}
 	tableStick() { this.emitOp({ t: 'stick-table' }); }

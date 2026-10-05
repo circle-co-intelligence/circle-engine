@@ -11,7 +11,8 @@ import { setup, assign } from 'xstate';
  *  - open_round: stick may be requested, taken when on_table, or thrown to anyone seated.
  *  - question moment: stick rests `atSeatOf` the asker while the questioned party speaks;
  *    on release it resumes to `resumeTo` — never to the asker.
- *  - orphan deadline: if holder's seat empties, authority enforces holderless timeout → on_table.
+ *  - orphan rule: if the holder's seat empties, every client emits HOLDER_LOST
+ *    on peer-leave → on_table. The stick can never be stranded on a ghost.
  */
 
 export type StickContext = {
@@ -77,7 +78,7 @@ export const stickMachine = setup({
 		SEATS_SET: { actions: assign({ seats: ({ event }) => event.seats }) },
 		MODE_SET: { actions: assign({ mode: ({ event }) => event.mode }) },
 		DIRECTION_SET: { actions: assign({ direction: ({ event }) => event.direction }) },
-		HOLDER_LOST: '.on_table' // authority emits after orphan deadline — always safe
+		HOLDER_LOST: '.on_table' // emitted on holder peer-leave — always safe
 	},
 	states: {
 		on_table: {

@@ -42,7 +42,7 @@ export const op = z.discriminatedUnion('t', [
 	z.object({ t: z.literal('stick-request'), question: z.boolean().optional() }),
 	z.object({ t: z.literal('stick-grant'), to: participantId }),
 	z.object({ t: z.literal('stick-give'), to: participantId }), // prod: give-stick — holder hands to a specific seat
-	z.object({ t: z.literal('stick-pass'), to: participantId }),
+	z.object({ t: z.literal('stick-pass'), to: participantId.optional() }), // destination is forced to next seat — `to` is log notation only
 	z.object({ t: z.literal('stick-table') }), // return to table
 	z.object({ t: z.literal('stick-resume') }), // holder returns after question moment
 	z.object({ t: z.literal('mode-set'), mode: roomMode }),
