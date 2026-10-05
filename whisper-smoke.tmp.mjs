@@ -1,0 +1,31 @@
+import { chromium } from '@playwright/test';
+import { readFileSync } from 'node:fs';
+const wav = readFileSync('/tmp/jfk.wav');
+const b64 = wav.subarray(44).toString('base64');
+const b = await chromium.launch({ args: [] });
+const p = await b.newPage();
+p.on('console', m => { const t = m.text(); if (!t.includes('ownload') && !t.includes('vite]')) console.log('[pg]', t.slice(0, 200)); });
+await p.goto('http://localhost:5201/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+const r = await p.evaluate(async (b64) => {
+	const mod = await import('/src/lib/ai/whisper.ts');
+	const pipe = new mod.WhisperCaptionPipeline();
+	const segs = [];
+	pipe.onSegment = (s) => segs.push({ ...s, t: performance.now() });
+	const ok = await pipe.init();
+	if (!ok) return { ok };
+	const t0 = performance.now();
+	const bin = atob(b64);
+	const pcm16 = new Int16Array(bin.length / 2);
+	for (let i = 0; i < pcm16.length; i++) pcm16[i] = bin.charCodeAt(i * 2) | (bin.charCodeAt(i * 2 + 1) << 8);
+	const f32 = new Float32Array(pcm16.length);
+	for (let i = 0; i < f32.length; i++) f32[i] = pcm16[i] / 32768;
+	const FRAME = 4800;
+	for (let off = 0; off < f32.length; off += FRAME) pipe.push(f32.subarray(off, off + FRAME));
+	pipe.push(new Float32Array(16000 * 1.2));
+	for (let i = 0; i < 120 && segs.length === 0; i++) await new Promise((r) => setTimeout(r, 1000));
+	// keep waiting for a final after first partial
+	for (let i = 0; i < 60 && !segs.some(s => s.final); i++) await new Promise((r) => setTimeout(r, 1000));
+	return { ok, waited: (performance.now() - t0) / 1000, segs };
+}, b64).catch(e => ({ err: String(e?.message || e).slice(0, 500) }));
+console.log('RESULT', JSON.stringify(r, null, 1).slice(0, 1500));
+await b.close();

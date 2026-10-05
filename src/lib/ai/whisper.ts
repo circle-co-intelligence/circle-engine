@@ -73,7 +73,11 @@ function getAsr(): Promise<Asr | null> {
 		asrPromise = (async () => {
 			emitModel('asr', 'loading');
 			wireOrtProxy();
-			const hasGpu = 'gpu' in navigator;
+			// 'gpu' in navigator lies in headless/disabled-GPU browsers — the API
+			// exists but requestAdapter() returns null. Probe the adapter so the
+			// device order doesn't burn a failed webgpu attempt before wasm.
+			const gpu = (navigator as { gpu?: { requestAdapter(): Promise<unknown> } }).gpu;
+			const hasGpu = !!gpu && !!(await gpu.requestAdapter().catch(() => null));
 			const order =
 				DEVICE_PREF === 'auto'
 					? hasGpu
