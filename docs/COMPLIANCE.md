@@ -18,6 +18,7 @@ actually reads. It maps what the system *does* to what auditors ask.
 | UX funnel events (opt-in) | enum-only schema, no identity/IP/content; consent + GPC/DNT double-enforced | Analytics Engine `cic_ux_events` (~90d, immutable) |
 | Masked session replay (opt-in, in-room only) | all text `•`-masked, inputs/media/transcript/names blocked client-side | R2 `cic-ux-replay`, 30-day lifecycle, admin-gated, revoke deletes |
 | Traffic pageview (opt-in) | cookieless Counterscale; sanitized paths (`/room/{code}`→`/room`) | `cic-analytics` worker → AE `cic_web_metrics` + rollups R2 |
+| Exit-screen feedback (explicit submit) | user-authored free text + 1–5 rating; permit = attendee's sessionToken | R2 `cic-ux-replay` `feedback/`, 90-day lifecycle, admin-gated |
 
 ## Access control
 

@@ -111,12 +111,12 @@ function patchFetch() {
 		// telemetry lanes: /api/ux/* is a REAL endpoint in prod (Pages
 		// Function → Analytics Engine + R2) — let it through. In dev there
 		// is no function; swallowing it with 204 keeps the emitters quiet.
-		if (path.startsWith('/api/ux/')) {
+		if (path.startsWith('/api/ux/') || path === '/api/feedback') {
 			if (!import.meta.env.DEV) return orig(input, init);
 			return new Response(null, { status: 204 });
 		}
 		// remaining telemetry sinks — no backend exists anywhere
-		if (path === '/api/room-ui/events' || path === '/api/feedback')
+		if (path === '/api/room-ui/events')
 			return new Response(null, { status: 204 });
 
 		// version.json → our own build stamp (prevents their reload loop)

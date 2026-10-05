@@ -156,3 +156,12 @@ Residuals: replay shows interaction geometry (where people click); the
 If-Modified-Since scheme is "tracking" under GDPR but sits behind the same
 consent; a compromised `cic-analytics`/Pages origin could accept forged
 datapoints (bounded: enum vocabulary only, no exfil target).
+
+**Session feedback** (`/api/feedback`, separate from telemetry): the exit
+screen's rating + optional free text is user-authored content sent on an
+explicit submit — the submit *is* the consent. The `permit` field is the
+attendee's welcome sessionToken (presence credential, format-checked only —
+bridge tokens aren't server-verifiable). Objects land under
+`feedback/{room}/{session}/` in `cic-ux-replay`, never public, admin-gated
+by `UX_ADMIN`, 90-day lifecycle. The endpoint is a write-once sink — the
+only abuse ceiling needed is bounded free-text blobs in a private bucket.

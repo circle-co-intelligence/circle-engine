@@ -151,6 +151,11 @@ class RoomBridge {
 		}
 	}
 
+	// feedbackPermit carried in every snapshot — the welcome sessionToken
+	// doubles as the presence credential the exit screen posts back to
+	// /api/feedback (prod semantics: server-issued feedback authorization)
+	private feedbackToken: string | null = null;
+
 	private unmountBadges: (() => void) | null = null;
 	private bindSfu(session: RoomSession) {
 		this.sfu.bind(session);
@@ -409,7 +414,7 @@ class RoomBridge {
 			recordingSessions: this.recordingSessions(),
 			chat: s.chatLog.map((c) => ({ from: this.prodId(c.from), name: c.from === s.selfId ? s.displayName : s.names[c.from] ?? 'Peer', text: c.text, at: Date.now(), whisper: c.whisper })),
 			transcript: [],
-			feedbackPermit: true,
+			feedbackPermit: this.feedbackToken,
 			// prod's "Open billing dashboard" builds new URL('/billing', this) —
 			// point it at our origin so it lands on the real billing route
 			dashboardUrl: typeof location === 'undefined' ? null : location.origin
@@ -528,6 +533,7 @@ class RoomBridge {
 				let tok = issuedTokens.get(this.code);
 				if (!tok) issuedTokens.set(this.code, (tok = new Set()));
 				tok.add(token);
+				this.feedbackToken = token;
 				// prod's own pc gets the same ICE set the mesh lanes resolved —
 				// loopback SFU works with host candidates, but a configured TURN
 				// broker (or env TURN) gives the cloud-SFU path a routable pc

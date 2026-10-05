@@ -47,7 +47,11 @@
 			<input bind:value={code} inputmode="numeric" placeholder="123456" />
 		</label>
 		<button type="submit">Join circle</button>
-		<p><a href="{base}/">← Back</a></p>
+		<p class="foot">
+			<a href="{base}/">← Back</a>
+			<span>·</span>
+			<a href="https://github.com/circle-co-intelligence/circle-engine" rel="noopener" target="_blank">GitHub</a>
+		</p>
 	</form>
 </main>
 
@@ -89,4 +93,12 @@
 		cursor: pointer;
 	}
 	a { color: #1f4d3a; }
+	.foot {
+		display: flex;
+		gap: 0.6rem;
+		justify-content: center;
+		font-size: 0.85rem;
+		margin: 0;
+	}
+	.foot span { color: #b5ada0; }
 </style>
