@@ -260,7 +260,8 @@ storage, and the model CDN.
 | Recording | mediabunny WebM → OPFS/IndexedDB journal | `src/lib/rec/recorder.ts` |
 | Notes | Yjs + TipTap, synced over the op channel | `src/lib/notes/` |
 
-Wire-compatibility contract: `docs/PROTOCOL.md`. Security invariants:
+Wire-compatibility contract: `docs/PROTOCOL.md`. Talking-circle flow &
+rules: `docs/TALKING-CIRCLE.md`. Security invariants:
 `docs/SECURITY-MODEL.md`.
 
 ## Models
@@ -376,7 +377,7 @@ static/cic/          vendored production app (source of truth)
 static/site/         vendored marketing site (rendered at /)
 static/models/       gitignored — fetched at runtime from upstream
 scripts/             patch-pages.mjs, fetch-models.sh, licenses.mjs
-docs/                PROTOCOL.md, SECURITY-MODEL.md, DESIGN-DELTAS.md
+docs/                PROTOCOL.md, TALKING-CIRCLE.md, SECURITY-MODEL.md, DESIGN-DELTAS.md
 ```
 
 ## Licenses

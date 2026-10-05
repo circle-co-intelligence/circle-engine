@@ -33,6 +33,10 @@ the wire contract our implementation must remain compatible with.
 `circle_round`, `open_round`, `sunwise`, `earthwise`, `heartMode`,
 `speakingTimerEveryone`, `canManageRoom`.
 
+The talking-circle flow and rules built on these fields are specified in
+`docs/TALKING-CIRCLE.md` (modes, seat order, stick state machine, timers,
+floor-vs-mic sovereignty, authority).
+
 ## Design tokens (deployed CSS, `0.B0NZKGKX.css`)
 
 Fonts: Lato (sans), EB Garamond (serif), self-hosted woff2.
