@@ -242,7 +242,8 @@ export const roomState = z.object({
 		selfMuted: z.boolean(),
 		autoMuted: z.boolean(),
 		remotelyMuted: z.boolean(),
-		joinedAtOp: opId
+		joinedAtOp: z.string(), // op id when known; '' is fine — policy never reads it
+		recordingConsent: recordingConsent.optional() // deny-veto input for recording-start
 	})),
 	stick: z.object({
 		state: stickState,

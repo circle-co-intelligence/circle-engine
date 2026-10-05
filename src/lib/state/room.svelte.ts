@@ -87,6 +87,7 @@ export class RoomSession {
 	consents = $state<Record<string, 'granted' | 'denied'>>({});
 	recordingProposer = $state<string | null>(null); // mesh peerId that proposed
 	recording = $state(false);
+	recordingStartedBy = $state<string | null>(null); // recording-start op author — policy gate for recording-stop
 	e2eeActive = $state(false);
 	breakoutCount = $state(0);
 	pendingBreakout = $state<string | null>(null);
@@ -148,10 +149,19 @@ export class RoomSession {
 	}
 	/** authority = lex-min among SEATED peers — held (lobby) and denied peers
 	 *  can't take authority over the room; while we're waiting we exclude
-	 *  ourselves so every session agrees on the same authority */
+	 *  ourselves so every session agrees on the same authority.
+	 *  staleAuthorities: peers that missed the heartbeat lease — demoted for
+	 *  the rest of the session (a GC-paused keeper must not flap the room) */
 	authorityId = $derived(
-		authorityOf(authorityListOf(this.selfId, this.activePeers, this.waitingSelf))
+		authorityOf(
+			authorityListOf(this.selfId, this.activePeers, this.waitingSelf).filter(
+				(id) => !this.staleAuthorities.has(id)
+			)
+		)
 	);
+	private staleAuthorities = $state<Set<string>>(new Set());
+	private authBeatAt = new Map<string, number>(); // authorityId → last heartbeat receipt (our clock)
+	private lastAuthorityId: string | null = null;
 	roomEnded = $state(false); // room-end op applied — bridge emits circle_closed
 	/** mesh peerId → declared caption/translation languages (drives tr-fanout lanes) */
 	peerLangs = $state<Record<string, string[]>>({});
@@ -335,6 +345,8 @@ export class RoomSession {
 			delete this.peerLangs[peerId];
 			this.notifyTrTargets();
 			delete this.caps[peerId];
+			this.syncReplyAt.delete(peerId);
+			this.authBeatAt.delete(peerId);
 			dropPeerKey(peerId);
 			this.syncSeats();
 			void this.rotateKeys('leave', peerId); // FS: departed peer can't read new frames
@@ -394,6 +406,26 @@ export class RoomSession {
 
 		// authority heartbeat — lease renewal; missed 2x -> takeover via authorityOf()
 		this.heartbeat = window.setInterval(() => {
+			// lease watchdog: an authority that misses two beats is demoted
+			// (peer-leave is the fast path; this catches the frozen-tab case
+			// where the mesh still reports the peer connected)
+			const auth = this.authorityId;
+			if (auth && auth !== this.selfId && !this.staleAuthorities.has(auth)) {
+				const lastBeat = this.authBeatAt.get(auth) ?? Date.now();
+				if (Date.now() - lastBeat > LEASE_MS * 2)
+					this.staleAuthorities = new Set([...this.staleAuthorities, auth]);
+			}
+			if (auth !== this.lastAuthorityId) {
+				// takeover: the new authority opens a fresh epoch and replays the
+				// signed log so peers adopt the regime (applyReplay is
+				// epoch-tolerant; late receivers converge identically)
+				if (auth === this.selfId && this.lastAuthorityId !== null) {
+					this.oplog.advanceEpoch();
+					this.handle.sendRealtime({ t: 'op-sync', ops: [...this.oplog.entries] });
+					this.handle.sendRealtime({ t: 'authority-heartbeat', leaseUntil: Date.now() + LEASE_MS });
+				}
+				this.lastAuthorityId = auth;
+			}
 			if (this.authorityId === this.selfId) {
 				this.handle.sendRealtime({ t: 'authority-heartbeat', leaseUntil: Date.now() + LEASE_MS });
 			}
@@ -435,13 +467,29 @@ export class RoomSession {
 				transcriptScope: this.transcriptScope, recording: this.recording,
 				maxSeats: 12, questionMoments: true
 			},
-			seats: {}, occupants: {},
+			seats: Object.fromEntries(this.stickCtx.seats.map((id, i) => [String(i), id])),
+			occupants: Object.fromEntries(
+				[this.selfId, ...this.activePeers].map((id) => [
+					id,
+					{
+						name: this.names[id] ?? '',
+						raisedHand: this.raisedHands.has(id),
+						// peers join muted; absent a muted frame, assume muted — the
+						// safer claim is never "they may speak" without evidence
+						selfMuted: id === this.selfId ? this.selfMuted : (this.peerMuted[id]?.audio ?? true),
+						autoMuted: false,
+						remotelyMuted: id === this.selfId && this.remoteMutedBy.audio === 'audio',
+						joinedAtOp: '',
+						recordingConsent: this.consents[id] ?? 'pending'
+					}
+				])
+			),
 			stick: {
 				state: this.stickState === 'held' ? 'held' : 'on_table',
 				holderId: this.stickHolderId, atSeatOf: this.stickCtx.atSeatOf,
 				resumeTo: this.stickCtx.resumeTo, questionActive: this.stickState === 'question'
 			},
-			recording: { active: this.recording, startedBy: null, consentRequired: true },
+			recording: { active: this.recording, startedBy: this.recordingStartedBy, consentRequired: true },
 			authorityId: this.authorityId,
 			roles: {
 				miloBrain: this.roles?.['milo-brain'] ?? null,
@@ -668,13 +716,24 @@ export class RoomSession {
 				if (shouldHonorAccessDenied(peerId, this.gateView()))
 					this.accessDenied = true;
 				break;
-			case 'op-sync':
+			case 'authority-heartbeat':
+				this.authBeatAt.set(peerId, Date.now());
+				break;
+			case 'op-sync': {
 				// member replayed its signed op-log — each envelope re-verifies
-				// signature + policy; epoch fencing follows the replayed history
+				// signature + policy; epoch fencing follows the replayed history.
+				// If the log lands at a higher epoch while we still believed
+				// ourselves authority, our regime was demoted while we were
+				// absent — accept it (self-demote) instead of fighting the fork.
+				const wasAuthority = this.authorityId === this.selfId;
+				const prevEpoch = this.oplog.epoch;
 				void this.policyReady.then(() => {
 					for (const env of msg.ops) this.onOp(env, peerId, true);
+					if (wasAuthority && this.oplog.epoch > prevEpoch && !this.staleAuthorities.has(this.selfId))
+						this.staleAuthorities = new Set([...this.staleAuthorities, this.selfId]);
 				});
 				break;
+			}
 			case 'chat':
 				this.chatLog = [...this.chatLog, { from: peerId, text: msg.text, whisper: !!msg.whisperTo }];
 				break;
@@ -874,6 +933,7 @@ export class RoomSession {
 
 	private pendingSigOps: OpEnvelope[] = [];
 	private pendingAuthOps: OpEnvelope[] = [];
+	private syncReplyAt = new Map<string, number>(); // peerId → last heal-op-sync sent (rate limit)
 
 	private onOp(env: OpEnvelope, _peerId: string, replay = false) {
 		// replay=true for op-sync catch-up — the joiner's fresh log accepts the
@@ -889,6 +949,15 @@ export class RoomSession {
 			// second application harmless
 			else if (denies.every((d) => /requires manager/.test(d))) {
 				if (!this.pendingAuthOps.some((p) => p.opId === env.opId)) this.pendingAuthOps.push(env);
+			}
+			// stale-epoch ops mean the sender lags a regime change (missed the
+			// takeover op-sync) — heal them by replaying our log, rate-limited
+			else if (denies.every((d) => d.startsWith('stale epoch'))) {
+				const last = this.syncReplyAt.get(_peerId) ?? 0;
+				if (Date.now() - last > 10_000) {
+					this.syncReplyAt.set(_peerId, Date.now());
+					this.handle.sendRealtime({ t: 'op-sync', ops: [...this.oplog.entries] }, _peerId);
+				}
 			}
 			// 'replay' = op-sync echo of an op we already applied — expected, not a fault
 			else if (!denies.every((d) => d === 'replay'))
@@ -997,9 +1066,10 @@ export class RoomSession {
 				if (p.recording === false && this.recording) { this.recording = false; void this.finishRecording(); }
 				break;
 			}
-			case 'recording-start': this.recording = true; this.consentAsked = false; void this.maybeRecord(); break;
+			case 'recording-start': this.recording = true; this.recordingStartedBy = env.senderId; this.consentAsked = false; void this.maybeRecord(); break;
 			case 'recording-stop':
 				this.recording = false;
+				this.recordingStartedBy = null;
 				this.consents = {};
 				this.consentAsked = false;
 				this.recordingProposer = null;

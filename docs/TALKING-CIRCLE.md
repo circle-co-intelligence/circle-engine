@@ -45,11 +45,11 @@ or `on_table`.
 | Prod UI action | Wire frame | Signed op | Legal when |
 |---|---|---|---|
 | Take the stick | `take-stick` / `request-stick` | `stick-request` | stick `on_table`, requester is seated |
-| Pass (circle round) | `pass` | `stick-pass` | caller is the holder; destination is **forced** to the next seat in `direction` — applied as `PASS`→`GRANT` atomically, so the transfer is immediate and deterministic on every client |
+| Pass (circle round) | `pass` | `stick-pass` | caller is the holder (policy-enforced); destination is **forced** to the next seat in `direction` — applied as `PASS`→`GRANT` atomically, so the transfer is immediate and deterministic on every client |
 | Pass (open round) | `pass` | `stick-table` | returns the stick to the table |
-| Place the stick down | `place-down` | `stick-table` | caller holds it |
-| Hand to a chosen seat | `give-stick{id}` / `host-set-current{id}` | `stick-give{to}` | open round throw, or manager/host placement; target must be seated |
-| End a question moment | `question-end` | `stick-resume` | a question is active |
+| Place the stick down | `place-down` | `stick-table` | holder or manager only (policy-enforced) |
+| Hand to a chosen seat | `give-stick{id}` / `host-set-current{id}` | `stick-give{to}` | holder or manager (policy-enforced); target must be seated |
+| End a question moment | `question-end` | `stick-resume` | holder, asker (`atSeatOf`), or manager (policy-enforced) |
 
 Structural guarantees (these are machine-level, not convention):
 
@@ -91,8 +91,8 @@ not operate anyone's mic. The mute invariant is absolute:
 effectiveMuted = selfMuted OR autoMuted OR remotelyMuted
 ```
 
-- Remote unmute is forbidden by policy — `mute-set{on:false}` is dropped;
-  `unmute-remote` is a hard deny.
+- Remote unmute is impossible at the protocol level — `mute-set{on:false}`
+  is policy-denied unconditionally, for everyone including the keeper.
 - A host may force-*close* a mic (`mute-set{on:true}`, manager-only) —
   e.g. a non-holder speaking over the circle — but can never open one.
 - `hand-raise`/`hand-lower` are realtime signals only: they advertise
@@ -100,26 +100,50 @@ effectiveMuted = selfMuted OR autoMuted OR remotelyMuted
 
 ## 6. Who may command what (policy gate, `cic.rego`)
 
+Every op is Ed25519-signed and epoch-fenced; denials reject the op on
+every client identically. The whole matrix is asserted against the
+compiled wasm in `src/lib/policy/cic.policy.test.ts`.
+
 | Op | Who |
 |---|---|
-| `stick-request`, `stick-table`, `stick-resume` | any seated participant |
-| `stick-pass` | current holder only (`holder only` deny) |
-| `mode-set`, `direction-set`, `turn-timer-set`, `config-set` | `canManageRoom` (authority or co-host) |
-| `mute-set`, `peer-remove`, `password-set`, `lobby-set`, `breakout-*` | `canManageRoom` |
+| `stick-request` | any seated participant |
+| `stick-pass` | current holder only |
+| `stick-table`, `stick-give` | holder or manager |
+| `stick-resume` | holder, question asker (`atSeatOf`), or manager |
+| `stick-grant`, `room-end` | manager only |
+| `mode-set`, `direction-set`, `config-set`, `turn-timer-set`, `heart-set`, `lobby-set`, `co-host-set`, `started-set`, `host-locks-set`, `appearance-set`, `ai-set`, `milo-wake-set`, `tr-fanout-set`, `password-set`, `breakout-open`, `breakout-close`, `mute-set`, `peer-remove` | manager only (`canManageRoom` = authority or co-host) |
 | `peer-remove` of self | denied — you cannot kick yourself |
-| `erasure{scope:'participant'}` | authority only |
-| `recording-start` | requires **universal** `recording-consent` |
-| `caption-capture` while `heartMode` | denied — Heart-Sharing disables all capture |
+| `mute-set{on:false}` | denied **unconditionally** — remote unmute is impossible even for the keeper |
+| `seat-claim` on an occupied seat | denied |
+| `erasure{scope:'participant'}` | authority only; `scope:'self'` is free |
+| `recording-stop` | starter or manager |
 
-All ops are Ed25519-signed and epoch-fenced; denials reject the op on
-every client identically.
+### Consent is exclusion, not a vote to start
+
+Recording is **consent-scoped**: once started, the record contains only
+participants whose `recordingConsent` is `granted` — the recorder composes
+`consentedPeers` only, silence counts as not-granted (fail-closed), and
+heart mode forces all capture off at apply time. Policy's part is the
+hard veto: a `recording-start` op is denied if *any* occupant explicitly
+denied. The realtime `recording-consent` gather runs before the op; the
+denial veto runs at apply time, on every client.
 
 ## 7. Authority (the circle's keeper is a protocol role, not a server)
 
-- Authority = lexicographically smallest seated peer id — deterministic,
-  no negotiation, identical on every client.
-- Lease: `authority-heartbeat` every 2.5 s; two missed beats → next seat
-  takes over and `epoch++`. Stale-epoch ops are rejected — no split-brain.
+- Authority = lexicographically smallest seated peer id, excluding demoted
+  keepers — deterministic, no negotiation, identical on every client.
+- Lease: the authority emits `authority-heartbeat` every 2.5 s
+  (`LEASE_MS/2`). Two missed beats (>10 s, our clock) → the keeper is
+  demoted **session-permanently** and the next seat takes over. Peer-leave
+  is the fast path; the watchdog catches the frozen-but-connected case.
+- Takeover: the new authority calls `oplog.advanceEpoch()` (epoch++),
+  broadcasts `op-sync` of the signed log plus an immediate heartbeat.
+  Receivers replay via the epoch-tolerant path and converge; a peer that
+  still emits stale-epoch ops is healed by a rate-limited `op-sync` reply,
+  and a returning keeper that sees the advanced log **self-demotes**
+  rather than fork the room.
+- Epoch fencing: ops carry `roomEpoch`; anything under the current epoch
+  is rejected — the old regime cannot issue ops after takeover.
 - `host-set-current{id}` and `'table'` let the keeper place or retrieve
   the stick directly (`stick-give` / `stick-table` ops).
 
@@ -147,6 +171,8 @@ every client identically.
 3. A question borrows the floor; it always returns to the holder.
 4. Nobody's mic is ever opened remotely; the floor and the microphone
    are separate sovereignties.
-5. Mode/direction/timer changes require the keeper role.
+5. Room-form changes (mode/direction/timer/lobby/appearance/end) require
+   the keeper role — enforced in policy, asserted by `cic.policy.test.ts`.
 6. Timer expiry advises; it never interrupts.
-7. Recording requires unanimous consent; Heart-Sharing forbids it.
+7. The record contains only granting participants — a denial is a policy
+   veto, silence is excluded; Heart-Sharing forbids all capture.
