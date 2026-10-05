@@ -40,6 +40,8 @@ const config = {
 					'https://cic-dsp.regenleadership.workers.dev',
 					'https://cic-sfu.regenleadership.workers.dev',
 					'https://cic-pay.regenleadership.workers.dev',
+					// consent-gated cookieless pageview hits (Counterscale worker)
+					'https://cic-analytics.regenleadership.workers.dev',
 					'wss://cic-signaling.regenleadership.workers.dev',
 					'https://github.com',
 					'https://*.githubusercontent.com',

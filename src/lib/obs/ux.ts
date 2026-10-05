@@ -26,7 +26,6 @@ import { base } from '$app/paths';
 // ------------------------------------------------------------- constants
 const CONSENT_KEY = 'cic.uxConsent.v1';
 const SESSION_KEY = 'cic.uxSession';
-const CS_LASTMOD = 'cic.uxCsLastmod';
 const BUFFER_MAX = 120;
 const BATCH_MAX = 30;
 const BATCH_BYTES = 48 * 1024;
@@ -389,18 +388,24 @@ class Ux {
 	}
 
 	// ---------------------------------------------------------- counterscale
+	// Upstream's cookieless scheme verbatim: GET /cache returns {ht} and a
+	// Last-Modified encoding the hit count; the BROWSER's HTTP cache resends
+	// it as If-Modified-Since on the next load (fetch can't set that header
+	// itself — it's forbidden). Then /collect carries ht as a param.
 	private async traffic() {
 		if (!CS_BASE || !this.sess) return;
 		try {
-			const lastMod = sessionStorage.getItem(CS_LASTMOD);
-			const r = await fetch(
+			let ht = '';
+			try {
+				const c = await fetch(`${CS_BASE}/cache?sid=circle-engine`, { cache: 'no-cache' });
+				const j = (await c.json()) as { ht?: number };
+				if (j.ht) ht = `&ht=${Math.min(3, Math.max(1, j.ht))}`;
+			} catch {}
+			await fetch(
 				`${CS_BASE}/collect?sid=circle-engine&h=${encodeURIComponent(location.host)}&p=${encodeURIComponent(
 					sanitizePath()
-				)}&r=${encodeURIComponent(document.referrer ? new URL(document.referrer).host : '')}`,
-				lastMod ? { headers: { 'if-modified-since': lastMod } } : undefined
+				)}&r=${encodeURIComponent(document.referrer ? new URL(document.referrer).host : '')}${ht}`
 			);
-			const lm = r.headers.get('last-modified');
-			if (lm) sessionStorage.setItem(CS_LASTMOD, lm);
 		} catch {
 			/* traffic lane must never break the app */
 		}

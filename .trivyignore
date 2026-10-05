@@ -3,3 +3,55 @@
 # built or deployed by this project.
 DS-0002
 DS-0017
+
+# ---------------------------------------------------------------------------
+# vendor/counterscale/pnpm-lock.yaml — upstream's DEV-dependency tree
+# (vitest/eslint/playwright/react-router build tooling). None of these
+# versions appear in our own lockfile; the deployed cic-analytics worker
+# bundles only the built Remix server, not its dev toolchain. Upstream
+# dependency hygiene is tracked at github.com/benvinegar/counterscale.
+# Ignoring the CVE IDs (not the file) keeps any future flag visible.
+# ---------------------------------------------------------------------------
+CVE-2025-59057
+CVE-2025-64756
+CVE-2025-65945
+CVE-2026-0933
+CVE-2026-102276
+CVE-2026-102278
+CVE-2026-12151
+CVE-2026-13149
+CVE-2026-14257
+CVE-2026-1526
+CVE-2026-19481
+CVE-2026-21884
+CVE-2026-22029
+CVE-2026-2229
+CVE-2026-26996
+CVE-2026-27606
+CVE-2026-27903
+CVE-2026-27904
+CVE-2026-32141
+CVE-2026-33228
+CVE-2026-33245
+CVE-2026-33671
+CVE-2026-34077
+CVE-2026-35209
+CVE-2026-42211
+CVE-2026-42342
+CVE-2026-44705
+CVE-2026-45623
+CVE-2026-4800
+CVE-2026-48779
+CVE-2026-55685
+CVE-2026-59869
+CVE-2026-67213
+CVE-2026-67214
+CVE-2026-69152
+CVE-2026-73086
+CVE-2026-73646
+CVE-2026-84375
+CVE-2026-93687
+CVE-2026-96780
+GHSA-5p4m-2wfm-xmqj
+GHSA-f88m-g3jw-g9cj
+GHSA-rgj7-g3m4-5g8c
