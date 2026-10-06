@@ -96,7 +96,11 @@ export const op = z.discriminatedUnion('t', [
 		// the floor, he speaks into the open floor between turns
 		roundSummary: z.boolean().optional(), // summarize at each circle_round completion
 		equityNudge: z.boolean().optional(),  // nudge when talk-time skews and floor is free
-		welcome: z.boolean().optional()       // greet a newly seated peer by name
+		welcome: z.boolean().optional(),      // greet a newly seated peer by name
+		// persistent host-anchored memory — distill + recall across sessions
+		// of the same room. On by default once ai is enabled; off stops
+		// writing (stored items are wiped via 'milo forget everything').
+		memory: z.boolean().optional()
 	}),
 	z.object({ t: z.literal('milo-wake-set'), mode: z.enum(['hey_milo', 'click']) }),
 	z.object({ t: z.literal('mute-set'), id: participantId, kind: z.enum(['audio', 'video']), on: z.boolean() }), // authority remote-mute — can never force-open
@@ -181,6 +185,22 @@ export const realtimeMessage = z.discriminatedUnion('t', [
 	// milo-brain seat — feeds Milo's transcriptWindow without rendering as a
 	// caption. Never broadcast; heartMode suppresses these entirely.
 	z.object({ t: z.literal('milo-hear'), text: z.string().max(500), lang: z.string().max(12).optional() }),
+	// milo-mem — persistent memory sync between the brain seat and the
+	// authority (the room's memory host, sealed per-room in its journal):
+	//   brain → authority {items}        store these distilled facts
+	//   brain → authority {req:true}     send me this room's memories
+	//   authority → brain {items,recall} recall payload for the session
+	//   brain → authority {wipe}         manager-gated room wipe
+	//   brain → authority {forget}       purge one speaker's items
+	// Never broadcast — targeted sends only, text is sealed at rest anyway.
+	z.object({
+		t: z.literal('milo-mem'),
+		req: z.boolean().optional(),
+		recall: z.boolean().optional(),
+		wipe: z.boolean().optional(),
+		forget: z.string().max(80).optional(), // peerId to purge
+		items: z.array(z.object({ text: z.string().max(300), by: z.string().max(80).optional() })).max(50).optional()
+	}),
 	z.object({ t: z.literal('tr-lang'), lang: z.string().max(12), langs: z.array(z.string().max(12)).max(8) }), // participant's caption/translation language preference
 	// translated segment fanout — the speaker's device translates its own ASR
 	// output and ships tr-caption/caption-audio payloads to subscribers; the

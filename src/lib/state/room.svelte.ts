@@ -31,6 +31,16 @@ import type { SipLeg } from '../media/sip';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import { noteArtifact } from '../bridge/artifacts';
 import {
+	addMemories,
+	loadMemories,
+	forgetPeer,
+	wipeRoom,
+	memoryBlock,
+	parseDistilled,
+	DISTILL_PROMPT,
+	type MemItem
+} from '../ai/memory';
+import {
 	JOIN_PROOF_WINDOW_MS,
 	activePeersOf,
 	authorityListOf,
@@ -202,6 +212,9 @@ export class RoomSession {
 		instructions?: string; voice?: string; standby?: boolean; scope?: string; storeTranscript?: boolean;
 		brain?: 'auto' | 'local' | 'cloud';
 		roundSummary?: boolean; equityNudge?: boolean; welcome?: boolean;
+		// persistent host-anchored memory — sealed journal on the authority's
+		// device, recalled every session. On by default once ai is enabled.
+		memory?: boolean;
 	}>({ name: 'Milo', enabled: false });
 	/** per-speaker Milo hearing consent — peerId → ear-set{on}. Milo's context
 	 *  only ever contains lines from consenting speakers. */
@@ -254,6 +267,12 @@ export class RoomSession {
 	/** which peer's tagged 'milo' stream currently fills remoteStreams['milo'] */
 	private miloStreamFrom: string | null = null;
 	private streamTags = new Map<MediaStream, string>(); // published stream → smap tag
+	// host-anchored memory: the authority's sealed journal (ai/memory.ts) is
+	// the store; the brain keeps the session's recall view here for prompts
+	private miloMem: MemItem[] = [];
+	private memRecalled = false; // brain seat requests recall once per session
+	private linesSinceDistill = 0;
+	private lastDistillAt = 0;
 	private lastNudgeAt = 0; private lastSummaryAt = 0; private welcomed = new Set<string>();
 	private publishedStreams = new Set<MediaStream>();
 	/** beyond-GCC: RTT-gradient pre-emption bumps this before adaptMedia reads it */
@@ -642,6 +661,7 @@ export class RoomSession {
 		this.retryAuthOps();
 		// milo brain is elected now, but the ~100MB GGUF loads lazily on first address
 		if (this.roles?.['milo-brain'] === this.selfId && this.miloState === 'off') this.miloState = 'standby';
+		if (this.roles?.['milo-brain'] === this.selfId) this.requestMemRecall();
 	}
 
 	private async rotateKeys(kind: 'join' | 'leave', peerId: string) {
@@ -835,6 +855,9 @@ export class RoomSession {
 				if (!this.miloEars[peerId]) break;
 				if (this.recording && !this.isConsented(peerId)) break;
 				this.ingestMiloLine(peerId, msg.text, msg.lang);
+				break;
+			case 'milo-mem':
+				this.onMiloMem(peerId, msg);
 				break;
 			case 'hand-raise':
 				this.raisedHands = new Set([...this.raisedHands, peerId]);
@@ -1134,6 +1157,8 @@ export class RoomSession {
 				// enabled flips Milo's whole surface: the ear lane, the state
 				// badge, and the brain's willingness to generate
 				if (patch.enabled !== undefined) this.refreshEar();
+				if ((patch.memory === true || patch.enabled === true) && this.roles?.['milo-brain'] === this.selfId)
+					this.requestMemRecall();
 				if (patch.enabled === false && wasEnabled !== false) {
 					this.milo.interrupt();
 					this.miloState = 'off';
@@ -1196,6 +1221,10 @@ export class RoomSession {
 				// blobs addressed to the host — out of this op's reach).
 				const target = env.op.scope === 'self' ? env.senderId : env.op.target;
 				this.purgeContributions(target);
+				// Milo's journal too — the memory host purges items attributed
+				// to (or naming) the erased peer; a no-op on every other device
+				void forgetPeer(this.roomCode, this.roomSecret, target, this.names[target]);
+				this.miloMem = this.miloMem.filter((m) => m.by !== target);
 				break;
 			}
 			case 'recording-stop':
@@ -1675,8 +1704,9 @@ export class RoomSession {
 	 *  the room's ai-set pinned brain:'cloud' (zero-retention rooms) */
 	private async miloAsk(prompt: string, lang?: string) {
 		const opts = { lang, instructions: this.ai.instructions, name: this.ai.name };
+		const promptWithMem = this.miloMem.length ? memoryBlock(this.miloMem) + prompt : prompt;
 		try {
-			const reply = await this.milo.ask(prompt, this.miloWindow, opts);
+			const reply = await this.milo.ask(promptWithMem, this.miloWindow, opts);
 			if (this.milo instanceof CloudMilo) this.meter?.tickCall(this.milo.lastCallId);
 			return reply;
 		} catch (e) {
@@ -1686,7 +1716,7 @@ export class RoomSession {
 				const local = new Milo();
 				local.onSay = this.milo.onSay;
 				const ok = await local.init({ modelUrl: await llmModelUrl(), maxContextTokens: 2048 });
-				if (ok) { this.milo = local; return local.ask(prompt, this.miloWindow, opts); }
+				if (ok) { this.milo = local; return local.ask(promptWithMem, this.miloWindow, opts); }
 			}
 			return '';
 		}
@@ -1716,12 +1746,14 @@ export class RoomSession {
 		if (!this.ai.enabled || this.heartMode || !text.trim()) return;
 		if (this.miloLineSeen(speakerId, text)) return;
 		this.miloWindow = [...this.miloWindow.slice(-39), `${this.miloLabel(speakerId, lang)} ${text.trim()}`];
-		void this.miloTrigger(text, lang);
+		this.linesSinceDistill++;
+		this.maybeDistill();
+		void this.miloTrigger(text, lang, speakerId);
 	}
 
 	/** direct-address check + generation — runs only on the brain seat and
 	 *  only while ai.enabled && !ai.standby && !heartMode */
-	private async miloTrigger(raw: string, lang?: string) {
+	private async miloTrigger(raw: string, lang?: string, speakerId?: string) {
 		if (!this.ai.enabled || this.ai.standby || this.heartMode) return;
 		if (this.roles?.['milo-brain'] !== this.selfId) return;
 		const src = raw.trim();
@@ -1734,8 +1766,60 @@ export class RoomSession {
 		this.miloState = 'listening';
 		this.handle.sendRealtime({ t: 'milo-state', state: 'listening' });
 		await this.ensureMilo();
-		await this.miloAsk(match[1], lang);
+		const ask = match[1].trim();
+		if (await this.miloMemCommand(ask, speakerId ?? this.selfId)) {
+			this.miloState = 'standby';
+			return;
+		}
+		await this.miloAsk(ask, lang);
 		this.miloState = this.milo.state;
+	}
+
+	/** memory verbs addressed at Milo — handled before the brain call so a
+	 *  'remember that …' never becomes a question he has to interpret.
+	 *  Returns true when the line was a memory command (already acked). */
+	private async miloMemCommand(ask: string, speakerId: string): Promise<boolean> {
+		const remembered = ask.match(/^(?:please\s+)?remember\s+(?:that\s+)?(.+)/i);
+		if (remembered) {
+			if (this.memoryOn) {
+				this.persistMem([{ text: remembered[1].trim(), by: speakerId }]);
+				this.sayAsMilo("Noted — I'll remember that.");
+			} else this.sayAsMilo('Memory is off in this room.');
+			return true;
+		}
+		if (/^(?:please\s+)?forget\s+everything/i.test(ask)) {
+			if (!this.canManage(speakerId)) {
+				this.sayAsMilo('Only a host or co-host can wipe my memory.');
+				return true;
+			}
+			if (this.authorityId === this.selfId) {
+				await wipeRoom(this.roomCode);
+				this.miloMem = [];
+			} else if (this.authorityId) {
+				this.handle.sendRealtime({ t: 'milo-mem', wipe: true }, this.authorityId);
+				this.miloMem = [];
+			}
+			this.sayAsMilo('Forgotten — this room starts fresh with me.');
+			return true;
+		}
+		if (/^(?:please\s+)?forget\s+(?:me|what\s+i\s+(?:said|told\s+you))/i.test(ask)) {
+			if (this.authorityId === this.selfId)
+				await forgetPeer(this.roomCode, this.roomSecret, speakerId, this.names[speakerId]);
+			else if (this.authorityId)
+				this.handle.sendRealtime({ t: 'milo-mem', forget: speakerId }, this.authorityId);
+			this.miloMem = this.miloMem.filter((m) => m.by !== speakerId);
+			this.sayAsMilo("Done — I've dropped what I kept from you.");
+			return true;
+		}
+		return false;
+	}
+
+	/** a canned line through Milo's normal surface — chat frame + voice
+	 *  track — without a brain call (used for memory acks) */
+	private sayAsMilo(text: string) {
+		this.handle.sendRealtime({ t: 'chat', text: `Milo: ${text}` });
+		this.chatLog = [...this.chatLog, { from: this.selfId, text: `Milo: ${text}`, milo: true }];
+		void this.speakMilo(text);
 	}
 
 	/** caption/chat/sensory ingest — recap context is unconditional; Milo's
@@ -1796,6 +1880,96 @@ export class RoomSession {
 		if (!brain) return;
 		if (brain === this.selfId) this.ingestMiloLine(this.selfId, text, lang);
 		else this.handle.sendRealtime({ t: 'milo-hear', text, lang }, brain);
+	}
+
+	// --- persistent memory (host-anchored sealed journal, ai/memory.ts) ---
+
+	/** memory lives on the authority's device ("stay with the host") and is
+	 *  keyed by room code — every session of the same room link recalls the
+	 *  same journal, so Milo thinks across all of that room's conversations */
+	private get memoryOn(): boolean {
+		return !!this.ai.enabled && this.ai.memory !== false && !this.heartMode;
+	}
+
+	/** brain seat pulls the room's journal once per session. Authority holds
+	 *  it locally; a remote authority answers a targeted milo-mem{req}. */
+	private requestMemRecall() {
+		if (!this.memoryOn || this.memRecalled) return;
+		this.memRecalled = true;
+		if (this.authorityId === this.selfId) {
+			void loadMemories(this.roomCode, this.roomSecret).then((items) => {
+				if (items.length) this.miloMem = items;
+			});
+		} else if (this.authorityId) {
+			this.handle.sendRealtime({ t: 'milo-mem', req: true }, this.authorityId);
+		}
+	}
+
+	/** milo-mem handler — the authority is the store; the brain is the
+	 *  consumer. Targeted sends only, everything sealed at rest. */
+	private onMiloMem(peerId: string, msg: { req?: boolean; recall?: boolean; wipe?: boolean; forget?: string; items?: { text: string; by?: string }[] }) {
+		if (msg.recall && msg.items?.length) {
+			// authority answered our req — adopt the recall view
+			if (peerId === this.authorityId && this.roles?.['milo-brain'] === this.selfId)
+				this.miloMem = msg.items;
+			return;
+		}
+		// everything below only the memory host (authority) serves
+		if (this.authorityId !== this.selfId) return;
+		if (msg.req) {
+			void loadMemories(this.roomCode, this.roomSecret).then((items) => {
+				if (items.length)
+					this.handle.sendRealtime({ t: 'milo-mem', recall: true, items }, peerId);
+			});
+			return;
+		}
+		if (msg.wipe) {
+			// room wipe must come from a manager (the brain relays commands;
+			// the speaker's own seat is what asked)
+			if (this.canManage(peerId)) void wipeRoom(this.roomCode).then(() => { this.miloMem = []; });
+			return;
+		}
+		if (msg.forget) {
+			void forgetPeer(this.roomCode, this.roomSecret, msg.forget, this.names[msg.forget]);
+			return;
+		}
+		if (msg.items?.length) {
+			// brain seat distilled new facts — persist + fold into our recall view
+			void addMemories(this.roomCode, this.roomSecret, msg.items).then((n) => {
+				if (n) this.miloMem = [...this.miloMem, ...msg.items!].slice(-60);
+			});
+		}
+	}
+
+	/** persist memory items to the journal host — local write when we're
+	 *  the authority, targeted milo-mem{items} otherwise */
+	private persistMem(items: MemItem[]) {
+		if (!this.memoryOn || !items.length) return;
+		if (this.authorityId === this.selfId) {
+			void addMemories(this.roomCode, this.roomSecret, items).then((n) => {
+				if (n) this.miloMem = [...this.miloMem, ...items].slice(-60);
+			});
+		} else if (this.authorityId) {
+			this.handle.sendRealtime({ t: 'milo-mem', items }, this.authorityId);
+			this.miloMem = [...this.miloMem, ...items].slice(-60); // brain keeps its own recall view
+		}
+	}
+
+	/** periodic distill: every ~25 context lines (and ≥2min), the brain
+	 *  extracts durable facts from its window and journals them. A distilling
+	 *  ask doesn't speak — onSay is bypassed by asking the brain directly. */
+	private maybeDistill() {
+		if (!this.memoryOn) return;
+		if (this.roles?.['milo-brain'] !== this.selfId) return;
+		if (this.linesSinceDistill < 25 || Date.now() - this.lastDistillAt < 120_000) return;
+		this.lastDistillAt = Date.now();
+		this.linesSinceDistill = 0;
+		void this.milo.ask(DISTILL_PROMPT, this.miloWindow, { name: this.ai.name })
+			.then((reply) => {
+				const texts = parseDistilled(reply ?? '');
+				if (texts.length) this.persistMem(texts.map((text) => ({ text })));
+			})
+			.catch(() => {});
 	}
 
 	/** Milo facilitation acts — opt-in via ai-set (roundSummary/equityNudge/
@@ -2349,6 +2523,17 @@ export class RoomSession {
 		this.miloDest = null;
 		void this.speakCtx?.close().catch(() => {});
 		this.speakCtx = null;
+		// one last distill so the end of the conversation is remembered —
+		// fire-and-forget; the sealed journal write outlives the session
+		if (this.memoryOn && this.linesSinceDistill >= 5 && this.roles?.['milo-brain'] === this.selfId) {
+			this.linesSinceDistill = 999;
+			this.lastDistillAt = 0;
+			this.maybeDistill();
+		}
+		this.miloMem = [];
+		this.memRecalled = false;
+		this.linesSinceDistill = 0;
+		this.lastDistillAt = 0;
 		await this.finishRecording();
 		this.notes.destroy();
 		this.localMedia?.stop();

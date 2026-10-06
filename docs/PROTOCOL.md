@@ -197,6 +197,18 @@ data channel and prod's deployed protocol is untouched:
   final, sent **only** to the elected `milo-brain` seat (never broadcast).
   Self-attributed `ear-set{on}` op turns the lane on/off; an explicit
   direct address counts as implicit consent for that one line.
+- `milo-mem` `{req?, recall?, items?[{text,by?}], wipe?, forget?}` —
+  persistent-memory sync, targeted between `milo-brain` and the authority
+  (the room's memory host). Brain distills + sends items; authority stores
+  them sealed in a per-room Dexie journal (`cic-milo`,
+  XChaCha20-Poly1305/HKDF(roomSecret) — ciphertext at rest, never on a
+  server). A new brain sends `req` once per session; the host answers with
+  `recall` items which the brain injects into every prompt — so Milo
+  thinks across all conversations of the same room link. `wipe` is
+  manager-gated, `forget` purges one peer's items (also fired by the
+  erasure op locally). Voice commands: "milo remember that …", "milo
+  forget me", "milo forget everything" (manager only). `ai-set{memory}`
+  gates the whole surface; content inherits the ear-set consent bounds.
 - `milo-state` `{state}` — brain-seat broadcast of Milo's state machine
   (standby/listening/speaking); `milo-stop` rests him.
 - `ai-set` op fields — `enabled` (master gate), `brain`
