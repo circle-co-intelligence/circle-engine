@@ -47,6 +47,10 @@ export interface Env {
 	CF_ACCESS_AUD?: string; // Access application AUD tag
 	METER_TOKEN?: string; // this worker's MeterBus capability token (spend role)
 	METER_ACL?: string; // JSON {sha256hex(token): 'admin'|'spend'|'probe'} — hardening gate
+	/** free-egress model host (public R2 bucket URL). Set → /ai/hf|pack|ort
+	 *  302 to it instead of proxying — model bytes never ride a billed Worker
+	 *  invocation. Unset → metered deploys proxy only for a funded room. */
+	MODELS_BASE?: string;
 }
 
 const EFFORTS = new Set(['minimal', 'low', 'medium', 'high']);
@@ -99,11 +103,13 @@ export default {
 			if (url.pathname === '/admin/mint' && req.method === 'POST')
 				return await adminMint(req, env);
 			if (url.pathname.startsWith('/ai/pack/') && req.method === 'GET')
-				return await pack(url.pathname.slice(9));
+				return await modelLane(env, req, 'pack', url.pathname.slice(9), pack);
 			if (url.pathname.startsWith('/ai/hf/') && (req.method === 'GET' || req.method === 'HEAD'))
-				return await hfProxy(url.pathname.slice(7), req.method);
+				return await modelLane(env, req, 'hf', url.pathname.slice(7), (p) =>
+					hfProxy(p, req.method)
+				);
 			if (url.pathname.startsWith('/ai/ort/') && req.method === 'GET')
-				return await ortProxy(url.pathname.slice(8));
+				return await modelLane(env, req, 'ort', url.pathname.slice(8), ortProxy);
 			if (url.pathname === '/ai/telemetry' && req.method === 'POST')
 				return await telemetry(req, env);
 			if (url.pathname === '/ai/status' && req.method === 'GET')
@@ -121,12 +127,72 @@ export default {
 	}
 };
 
+// ------------------------------------------------------------- pay-before-serve
+
+/** measured cost per lane, in pool-seconds (CALL_COST is the flat chat rate) */
+const sttCost = (audioB64: string, sampleRate: number) =>
+	Math.max(1, Math.min(3600, Math.ceil((audioB64.length * 0.75) / 4 / Math.max(1, sampleRate))));
+const ttsCost = (text: string) => Math.max(1, Math.min(600, Math.ceil(text.length / 40)));
+
+/**
+ * charge — the pay-before-serve gate every metered provider call runs.
+ * Picks the covering pool (sponsor → caller's account → room pool) and
+ * debits it BEFORE the provider is invoked; the caller sees 402 instead of
+ * service when nothing covers the cost. callId dedupes retries and the
+ * usage heartbeat's reconciliation report (same id = no double-bill).
+ * Unbound METER (self-host) → no gate.
+ */
+async function charge(
+	env: Env,
+	req: Request,
+	body: { room?: string; callId?: string; account?: string },
+	cost: number
+): Promise<Response | null> {
+	if (!env.METER) return null;
+	const room = typeof body.room === 'string' && body.room.length <= 80 ? body.room : null;
+	if (!room) return json({ error: 'room required for metered lane' }, 400);
+	// account spend requires a live device signature — unsigned requests
+	// degrade to room/sponsor pools and can never touch a wallet
+	const path = new URL(req.url).pathname;
+	const verified = body.account
+		? await verifyAccountSig(env, req, path, JSON.stringify(body), body.account)
+		: null;
+	const pick = await pickPool(env, room, verified ? body.account! : null);
+	const auth =
+		verified && pick.pool === `acct:${body.account}`
+			? {
+					pub: req.headers.get('x-cic-pub') ?? undefined,
+					ts: Number(req.headers.get('x-cic-ts')),
+					nonce: req.headers.get('x-cic-nonce') ?? undefined,
+					sig: req.headers.get('x-cic-sig') ?? undefined,
+					method: 'POST',
+					path,
+					body: JSON.stringify(body)
+				}
+			: undefined;
+	const res = await meter(env, pick.pool, 'charge', {
+		amount: cost,
+		room,
+		callId: body.callId,
+		auth
+	});
+	indexReport(env, undefined, pick.pool, res.clone());
+	if (!res.ok) {
+		const b = (await res.json().catch(() => ({}))) as { balanceSeconds?: number };
+		return json(
+			{ error: 'insufficient_credits', balanceSeconds: b.balanceSeconds ?? 0 },
+			res.status
+		);
+	}
+	return null; // charged — serve the call
+}
+
 // ------------------------------------------------------------- chat (Milo)
 
 async function chat(req: Request, env: Env): Promise<Response> {
 	if (!(await humanOk(env, req.headers.get('cf-turnstile'), req.headers.get('cf-connecting-ip'))))
 		return json({ error: 'turnstile' }, 403);
-	const { system, context, prompt, model, effort } = (await req.json()) as {
+	const { system, context, prompt, model, effort, room, callId, account } = (await req.json()) as {
 		system: string;
 		context?: string[];
 		prompt: string;
@@ -136,7 +202,13 @@ async function chat(req: Request, env: Env): Promise<Response> {
 		model?: string;
 		/** reasoning intensity — validated against a fixed set */
 		effort?: string;
+		/** metered-lane identity: room code + per-call id (dedupe) + optional account */
+		room?: string;
+		callId?: string;
+		account?: string;
 	};
+	const blocked = await charge(env, req, { room, callId, account }, CALL_COST);
+	if (blocked) return blocked;
 	const allowed = parseModelAllowlist(env.AI_MODEL_ALLOWLIST);
 	const modelOverride = model && allowed?.has(model) ? model : undefined;
 	const effortClean = effort && EFFORTS.has(effort) ? effort : undefined;
@@ -185,14 +257,19 @@ async function chat(req: Request, env: Env): Promise<Response> {
 // ------------------------------------------------------------- stt / tts
 
 async function stt(req: Request, env: Env): Promise<Response> {
-	const { audio, sampleRate, language } = (await req.json()) as {
+	const { audio, sampleRate, language, room, callId, account } = (await req.json()) as {
 		audio: string;
 		sampleRate: number;
 		/** optional whisper language hint (ISO 639-1); unset = auto-detect —
 		 *  whisper-large-v3-turbo covers ~99 languages incl. code-switching */
 		language?: string;
+		room?: string;
+		callId?: string;
+		account?: string;
 	};
 	if (!audio) return json({ text: '' });
+	const blocked = await charge(env, req, { room, callId, account }, sttCost(audio, sampleRate));
+	if (blocked) return blocked;
 	if (env.AI) {
 		// Workers AI whisper-family wants raw PCM16/bytes
 		const pcm = f32B64To16(audio);
@@ -206,8 +283,16 @@ async function stt(req: Request, env: Env): Promise<Response> {
 }
 
 async function tts(req: Request, env: Env): Promise<Response> {
-	const { text, voice } = (await req.json()) as { text: string; voice?: string };
+	const { text, voice, room, callId, account } = (await req.json()) as {
+		text: string;
+		voice?: string;
+		room?: string;
+		callId?: string;
+		account?: string;
+	};
 	if (!text) return json({ audio: '', sampleRate: 22050 });
+	const blocked = await charge(env, req, { room, callId, account }, ttsCost(text));
+	if (blocked) return blocked;
 	if (env.AI) {
 		const res = (await env.AI.run(env.AI_TTS_MODEL ?? '@cf/deepgram/aura-1', {
 			text,
@@ -252,11 +337,15 @@ const CALL_COST = 5;
 async function usage(req: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
 	if (!env.METER) return json({ balanceSeconds: 0 });
 	const raw = await req.text();
-	const { room, seconds, calls, account } = JSON.parse(raw || '{}') as {
+	const { room, seconds, calls, account, callIds } = JSON.parse(raw || '{}') as {
 		room?: string;
 		seconds?: number;
 		calls?: number;
 		account?: string;
+		/** callIds the client already saw accepted — reconciliation: each is
+		 *  re-charged here, but the pool's `call:<id>` record dedupes any that
+		 *  paid at call time, so heartbeat reports can never double-bill */
+		callIds?: string[];
 	};
 	if (!room) return json({ error: 'room required' }, 400);
 	// account spend requires a valid signature — unsigned/invalid requests
@@ -282,6 +371,14 @@ async function usage(req: Request, env: Env, ctx?: ExecutionContext): Promise<Re
 				}
 			: undefined;
 	const res = await meter(env, pick.pool, 'debit', { amount: debit, room, auth });
+	// reconcile per-call debits: heartbeat-reported callIds re-charge at the
+	// flat rate — the DO's call:<id> record dedupes ones that already paid,
+	// and stragglers (call succeeded but client's charge raced a 402 retry)
+	// settle here exactly once
+	for (const id of (callIds ?? []).slice(0, 200)) {
+		if (typeof id !== 'string' || id.length > 80) continue;
+		await meter(env, pick.pool, 'charge', { amount: CALL_COST, room, callId: id, auth });
+	}
 	indexReport(env, ctx, pick.pool, res.clone());
 	return res;
 }
@@ -507,9 +604,9 @@ type MeterRole = 'admin' | 'spend' | 'probe' | 'settle';
  */
 const ROLE_OPS: Record<MeterRole, Set<string>> = {
 	probe: new Set(['/get', '/kvget', '/claim']),
-	spend: new Set(['/get', '/kvget', '/kvlist', '/claim', '/debit', '/credit', '/report', '/list', '/audit']),
+	spend: new Set(['/get', '/kvget', '/kvlist', '/claim', '/debit', '/charge', '/credit', '/report', '/list', '/audit']),
 	settle: new Set(['/get', '/kvget', '/kvlist', '/kvput', '/claim', '/debit', '/credit', '/audit']),
-	admin: new Set(['/get', '/kvget', '/kvlist', '/kvput', '/claim', '/debit', '/credit', '/report', '/list', '/audit', '/sponsor', '/transfer'])
+	admin: new Set(['/get', '/kvget', '/kvlist', '/kvput', '/claim', '/debit', '/charge', '/credit', '/report', '/list', '/audit', '/sponsor', '/transfer'])
 };
 
 /** per-call ceiling for unsigned sponsored-room debits on a wallet */
@@ -569,6 +666,7 @@ export class MeterBus implements DurableObject {
 			creditId?: string;
 			clawbackOf?: string;
 			auth?: SignedAuth;
+			callId?: string;
 		};
 		const s = this.ctx.storage;
 
@@ -607,11 +705,58 @@ export class MeterBus implements DurableObject {
 			}
 			const capHit = await spendCapHit(s, amount);
 			if (capHit) return json({ ok: false, status: 'cap', ...capHit }, 402);
-			const balance = Math.max(0, ((await s.get<number>('balance')) ?? 0) - amount);
+			// prepaid floor: the heartbeat lane debits only what the pool can
+			// cover — spent can never exceed credited funds, and paid:false
+			// tells the client its lanes are now over
+			const avail = (await s.get<number>('balance')) ?? 0;
+			const debited = Math.min(amount, avail);
+			const balance = avail - debited;
+			const spent = ((await s.get<number>('spent')) ?? 0) + debited;
+			await s.put({ balance, spent });
+			if (acct) await auditLocal(this.env, s, { op: 'debit', amount: debited, via, room: b.room });
+			return json({ paid: balance > 0, balanceSeconds: balance, spentSeconds: spent, debitedSeconds: debited });
+		}
+		if (op === '/charge') {
+			// atomic pay-before-serve with callId dedupe — the covering pool is
+			// charged BEFORE the caller invokes a paid provider; a retried call
+			// (or the usage heartbeat's reconciliation report) carries the same
+			// callId and is deduped instead of double-billing. Strict: balance
+			// must cover the full amount or the call is refused at 402 — paid
+			// lanes never serve on partial credit.
+			let amount = Math.max(0, Math.round(b.amount ?? 0));
+			let via = 'pool';
+			if (acct) {
+				const gate = await authorizeSpend(s, acct, b);
+				if (gate instanceof Response) return gate;
+				via = gate.via;
+				amount = gate.amount;
+			}
+			const balanceNow = (await s.get<number>('balance')) ?? 0;
+			if (b.callId && (await s.get(`call:${b.callId}`)) !== undefined)
+				// already charged — retried call or heartbeat reconcile is free
+				return json({ ok: true, deduped: true, paid: balanceNow > 0, balanceSeconds: balanceNow });
+			const capHit = await spendCapHit(s, amount);
+			if (capHit) return json({ ok: false, status: 'cap', ...capHit }, 402);
+			if (balanceNow < amount)
+				return json({ ok: false, status: 'insufficient', balanceSeconds: balanceNow }, 402);
+			const balance = balanceNow - amount;
 			const spent = ((await s.get<number>('spent')) ?? 0) + amount;
 			await s.put({ balance, spent });
-			if (acct) await auditLocal(this.env, s, { op: 'debit', amount, via, room: b.room });
-			return json({ paid: balance > 0, balanceSeconds: balance, spentSeconds: spent, debitedSeconds: amount });
+			if (b.callId) {
+				await s.put(`call:${b.callId}`, amount); // id → what it cost
+				// bounded eviction ring — oldest call markers are dropped so
+				// storage stays finite; a very late duplicate could re-charge,
+				// bounded by the heartbeat cadence
+				const idx = (await s.get<string[]>('callIdx')) ?? [];
+				idx.push(b.callId);
+				if (idx.length > 5000) {
+					const drop = idx.splice(0, idx.length - 5000);
+					for (const id of drop) await s.delete(`call:${id}`);
+				}
+				await s.put('callIdx', idx);
+			}
+			if (acct) await auditLocal(this.env, s, { op: 'charge', amount, via, room: b.room });
+			return json({ ok: true, paid: balance > 0, balanceSeconds: balance, spentSeconds: spent, debitedSeconds: amount });
 		}
 		if (op === '/credit') {
 			if (acct && role !== 'admin' && role !== 'settle')
@@ -783,7 +928,7 @@ interface SignedAuth {
 }
 
 /** paths whose signed bodies may authorize a wallet debit */
-const DEBIT_AUTH_PATHS = new Set(['/ai/usage', '/pay/convert']);
+const DEBIT_AUTH_PATHS = new Set(['/ai/usage', '/ai/chat', '/ai/stt', '/ai/tts', '/pay/convert']);
 
 /**
  * verifyClientAuth — ECDSA-verify a forwarded signed request inside the DO
@@ -826,11 +971,20 @@ async function verifyClientAuth(
 		const parsed = JSON.parse(body || '{}') as Record<string, unknown>;
 		const claimed = (parsed.accountId ?? parsed.account) as string | undefined;
 		if (claimed && claimed !== acct) return null; // signed for a different wallet
+		// the cost is derived ONLY from the signed body's contents — the
+		// worker's claimed amount is ignored, so a compromised gateway can't
+		// inflate a wallet debit
 		const amount =
 			path === '/ai/usage'
 				? Math.max(0, Math.min(3600, Math.round(Number(parsed.seconds ?? 0)))) +
 					Math.max(0, Math.min(1000, Math.round(Number(parsed.calls ?? 0)))) * CALL_COST
-				: Math.max(0, Math.min(86_400_000, Math.round(Number(parsed.seconds ?? parsed.amount ?? 0))));
+				: path === '/ai/chat'
+					? CALL_COST
+					: path === '/ai/stt'
+						? sttCost(String(parsed.audio ?? ''), Number(parsed.sampleRate) || 16000)
+						: path === '/ai/tts'
+							? ttsCost(String(parsed.text ?? ''))
+							: Math.max(0, Math.min(86_400_000, Math.round(Number(parsed.seconds ?? parsed.amount ?? 0))));
 		return { keyHash, amount, path, room: parsed.room as string | undefined };
 	} catch {
 		return null;
@@ -1045,6 +1199,53 @@ const PACK_URLS: Record<string, string> = {
 	// document requires
 	llm: 'https://huggingface.co/bartowski/SmolLM2-360M-Instruct-GGUF/resolve/main/SmolLM2-360M-Instruct-Q4_K_M.gguf'
 };
+/**
+ * modelLane — pay-before-serve for model bytes. Every fetch costs a billed
+ * Worker invocation upstream-pull; the policy:
+ *  1. MODELS_BASE set → 302 to the free-egress bucket (worker serves no bytes)
+ *  2. METER unbound → self-host, proxy as before (operator's own upstream)
+ *  3. METER bound → proxy only for a funded room: the room code rides as
+ *     ?room= or — for /hf, where transformers.js remoteHost can't add query
+ *     params — the first path segment (/ai/hf/<room>/<org>/<repo>/resolve/…).
+ *     Unfunded/absent → 402, consistent with every other paid lane.
+ */
+async function modelLane(
+	env: Env,
+	req: Request,
+	kind: 'pack' | 'hf' | 'ort',
+	path: string,
+	serve: (path: string) => Promise<Response>
+): Promise<Response> {
+	if (env.MODELS_BASE)
+		return Response.redirect(`${env.MODELS_BASE.replace(/\/+$/, '')}/${kind}/${path}`, 302);
+	if (!env.METER) return serve(path);
+	let room = new URL(req.url).searchParams.get('room') ?? '';
+	let rest = path;
+	if (kind === 'hf' && !/^[\w.-]+\/[\w.-]+\/resolve\//.test(path)) {
+		const m = path.match(/^([\w-]+)\/(.+)$/);
+		if (m) {
+			room = room || decodeURIComponent(m[1]);
+			rest = m[2];
+		}
+	}
+	if (!room || !(await roomFunded(env, room)))
+		return json({ error: 'insufficient_credits', lane: `models:${kind}` }, 402);
+	return serve(rest);
+}
+
+/** room pool or its sponsor wallet — the coverage check for GET lanes that
+ *  carry a bare room code (model proxies); account wallets need signatures
+ *  a GET asset request can't supply, so they're deliberately not checked */
+async function roomFunded(env: Env, room: string): Promise<boolean> {
+	const info = (await (await meter(env, room, 'get', {})).json()) as PoolInfo;
+	if ((info.balanceSeconds ?? 0) > 0) return true;
+	if (info.sponsor) {
+		const sp = (await (await meter(env, `acct:${info.sponsor}`, 'get', {})).json()) as PoolInfo;
+		return (sp.balanceSeconds ?? 0) > 0;
+	}
+	return false;
+}
+
 async function pack(kind: string): Promise<Response> {
 	const url = PACK_URLS[kind];
 	if (!url) return json({ error: 'unknown pack' }, 404);

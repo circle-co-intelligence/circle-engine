@@ -154,10 +154,15 @@ export class CloudSfu {
 				sessionId?: string;
 				sessionDescription?: { sdp: string };
 				tracks?: { mid?: string; trackName?: string; errorCode?: string }[];
-			}>(`/sessions/${this.sfuSessionId}/tracks/new`, {
-				sessionDescription: { type: 'offer', sdp: sdpOffer },
-				tracks
-			});
+			}>(
+				`/sessions/${this.sfuSessionId}/tracks/new`,
+				{
+					sessionDescription: { type: 'offer', sdp: sdpOffer },
+					tracks
+				},
+				'POST',
+				{ room: this.session?.roomCode, roomSecret: this.session?.roomSecret }
+			);
 			// remember only the binds that succeeded
 			const okNames = new Set(
 				(res.tracks ?? []).filter((t) => !t.errorCode).map((t) => t.trackName)
@@ -247,7 +252,12 @@ export class CloudSfu {
 				requiresImmediateRenegotiation?: boolean;
 				sessionDescription?: { type: string; sdp: string };
 				tracks?: { sessionId: string; trackName: string; mid?: string; errorCode?: string }[];
-			}>(`/sessions/${sid}/tracks/new`, { tracks: remote });
+			}>(
+				`/sessions/${sid}/tracks/new`,
+				{ tracks: remote },
+				'POST',
+				{ room: this.session?.roomCode, roomSecret: this.session?.roomSecret }
+			);
 			// CF requires the publication to be live before a pull binds —
 			// not_found means the publisher's session exists but its tracks
 			// aren't flowing yet; back off and retry (bounded)

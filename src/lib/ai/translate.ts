@@ -7,24 +7,29 @@ import { Wllama } from '@wllama/wllama';
 import { base } from '$app/paths';
 import manifest from '../../../models/manifest.json';
 import { emitModel } from './modelStatus';
+import { packUrl } from './modelHost';
 
 const LOCAL_MODEL = `${base}/models/llm/SmolLM2-360M-Instruct-Q4_K_M.gguf`;
-const aiBase = (import.meta.env as Record<string, string | undefined>).VITE_CIC_AI_ENDPOINT;
-// same CORS-safe lane the sherpa packs use (functions/api/ai → ai-gateway
-// /ai/pack/<kind>): HF's resolve CDN doesn't guarantee the CORP header our
-// COEP document needs, so prefer the proxy when an AI endpoint is set
-const PACK_MODEL = aiBase ? `${aiBase.replace(/\/ai\/?$/, '')}/ai/pack/llm` : '';
-const REMOTE_MODEL =
-	PACK_MODEL || (manifest.packs as Record<string, { url?: string }>)['llm']?.url || '';
+// model bytes resolve through modelHost — the free-egress bucket on metered
+// deploys, else the /ai/pack proxy carrying the room code for its
+// funded-pool gate; HF's resolve CDN stays the no-lane last resort
+function remoteModel(): string {
+	return (
+		packUrl('llm') ??
+		(manifest.packs as Record<string, { url?: string }>)['llm']?.url ??
+		''
+	);
+}
 
 let modelUrlCache: string | null = null;
-/** local weights when vendored (dev/self-host), upstream HF resolve URL otherwise */
+/** local weights when vendored (dev/self-host), the model lane otherwise */
 export async function llmModelUrl(): Promise<string> {
 	if (modelUrlCache) return modelUrlCache;
 	const local = new URL(LOCAL_MODEL, location.origin).href;
+	const remote = remoteModel();
 	modelUrlCache = await fetch(local, { method: 'HEAD' })
-		.then((r) => (r.ok ? local : REMOTE_MODEL))
-		.catch(() => REMOTE_MODEL);
+		.then((r) => (r.ok ? local : remote))
+		.catch(() => remote);
 	return modelUrlCache;
 }
 

@@ -99,9 +99,32 @@ node scripts/meter-acl.mjs   # prints 4 tokens + the ACL JSON
 ```
 
 Deploy order matters — set all four `METER_TOKEN` secrets (cic-pay=admin,
-cic-ai-gateway=spend, cic-sfu=probe, cic-pay-hook=settle) **before** setting
-`METER_ACL` on cic-ai-gateway, or calls start 401ing. `GET /ai/status`
-reports `meterAcl: true` when the gate is live.
+cic-ai-gateway=spend, cic-sfu=probe, cic-pay-hook=settle, plus
+**cic-dsp=spend** and the **Pages Function secret `METER_TOKEN`=probe**
+for /api/ice + /api/rec) **before** setting `METER_ACL` on cic-ai-gateway,
+or calls start 401ing. `GET /ai/status` reports `meterAcl: true` when the
+gate is live.
+
+**Prepaid model — every metered lane is pay-before-serve.** MeterBus
+`/charge` debits the covering pool *before* any provider is invoked and
+returns 402 `insufficient_credits` when nothing covers it; `callId`
+dedupes retries and heartbeat reconciliation so a call never double-bills.
+Coverage order: room pool → sponsor wallet → caller's signed wallet.
+What each lane does at zero balance:
+
+| Lane | Gate | At exhaustion |
+|---|---|---|
+| `/ai/chat`, `/ai/stt`, `/ai/tts` | `/charge` before provider call | 402 → client falls back to on-device, top-up pill shows |
+| cic-dsp `/speech` + `/speech-token` | funded check at upgrade + per-second streaming debit | WS closes `4402` → client falls back to local whisper |
+| cic-dsp `/audio` adapter | funded check at upgrade | 402 → SFU keeps clean audio |
+| cic-sfu `sessions/new`, `tracks/new` | funded at create + lease recheck | 402 → mesh continues |
+| `/api/ice` TURN | funded `?room=` | STUN-only + `reason:"topup"` (direct P2P unaffected) |
+| `/api/rec` PUT | room ticket + per-MiB `/charge` | 402 → local sealed recording kept |
+| `/ai/hf`, `/ai/ort`, `/ai/pack` | `MODELS_BASE` 302 → free-egress bucket; else funded room only | 402 |
+
+The client's persistent "room credits exhausted" pill + Circle-tools
+top-up action are the visible top-up path; a landed grant calls
+`markToppedUp()` which re-arms the meter without rejoin.
 
 Privileged wallet records (`key:*` device keys, `passkey:*`,
 `sponsored:*`, `limits`) additionally require the client's own signature —
@@ -171,10 +194,12 @@ Runtime Web — **fully zero-egress, ~99 languages, auto-detects the spoken
 language per utterance**, no user config needed; WebGPU→WASM fallback) or
 a sherpa WASM pack `en|zh-en|zh-yue-en`. `VITE_CIC_TTS_PACK=en|multi`
 (piper / kokoro multi-lang). `fetch-models.sh` fetches the selected sherpa
-variants under `FETCH_HEAVY=1`; whisper's model files stream through the
-`/ai/hf/<repo>/resolve/...` proxy (HF repo allowlist) and its ONNX runtime
-through `/ai/ort/` — both edge-cached, then browser Cache API for repeat
-loads. `/ai/pack/<id>` serves every manifest sherpa pack id. `/ai/stt`
+variants under `FETCH_HEAVY=1`. **Production model hosting**: mirror all
+model bytes to the `cic-models` R2 bucket (free egress, free GETs) with
+`scripts/models-to-r2.sh`, then set `MODELS_BASE=<bucket pub URL>` on
+cic-ai-gateway and `VITE_CIC_MODELS_BASE=<same>` in `build:cf`. The
+`/ai/hf|ort|pack` proxies then become redirects (or funded-room-only
+proxies when `MODELS_BASE` is unset on a metered deploy). `/ai/stt`
 → whisper-large-v3-turbo (~99 languages auto-detected, optional
 `language` hint) remains the cloud-fallback STT.
 

@@ -4,6 +4,14 @@ compatibility_date = "2025-01-01"
 # account pinning: Pages rejects account_id in wrangler.toml — deploys must
 # use the regenleadership-scoped API token (the only account it can see)
 
+# MeterBus DO (lives in the cic-ai-gateway worker) — Pages Functions use it
+# for the funded-pool gate on /api/ice (TURN) and /api/rec (R2 offload).
+# Unbound/unset METER_TOKEN = self-host: gates pass through.
+[[durable_objects.bindings]]
+name = "METER"
+class_name = "MeterBus"
+script_name = "cic-ai-gateway"
+
 [[r2_buckets]]
 binding = "REC_BUCKET"
 bucket_name = "cic-rec"

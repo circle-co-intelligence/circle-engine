@@ -20,6 +20,7 @@ export interface SpeechSegment {
 
 import { base } from '$app/paths';
 import manifest from '../../../models/manifest.json';
+import { packUrl } from './modelHost';
 import { emitModel } from './modelStatus';
 
 // On-device ASR/TTS pack selection — sherpa WASM ships a handful of
@@ -46,28 +47,30 @@ const ttsDir = TTS_VARIANTS[TTS_PACK] ?? TTS_VARIANTS.en;
 const PACK_LANG = ASR_PACK === 'en' ? 'en' : undefined;
 
 const PACKS = {
-	vad: { dir: `${base}/models/vad/sherpa-onnx-wasm-simd-v1.13.8-vad`, remote: '' },
-	asr: { dir: `${base}/models/${asrDir}`, remote: '' },
-	tts: { dir: `${base}/models/${ttsDir}`, remote: '' }
+	vad: { dir: `${base}/models/vad/sherpa-onnx-wasm-simd-v1.13.8-vad` },
+	asr: { dir: `${base}/models/${asrDir}` },
+	tts: { dir: `${base}/models/${ttsDir}` }
 } as const;
 
 // upstream tarballs (models/manifest.json) — used when the extracted pack
 // isn't served locally (e.g. GitHub Pages deploys, where 400MB of weights
 // can't be committed). Upstream release assets carry no CORS headers, so
-// prefer the ai-gateway /pack proxy (allowlisted, same-origin-capable);
-// the raw manifest URL remains the no-gateway last resort.
+// prefer the model lane: the free-egress bucket on metered deploys, else
+// the ai-gateway /pack proxy with the room code for its funded-pool gate
+// (resolved lazily — the room isn't known at import time).
 const REMOTE_KEYS = {
 	vad: 'vad',
 	asr: asrDir.split('/')[0],
 	tts: ttsDir.split('/')[0]
 } as const;
-const aiBase = (import.meta.env as Record<string, string | undefined>).VITE_CIC_AI_ENDPOINT;
-for (const [kind, mkey] of Object.entries(REMOTE_KEYS)) {
-	// whisper lane: no sherpa pack behind the 'asr' kind at all
-	if (!mkey) continue;
-	const remote = (manifest.packs as Record<string, { url?: string }>)[mkey]?.url;
-	const proxied = aiBase ? `${aiBase.replace(/\/ai\/?$/, '')}/ai/pack/${mkey}` : null;
-	(PACKS as Record<string, { remote: string }>)[kind].remote = proxied ?? remote ?? '';
+function packRemote(kind: PackKind): string {
+	const mkey = REMOTE_KEYS[kind];
+	if (!mkey) return ''; // whisper lane: no sherpa pack behind 'asr'
+	return (
+		packUrl(mkey) ??
+		(manifest.packs as Record<string, { url?: string }>)[mkey]?.url ??
+		''
+	);
 }
 
 type PackKind = keyof typeof PACKS;
@@ -172,13 +175,13 @@ async function loadPack(kind: PackKind): Promise<SherpaModule | null> {
 		emitModel(kind, 'ready');
 		return Module;
 	} catch {
-		if (!packCfg.remote) {
+		if (!packRemote(kind)) {
 			emitModel(kind, 'error');
 			return null; // pack not deployed — caller degrades visibly
 		}
 	}
 	try {
-		const files = await fetchRemotePack(packCfg.remote);
+		const files = await fetchRemotePack(packRemote(kind));
 		await injectScript(files[apiScript]);
 		const Module: SherpaModule = {};
 		Module.locateFile = (path) => files[path.split('/').pop() ?? path] ?? path;
@@ -318,7 +321,7 @@ export class LocalTts {
 		if (localOk) return new Worker(local);
 		// remote: the worker importScripts its siblings and locates wasm/.data
 		// relative to its own URL — rewrite both to the extracted blob map
-		const files = await fetchRemotePack(PACKS.tts.remote);
+		const files = await fetchRemotePack(packRemote('tts'));
 		let src = await (await fetch(files[name])).text();
 		src = src
 			.replace(/importScripts\((['"])([^'"]+)\1\)/g, (_m, q, p) => `importScripts(${q}${files[p] ?? p}${q})`)

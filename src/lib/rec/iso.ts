@@ -20,7 +20,7 @@ import {
 	QUALITY_MEDIUM
 } from 'mediabunny';
 import Dexie, { type EntityTable } from 'dexie';
-import { sealSegment } from './cloud';
+import { sealSegment, recTicket } from './cloud';
 
 const SEGMENT_MS = 30_000;
 
@@ -149,9 +149,15 @@ export class IsoRecorder {
 			try {
 				const res = await fetch(`/api/rec/${this.roomCode}/${rec}/${seg}`, {
 					method: 'PUT',
-					headers: { 'content-type': 'application/octet-stream' },
+					headers: {
+						'content-type': 'application/octet-stream',
+						// membership capability — the edge charges the room's pool
+						// per MiB before writing; 402 = out of credits, stop retrying
+						'x-cic-room-ticket': recTicket(this.roomSecret, this.roomCode)
+					},
 					body: sealed.buffer as ArrayBuffer
 				});
+				if (res.status === 402) return false; // exhausted — journal keeps the bytes
 				if (res.ok) {
 					await db.uploads.update(jid, { done: true });
 					return true;

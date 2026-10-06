@@ -13,8 +13,8 @@ export class BreakoutSession {
 	remoteStreams = $state<Record<string, MediaStream>>({});
 	chatLog = $state<{ from: string; text: string }[]>([]);
 
-	constructor(secret: string, roomId: string) {
-		this.handle = openRoom(`${secret}:bo:${roomId}`);
+	constructor(secret: string, roomId: string, roomCode?: string) {
+		this.handle = openRoom(`${secret}:bo:${roomId}`, { roomCode });
 		this.handle.onPeerJoin((id) => (this.peers = [...this.peers, id]));
 		this.handle.onPeerLeave((id) => {
 			this.peers = this.peers.filter((p) => p !== id);

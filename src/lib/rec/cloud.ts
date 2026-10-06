@@ -10,7 +10,7 @@
 import { xchacha20poly1305 } from '@noble/ciphers/chacha.js';
 import { hkdf } from '@noble/hashes/hkdf.js';
 import { sha256 } from '@noble/hashes/sha2.js';
-import { randomBytes, utf8ToBytes } from '@noble/hashes/utils.js';
+import { bytesToHex, randomBytes, utf8ToBytes } from '@noble/hashes/utils.js';
 import { paidEntitled } from '../tier';
 
 const enc = new TextEncoder();
@@ -33,7 +33,16 @@ export function openSegment(roomSecret: string, sealed: Uint8Array): Uint8Array 
 	return xchacha20poly1305(recKey(roomSecret), sealed.slice(0, 24)).decrypt(sealed.slice(24));
 }
 
-/** upload encrypted segments to R2 — paid-gated, no-op without entitlement */
+/** membership capability: sha256('rec:'+roomSecret+':'+roomCode) — the edge
+ *  can't verify the secret but only room participants can mint it, and the
+ *  funded-pool charge is what actually gates the spend */
+export function recTicket(roomSecret: string, roomCode: string): string {
+	return bytesToHex(sha256(utf8ToBytes(`rec:${roomSecret}:${roomCode}`)));
+}
+
+/** upload encrypted segments to R2 — the edge debits the room/sponsor pool
+ *  per MiB before writing; 402 → caller keeps the local sealed recording
+ *  and surfaces the top-up state */
 export async function uploadRecording(
 	roomSecret: string,
 	roomCode: string,
@@ -41,11 +50,15 @@ export async function uploadRecording(
 ): Promise<string | null> {
 	if (!(await paidEntitled(roomCode))) return null;
 	const recId = crypto.randomUUID();
+	const ticket = recTicket(roomSecret, roomCode);
 	for (let i = 0; i < segments.length; i++) {
 		const sealed = sealSegment(roomSecret, new Uint8Array(await segments[i].arrayBuffer()));
 		const res = await fetch(`/api/rec/${roomCode}/${recId}/${i}`, {
 			method: 'PUT',
-			headers: { 'content-type': 'application/octet-stream' },
+			headers: {
+				'content-type': 'application/octet-stream',
+				'x-cic-room-ticket': ticket
+			},
 			body: sealed.buffer as ArrayBuffer
 		});
 		if (!res.ok) return null;

@@ -338,6 +338,11 @@ class RoomBridge {
 	 *  the initial snapshot and the join op emitted when ai flips on */
 	private aiParticipant() {
 		const s = this.session!;
+		// Milo's synthesized voice is a tagged mesh track landing in
+		// remoteStreams['milo'] — the sfu shim resolves 'milo:audio' against
+		// it like any peer stream, so his tile gets a real audio element
+		const tracks: { sessionId: string; kind: string }[] = [];
+		if (s.remoteStreams['milo']) tracks.push({ sessionId: 'milo:audio', kind: 'audio' });
 		return {
 			id: 'ai',
 			name: s.ai.name ?? 'Milo',
@@ -345,7 +350,7 @@ class RoomBridge {
 			joinedAt: this.sessionStartedAt - 1,
 			connected: true,
 			muted: { audio: false, video: true },
-			tracks: [] as never[]
+			tracks
 		};
 	}
 
@@ -693,6 +698,9 @@ class RoomBridge {
 			case 'set-ai-voice': s?.setAi({ voice: String(m.voice) }); break;
 			case 'set-milo-standby': s?.setAi({ standby: !!m.on }); break;
 			case 'set-milo-wake': s?.setMiloWake(m.mode === 'hey_milo' ? 'hey_milo' : 'click'); break;
+			case 'set-milo-brain': s?.setAi({ brain: ['auto', 'local', 'cloud'].includes(String(m.brain)) ? m.brain : 'auto' }); break;
+			case 'set-milo-facilitate': s?.setAi({ [String(m.flag)]: !!m.on }); break; // roundSummary/equityNudge/welcome
+			case 'set-ear': s?.setEar(!!m.on); break; // self-attributed Milo-hearing consent
 			case 'ask-ai': s?.askAi(typeof m.text === 'string' ? m.text : undefined); break;
 			case 'stop-ai': s?.stopMilo(); break; // "Anyone may rest or stop him"
 			case 'set-transcription':

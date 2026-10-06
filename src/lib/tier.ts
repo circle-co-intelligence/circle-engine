@@ -100,15 +100,17 @@ export async function reportUsage(
 	roomCode: string,
 	seconds: number,
 	calls = 0,
-	account?: string
+	account?: string,
+	callIds?: string[]
 ): Promise<Entitlement | null> {
 	const base = apiBase();
-	if (!base || (seconds <= 0 && calls <= 0)) return null;
+	if (!base || (seconds <= 0 && calls <= 0 && !callIds?.length)) return null;
 	const acc = callerAccount(account);
 	const bodyStr = JSON.stringify({
 		room: roomCode,
 		seconds,
 		calls,
+		...(callIds?.length ? { callIds } : {}),
 		...(acc ? { account: acc } : {})
 	});
 	const headers: Record<string, string> = { 'content-type': 'application/json' };
@@ -151,6 +153,9 @@ const FLUSH_MS = 30_000;
 export class UsageMeter {
 	private seconds = 0;
 	private calls = 0;
+	/** per-call ids the gateway already debited — reported for audit/reconcile;
+	 *  the pool DO's call:<id> dedupe makes resends free */
+	private callIds = new Set<string>();
 	private timer = 0;
 	private exhausted = false;
 	constructor(
@@ -160,16 +165,19 @@ export class UsageMeter {
 	tickSeconds(n: number) {
 		this.seconds += n;
 	}
-	tickCall() {
+	tickCall(callId?: string) {
 		this.calls++;
+		if (callId) this.callIds.add(callId);
 	}
 	start() {
 		this.timer = window.setInterval(() => void this.flush(), FLUSH_MS);
 	}
 	async flush() {
-		const info = await reportUsage(this.roomCode, this.seconds, this.calls);
+		const ids = [...this.callIds];
+		const info = await reportUsage(this.roomCode, this.seconds, this.calls, undefined, ids);
 		this.seconds = 0;
 		this.calls = 0;
+		if (info) this.callIds.clear(); // landed — safe to forget
 		if (info && !info.paid && !this.exhausted) {
 			this.exhausted = true; // fire once; a successful top-up resets via reset()
 			this.onExhausted?.();

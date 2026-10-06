@@ -34,7 +34,14 @@ export interface RoomHandle {
 	onPeerJoin: (fn: (peerId: string) => void) => void;
 	onPeerLeave: (fn: (peerId: string) => void) => void;
 	onPeerStream: (fn: (stream: MediaStream, peerId: string) => void) => void;
-	addStream: (stream: MediaStream, targets?: string[]) => void;
+	/**
+	 * Remote tagged a published slot (e.g. 'milo') — fires with a stream
+	 * holding ONLY that tag's tracks so synthetic sources are separately
+	 * addressable. Lanes without SMAP tag support never fire this; the
+	 * track just merges into the seat's normal stream (still audible).
+	 */
+	onPeerTaggedStream: (fn: (stream: MediaStream, peerId: string, tag: string) => void) => void;
+	addStream: (stream: MediaStream, targets?: string[], tag?: string) => void;
 	removeStream: (stream: MediaStream) => void;
 	leave: () => Promise<void>;
 	raw: Room;
@@ -73,6 +80,9 @@ function mkListenerSet<A extends unknown[]>(set: (fn: (...args: A) => void) => v
 }
 
 type LaneName = 'mqtt' | 'nostr' | 'torrent' | 'ipfs' | 'supabase' | 'ws';
+// wsRoom's addStream accepts a slot tag ('milo'); trystero lanes ignore the
+// extra arg — the track just merges into the seat's stream there
+type TaggedAdd = (stream: MediaStream, targets?: string[], tag?: string) => void;
 
 const env = import.meta.env as Record<string, string | undefined>;
 const trysteroConfig = { appId: 'co-intelligence-circle' };
@@ -143,20 +153,27 @@ async function joinLane(
 	}
 }
 
-// ICE credentials are app-scoped (not room-scoped) — resolve once, share
-// across rooms/breakouts, refresh on expiry via /api/ice re-fetch
-let iceServersP: Promise<RTCConfiguration> | null = null;
-export function iceServers(): Promise<RTCConfiguration> {
-	return (iceServersP ??= fetchIceServers());
+// ICE credentials are room-scoped — TURN is a paid lane gated on the room's
+// funded pool (/api/ice returns STUN-only when unpaid), so results are
+// cached per room code and re-resolved on expiry/top-up
+let iceCache = new Map<string, Promise<RTCConfiguration>>();
+export function iceServers(room = ''): Promise<RTCConfiguration> {
+	let p = iceCache.get(room);
+	if (!p) iceCache.set(room, (p = fetchIceServers(room)));
+	return p;
 }
-/** force re-resolve (credential expiry, broker change) */
-export function refreshIceServers(): Promise<RTCConfiguration> {
-	iceServersP = null;
-	return iceServers();
+/** force re-resolve (credential expiry, broker change, post-top-up) */
+export function refreshIceServers(room = ''): Promise<RTCConfiguration> {
+	iceCache.delete(room);
+	return iceServers(room);
 }
 
+/** the broker's reason for omitting TURN — 'topup' means the room pool is
+ *  empty and relayed media is unavailable until it's credited */
+export let lastIceReason: string | null = null;
+
 /** fetch short-lived ICE servers from the edge broker; STUN fallback always present */
-async function fetchIceServers(): Promise<RTCConfiguration> {
+async function fetchIceServers(room = ''): Promise<RTCConfiguration> {
 	const iceServers: RTCIceServer[] = [
 		{ urls: ['stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] }
 	];
@@ -169,9 +186,12 @@ async function fetchIceServers(): Promise<RTCConfiguration> {
 		}
 	}
 	try {
-		const res = await fetch('/api/ice', { signal: AbortSignal.timeout(1800) });
+		const res = await fetch(`/api/ice${room ? `?room=${encodeURIComponent(room)}` : ''}`, {
+			signal: AbortSignal.timeout(1800)
+		});
 		if (res.ok) {
-			const body = (await res.json()) as { iceServers?: RTCIceServer[] };
+			const body = (await res.json()) as { iceServers?: RTCIceServer[]; reason?: string };
+			lastIceReason = body.reason ?? null;
 			if (body.iceServers?.length) iceServers.push(...body.iceServers);
 		}
 	} catch {
@@ -239,7 +259,9 @@ interface Lane {
 	iceStates: Map<string, string>;
 }
 
-export function openRoom(roomSecret: string): RoomHandle {
+export function openRoom(roomSecret: string, opts?: { roomCode?: string }): RoomHandle {
+	// the room code scopes paid-lane lookups (TURN credential funding)
+	const roomCode = opts?.roomCode ?? '';
 	// shared listener sets — registered before/after lanes connect alike
 	const laneOfPeer = new Map<string, Set<Lane>>();
 	const lanes: Lane[] = [];
@@ -247,6 +269,7 @@ export function openRoom(roomSecret: string): RoomHandle {
 	const leaveListeners = new Set<(peerId: string) => void>();
 	const streamListeners = new Set<(stream: MediaStream, peerId: string) => void>();
 	const connStateListeners = new Set<(peerId: string, state: string) => void>();
+	const taggedListeners = new Set<(stream: MediaStream, peerId: string, tag: string) => void>();
 	const signalListeners = new Set<(state: 'connecting' | 'up' | 'down') => void>();
 	const busListeners = new Set<(state: 'up' | 'down') => void>();
 	let signalState: 'connecting' | 'up' | 'down' = 'connecting';
@@ -263,10 +286,10 @@ export function openRoom(roomSecret: string): RoomHandle {
 	const actionListeners = new Map<string, Set<(data: unknown, peerId: string) => void>>();
 	const pendingOps: OpEnvelope[] = [];
 	const pendingRt: { msg: RealtimeMessage; to?: string }[] = [];
-	const pendingStreams: { stream: MediaStream; targets?: string[] }[] = [];
+	const pendingStreams: { stream: MediaStream; targets?: string[]; tag?: string }[] = [];
 	// streams currently requested of the mesh — re-applied to lanes that
 	// connect late (retry path) so late-joining lanes aren't media-blind
-	const activeStreams: { stream: MediaStream; targets?: string[] }[] = [];
+	const activeStreams: { stream: MediaStream; targets?: string[]; tag?: string }[] = [];
 	// per-lane stream offers (lane → peerId → stream ids). A stream must reach
 	// every lane that sees the peer, not just whichever lane fired the merged
 	// join first — dedupe keeps repeated offers (rejoin, re-publish, both
@@ -287,11 +310,11 @@ export function openRoom(roomSecret: string): RoomHandle {
 	let offerGate: RoomHandle['offerGate'];
 	const offerToPeer = (lane: Lane, peerId: string) => {
 		if (offerGate && !offerGate(peerId)) return;
-		for (const { stream, targets } of activeStreams) {
+		for (const { stream, targets, tag } of activeStreams) {
 			if (targets && !targets.includes(peerId)) continue;
 			if (!markOffered(lane, peerId, stream)) continue;
 			try {
-				lane.room.addStream(stream, [peerId]);
+				(lane.room.addStream as TaggedAdd)(stream, [peerId], tag);
 			} catch {
 				/* already negotiated on this lane's pc */
 			}
@@ -366,6 +389,12 @@ export function openRoom(roomSecret: string): RoomHandle {
 			}
 		});
 		lane.onStream((stream, peerId) => streamListeners.forEach((fn) => fn(stream, peerId)));
+		// wsRoom lanes can tag published slots ('milo') → receivers route them
+		// to a dedicated stream; trystero lanes lack the concept (merge only)
+		(lane.room as { onPeerTaggedStream?: (fn: (s: MediaStream, p: string, tag: string) => void) => void })
+			.onPeerTaggedStream?.((stream, peerId, tag) =>
+				taggedListeners.forEach((fn) => fn(stream, peerId, tag))
+			);
 
 		const [, onOp] = lane.room.makeAction<OpEnvelope>('op');
 		const [, onRt] = lane.room.makeAction<RealtimeMessage>('rt');
@@ -418,7 +447,7 @@ export function openRoom(roomSecret: string): RoomHandle {
 	}
 
 	const applyStreams = (lane: Lane) => {
-		for (const { stream, targets } of activeStreams) {
+		for (const { stream, targets, tag } of activeStreams) {
 			const here = (targets
 				? targets.filter((t) => laneOfPeer.get(t)?.has(lane))
 				: Object.keys(lane.room.getPeers())
@@ -426,7 +455,7 @@ export function openRoom(roomSecret: string): RoomHandle {
 			const fresh = here.filter((pid) => markOffered(lane, pid, stream));
 			if (!fresh.length) continue;
 			try {
-				lane.room.addStream(stream, fresh);
+				(lane.room.addStream as TaggedAdd)(stream, fresh, tag);
 			} catch {
 				/* already negotiated on this lane's pc */
 			}
@@ -490,7 +519,7 @@ export function openRoom(roomSecret: string): RoomHandle {
 	};
 
 	const ready = (async () => {
-		const rtcConfig = await iceServers();
+		const rtcConfig = await iceServers(roomCode);
 		await Promise.all(laneList().map((name) => joinWithRetry(name, rtcConfig)));
 		if (!lanes.length) {
 			emitSignal('down');
@@ -559,18 +588,19 @@ export function openRoom(roomSecret: string): RoomHandle {
 		onPeerJoin: (fn) => joinListeners.add(fn),
 		onPeerLeave: (fn) => leaveListeners.add(fn),
 		onPeerStream: (fn) => streamListeners.add(fn),
+		onPeerTaggedStream: (fn) => taggedListeners.add(fn),
 		get offerGate() {
 			return offerGate;
 		},
 		set offerGate(fn: RoomHandle['offerGate']) {
 			offerGate = fn;
 		},
-		addStream: (stream, targets) => {
+		addStream: (stream, targets, tag) => {
 			if (!connected) {
-				pendingStreams.push({ stream, targets });
+				pendingStreams.push({ stream, targets, tag });
 				return;
 			}
-			activeStreams.push({ stream, targets });
+			activeStreams.push({ stream, targets, tag });
 			for (const lane of lanes) {
 				const here = (targets
 					? targets.filter((t) => laneOfPeer.get(t)?.has(lane))
@@ -579,7 +609,7 @@ export function openRoom(roomSecret: string): RoomHandle {
 				const fresh = here.filter((pid) => markOffered(lane, pid, stream));
 				if (!fresh.length) continue;
 				try {
-					lane.room.addStream(stream, fresh);
+					(lane.room.addStream as TaggedAdd)(stream, fresh, tag);
 				} catch {
 					/* already negotiated on this lane's pc */
 				}
@@ -612,7 +642,7 @@ export function openRoom(roomSecret: string): RoomHandle {
 		},
 		restartAll,
 		ready,
-		iceServers: async () => (await iceServers()).iceServers ?? [],
+		iceServers: async () => (await iceServers(roomCode)).iceServers ?? [],
 		__laneDebug: () => {
 			const out: Record<string, unknown> = { lanes: {}, laneOfPeer: {} };
 			for (const [pid, set] of laneOfPeer)

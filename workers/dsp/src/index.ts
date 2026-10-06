@@ -31,6 +31,11 @@ export interface Env {
 	/** openai transcription model (default 'gpt-4o-transcribe' — multilingual,
 	 *  handles EN/DE/ES code-switching) */
 	SPEECH_MODEL?: string;
+	/** MeterBus DO (script_name cic-ai-gateway) — funded-pool gate on the
+	 *  paid speech lanes; unbound = self-host (no metering) */
+	METER?: DurableObjectNamespace;
+	/** spend/probe-role capability token for MeterBus calls */
+	METER_TOKEN?: string;
 }
 
 export default {
@@ -41,6 +46,10 @@ export default {
 		// (60s TTL, keeps the long-lived key out of clients)
 		if (url.pathname === '/speech-token' && req.method === 'GET') {
 			if (!env.SPEECH_API_KEY) return new Response('lane off', { status: 503 });
+			// pay-before-serve: a Speechmatics RT token is provider spend —
+			// mint one only for a funded room pool / sponsor
+			if (!(await funded(env, url.searchParams.get('room'))))
+				return new Response('insufficient credits', { status: 402 });
 			const res = await fetch('https://mp.speechmatics.com/v1/api_keys?type=rt', {
 				method: 'POST',
 				headers: {
@@ -68,10 +77,18 @@ export default {
 			// sensory lane: PCM16 in → diarized transcript + audio events out
 			if (!env.SPEECH_API_KEY && !env.SPEECH_BASE_URL)
 				return new Response('speech lane off', { status: 503 });
-			return relaySpeech(req, env);
+			// pay-before-serve: streaming relay to a paid provider — gate on a
+			// funded pool at connect, then the relay debits streamed seconds
+			const room = url.searchParams.get('room');
+			if (!(await funded(env, room)))
+				return new Response('insufficient credits', { status: 402 });
+			return relaySpeech(req, env, room ?? undefined);
 		}
 		if (url.pathname !== '/audio')
 			return new Response('cic-dsp: /audio or /speech', { status: 404 });
+		// the SFU-attached denoise lane is a paid adapter — same funded gate
+		if (!(await funded(env, url.searchParams.get('room'))))
+			return new Response('insufficient credits', { status: 402 });
 		// one DO per adapter session — adapter supplies ?session=<id>
 		const name = url.searchParams.get('session') ?? 'default';
 		const stub = env.DSP.get(env.DSP.idFromName(name));
@@ -86,7 +103,67 @@ export default {
  * annotated stream Milo consumes as its sensory layer (who spoke, what the
  * room sounded like). No audio or transcript is retained here.
  */
-async function relaySpeech(req: Request, env: Env): Promise<Response> {
+/**
+ * funded — MeterBus balance check. A room is covered when its pool has a
+ * balance OR its sponsor wallet does. Room+ticket identity is supplied by
+ * the client as ?room= (browsers can't set WS headers); an unfunded or
+ * absent room on a metered deploy refuses the lane. Unbound METER = gate
+ * off (self-host).
+ */
+async function funded(env: Env, room: string | null | undefined): Promise<boolean> {
+	if (!env.METER) return true;
+	if (!room) return false;
+	const get = async (inst: string) => {
+		const stub = env.METER!.get(env.METER!.idFromName(inst));
+		const res = await stub.fetch('https://meter/get', {
+			method: 'POST',
+			headers: { 'content-type': 'application/json', 'x-meter-token': env.METER_TOKEN ?? '' },
+			body: JSON.stringify({ inst })
+		});
+		return (await res.json()) as { balanceSeconds?: number; sponsor?: string | null };
+	};
+	const info = await get(room).catch(() => ({ balanceSeconds: 0, sponsor: null }));
+	if ((info.balanceSeconds ?? 0) > 0) return true;
+	if (info.sponsor) {
+		const sp = await get(`acct:${info.sponsor}`).catch(() => ({ balanceSeconds: 0 }));
+		if ((sp.balanceSeconds ?? 0) > 0) return true;
+	}
+	return false;
+}
+
+/** pool name the debit lands on — sponsor wallet when it funds the room */
+async function coveringPool(env: Env, room: string): Promise<string> {
+	const stub = env.METER!.get(env.METER!.idFromName(room));
+	const res = await stub.fetch('https://meter/get', {
+		method: 'POST',
+		headers: { 'content-type': 'application/json', 'x-meter-token': env.METER_TOKEN ?? '' },
+		body: JSON.stringify({ inst: room })
+	});
+	const info = (await res.json()) as { balanceSeconds?: number; sponsor?: string | null };
+	if (info.sponsor) {
+		const sp = env.METER!.get(env.METER!.idFromName(`acct:${info.sponsor}`));
+		const sr = await sp.fetch('https://meter/get', {
+			method: 'POST',
+			headers: { 'content-type': 'application/json', 'x-meter-token': env.METER_TOKEN ?? '' },
+			body: JSON.stringify({ inst: `acct:${info.sponsor}` })
+		});
+		const spInfo = (await sr.json()) as { balanceSeconds?: number };
+		if ((spInfo.balanceSeconds ?? 0) > 0) return `acct:${info.sponsor}`;
+	}
+	return room;
+}
+
+async function debitPool(env: Env, pool: string, amount: number, room: string): Promise<boolean> {
+	const stub = env.METER!.get(env.METER!.idFromName(pool));
+	const res = await stub.fetch('https://meter/charge', {
+		method: 'POST',
+		headers: { 'content-type': 'application/json', 'x-meter-token': env.METER_TOKEN ?? '' },
+		body: JSON.stringify({ inst: pool, amount, room })
+	}).catch(() => null);
+	return !!res?.ok;
+}
+
+async function relaySpeech(req: Request, env: Env, room?: string): Promise<Response> {
 	const provider = env.SPEECH_PROVIDER ?? 'speechmatics';
 	let upWs: WebSocket | undefined;
 	if (provider === 'openai') {
@@ -147,6 +224,28 @@ async function relaySpeech(req: Request, env: Env): Promise<Response> {
 	const [client, server] = Object.values(pair);
 	server.accept();
 
+	// streaming debit: the relay pays the provider per audio-second, so the
+	// covering pool must keep up — count 10ms PCM frames, charge each 30s
+	// block as it accrues, and close the lane the moment a debit fails
+	// (client falls back to the on-device whisper lane on close)
+	let pcmMs = 0;
+	let debitedMs = 0;
+	let broke = false;
+	const meterTimer = env.METER && room
+		? setInterval(async () => {
+				const owed = Math.floor((pcmMs - debitedMs) / 1000);
+				if (owed <= 0 || broke) return;
+				debitedMs += owed * 1000; // optimism: mark billed even if the debit fails — the lane dies anyway
+				const pool = await coveringPool(env, room).catch(() => room);
+				if (!(await debitPool(env, pool, owed, room))) {
+					broke = true;
+					server.close(4402, 'insufficient credits');
+					upWs.close();
+				}
+			}, 1000)
+		: null;
+	server.addEventListener('close', () => { if (meterTimer) clearInterval(meterTimer); });
+
 	if (provider === 'speechmatics')
 		upWs.send(
 			JSON.stringify({
@@ -180,6 +279,7 @@ async function relaySpeech(req: Request, env: Env): Promise<Response> {
 	server.addEventListener('message', (ev) => {
 		const d = ev.data;
 		if (!(d instanceof ArrayBuffer)) return;
+		pcmMs += (d.byteLength / 2 / 16000) * 1000; // pcm_s16le 16kHz mono
 		if (provider === 'openai') {
 			// Realtime API takes audio as base64 JSON events, not raw frames
 			upWs.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: b64(d) }));

@@ -29,6 +29,8 @@ export interface SensoryEvent {
 
 export interface SensorySink {
 	ingestSensory(ev: SensoryEvent): void;
+	/** pool ran dry mid-stream — the relay closed with 4402 */
+	creditsEmpty?(): void;
 }
 
 const SPEECH_LANG =
@@ -74,8 +76,16 @@ export class SensoryPipe {
 				/* malformed frame */
 			}
 		};
-		ws.onclose = () => {
+		ws.onclose = (ev) => {
 			this.ws = null;
+			// 4402 = the relay's streaming debit hit an empty pool — do NOT
+			// reconnect; the session surfaces the top-up state and the local
+			// caption lane stays up
+			if (ev.code === 4402) {
+				this.alive = false;
+				this.sink.creditsEmpty?.();
+				return;
+			}
 			if (this.alive) setTimeout(() => this.start(), 3000); // simple reconnect
 		};
 		this.ws = ws;

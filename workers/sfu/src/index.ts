@@ -38,6 +38,14 @@ export default {
 			if (!(await sessionAuthorized(env, req, room)))
 				return json({ error: 'no funded pool for this room/account' }, 402);
 		}
+		// lease recheck: publishing new tracks re-verifies the pool is still
+		// funded — a session created on a funded pool can't stream forever on
+		// a balance that has since drained to zero
+		if (path.endsWith('/tracks/new') && req.method === 'POST' && env.METER) {
+			const room = req.headers.get('x-cic-room');
+			if (room && !(await roomFunded(env, room)))
+				return json({ error: 'insufficient credits' }, 402);
+		}
 		const res = await fetch(`${UPSTREAM}/${env.CALLS_APP_ID}/${path}`, {
 			method: req.method,
 			headers: {
@@ -88,6 +96,14 @@ interface PoolInfo {
 async function funded(env: Env, inst: string): Promise<boolean> {
 	const info = await roomInfo(env, inst);
 	return (info.balanceSeconds ?? 0) > 0;
+}
+
+/** room-pool-or-sponsor coverage — the lease recheck for mid-session ops */
+async function roomFunded(env: Env, room: string): Promise<boolean> {
+	const info = await roomInfo(env, room);
+	if ((info.balanceSeconds ?? 0) > 0) return true;
+	if (info.sponsor) return funded(env, `acct:${info.sponsor}`);
+	return false;
 }
 
 async function roomInfo(env: Env, inst: string): Promise<PoolInfo> {

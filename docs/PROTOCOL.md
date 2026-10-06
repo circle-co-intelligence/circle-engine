@@ -193,6 +193,19 @@ data channel and prod's deployed protocol is untouched:
 - `rec-manifest` `{rec, seg, durationMs, bytes, ts}` — a peer's ISO
   recorder announced a sealed segment (src/lib/rec/iso.ts); assembled
   host-side into the multi-track index (session.recManifests).
+- `milo-hear` `{text, lang?}` — a consenting speaker's own on-device ASR
+  final, sent **only** to the elected `milo-brain` seat (never broadcast).
+  Self-attributed `ear-set{on}` op turns the lane on/off; an explicit
+  direct address counts as implicit consent for that one line.
+- `milo-state` `{state}` — brain-seat broadcast of Milo's state machine
+  (standby/listening/speaking); `milo-stop` rests him.
+- `ai-set` op fields — `enabled` (master gate), `brain`
+  (`auto|local|cloud`: auto = cloud only while the pool funds it),
+  `standby`, `instructions`, `name`, `voice`, `storeTranscript`,
+  and facilitation flags `roundSummary`/`equityNudge`/`welcome`.
+- SMAP `tag` — the wsRoom slot-map frame carries an optional `tag`
+  (`'milo'`) so a synthesized media lane lands in its own remote stream;
+  old peers ignore the field and hear Milo merged into the seat's audio.
 
 ## Paid lanes (all opt-in, all badged)
 
@@ -234,18 +247,47 @@ data channel and prod's deployed protocol is untouched:
   recording stays the convenience output; ISO is the production master.
 - `?role=producer` — witness + never recorded + monitors all seats at 'h'.
 
-## Metered spend (paid = seconds pool, not a flag)
+## Metered spend (prepaid — nothing served that isn't funded)
 
-Paid rooms carry a D1 `accounts` row: `balance_seconds` debits while paid
-lanes run (SFU fanout, sensory, edge lanes tick per heartbeat; each AI call
-costs 5 s). At zero the room reverts to free/device-side — the pool is a
-floor at 0, never negative, so an exhausted mid-call SFU session simply
-stops accruing rather than over-billing. Top-ups are Ed25519-signed grants
-(`{seconds, nonce, sig}` over `"room.seconds.nonce"`, minted by
-`scripts/grant.mjs` with `GRANT_SECRET`, verified against `GRANT_PUBKEY`,
-nonce-replay-blocked by the `grants` table). Whatever payment rail settles
-money mints grants — checkout, crypto, invoices, or sequential small
-top-ups which ARE the streaming-payment model.
+Paid rooms carry a MeterBus DO per pool: `{balance, spent}` in KV storage,
+single-threaded per instance so debits are atomic by construction. **Every
+cost-bearing path is pay-before-serve**: MeterBus `/charge` debits the
+covering pool BEFORE the provider is invoked and returns 402
+`insufficient_credits` at zero; `callId` markers dedupe retries and the
+usage heartbeat's reconcile report (same id = never double-billed).
+Coverage order is room pool → sponsor wallet → caller's *signed* account
+wallet; wallet debits derive the amount from the signed request body, so a
+compromised worker can't inflate spend.
+
+Per-lane behavior at exhaustion:
+
+- `/ai/chat|stt|tts` — `/charge` before the upstream call; 402 → the
+  client surfaces the credits pill and falls back to the on-device lane
+  (auto brain) or refuses (brain:'cloud').
+- cic-dsp `/speech` + `/speech-token` — funded check at connect, then the
+  relay debits streamed seconds continuously; an empty pool closes the
+  socket `4402` → local whisper stays up.
+- cic-dsp `/audio` adapter — funded check at upgrade.
+- cic-sfu — `sessions/new` requires a funded pool; `tracks/new` re-checks
+  (lease) so a session created on a live pool can't stream on a dead one.
+- `/api/ice` — TURN credentials only for a funded `?room=`; unfunded gets
+  STUN-only + `reason:"topup"` (direct P2P unaffected).
+- `/api/rec` PUT — room ticket + per-MiB charge before R2 writes; 402 keeps
+  the local sealed recording.
+- `/ai/hf`, `/ai/ort`, `/ai/pack` — with `MODELS_BASE` set they 302 to the
+  free-egress R2 bucket (`scripts/models-to-r2.sh` provisions it); unset,
+  they proxy only for a funded room (room in `?room=` or the first `/hf/`
+  path segment, since asset fetchers can't send headers).
+
+The `/ai/usage` heartbeat still reports streaming-lane seconds + `callIds`;
+the pool floors at zero and `paid:false` triggers the client's
+`onPoolEmpty` — sensory stops, edge lanes drop, the credits pill shows
+"top up to continue". `markToppedUp()` re-arms after a grant lands.
+Top-ups are Ed25519-signed grants (`{seconds, nonce, sig}` over
+`"room.seconds.nonce"`, minted by `scripts/grant.mjs`, verified against
+`GRANT_PUBKEY`, nonce-replay-blocked). Whatever payment rail settles money
+mints grants — checkout, crypto, invoices, or sequential small top-ups
+which ARE the streaming-payment model.
 
 ## Edge endpoints
 

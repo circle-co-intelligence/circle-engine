@@ -46,6 +46,10 @@ export const op = z.discriminatedUnion('t', [
 	z.object({ t: z.literal('direction-set'), direction }),
 	z.object({ t: z.literal('config-set'), patch: roomConfig.partial() }),
 	z.object({ t: z.literal('consent'), kind: z.enum(['recording', 'transcript']), state: recordingConsent }),
+	// self-attributed Milo-hearing consent: the signer's own ASR finals may be
+	// forwarded to the milo-brain seat (see milo-hear). Off by default —
+	// absence of an ear-set op for a peer = not heard.
+	z.object({ t: z.literal('ear-set'), on: z.boolean() }),
 	z.object({ t: z.literal('recording-start') }),
 	z.object({ t: z.literal('recording-stop') }),
 	z.object({ t: z.literal('room-end') }),
@@ -83,7 +87,16 @@ export const op = z.discriminatedUnion('t', [
 		voice: z.string().max(80).optional(),
 		standby: z.boolean().optional(),
 		scope: z.string().max(40).optional(),
-		storeTranscript: z.boolean().optional()
+		storeTranscript: z.boolean().optional(),
+		// brain override: auto = cloud when entitled, local wllama otherwise;
+		// 'local' forces the on-device brain (privacy rooms), 'cloud' refuses
+		// the local fallback (zero-retention-only rooms)
+		brain: z.enum(['auto', 'local', 'cloud']).optional(),
+		// facilitation acts — each individually opt-in; Milo still never holds
+		// the floor, he speaks into the open floor between turns
+		roundSummary: z.boolean().optional(), // summarize at each circle_round completion
+		equityNudge: z.boolean().optional(),  // nudge when talk-time skews and floor is free
+		welcome: z.boolean().optional()       // greet a newly seated peer by name
 	}),
 	z.object({ t: z.literal('milo-wake-set'), mode: z.enum(['hey_milo', 'click']) }),
 	z.object({ t: z.literal('mute-set'), id: participantId, kind: z.enum(['audio', 'video']), on: z.boolean() }), // authority remote-mute — can never force-open
@@ -164,6 +177,10 @@ export const realtimeMessage = z.discriminatedUnion('t', [
 	z.object({ t: z.literal('op-sync'), ops: z.array(opEnvelope).max(4096) }),
 	z.object({ t: z.literal('milo-state'), state: z.enum(['off', 'standby', 'listening', 'speaking']) }),
 	z.object({ t: z.literal('milo-stop') }), // anyone may rest Milo — prod's "Stop" control
+	// ear lane: a consenting peer's own-ASR final line, sent ONLY to the
+	// milo-brain seat — feeds Milo's transcriptWindow without rendering as a
+	// caption. Never broadcast; heartMode suppresses these entirely.
+	z.object({ t: z.literal('milo-hear'), text: z.string().max(500), lang: z.string().max(12).optional() }),
 	z.object({ t: z.literal('tr-lang'), lang: z.string().max(12), langs: z.array(z.string().max(12)).max(8) }), // participant's caption/translation language preference
 	// translated segment fanout — the speaker's device translates its own ASR
 	// output and ships tr-caption/caption-audio payloads to subscribers; the

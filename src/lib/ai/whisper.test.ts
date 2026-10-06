@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
-import { WhisperCaptionPipeline } from './whisper';
+import { WhisperCaptionPipeline, makeProgressEmitter } from './whisper';
+import { onModel } from './modelStatus';
 
 const LANG_MAP = {'<|en|>': 50259, '<|de|>': 50261, '<|fr|>': 50263};
 
@@ -87,5 +88,34 @@ describe('WhisperCaptionPipeline — language', () => {
 		for (let i = 0; i < 20; i++) p.push(speech(300));
 		await vi.waitFor(() => expect(asr.calls.length).toBeGreaterThan(0));
 		expect(asr.calls.every((c) => c.language === 'de')).toBe(true);
+	});
+});
+
+describe('makeProgressEmitter', () => {
+	it('aggregates per-file download callbacks into an overall pct', async () => {
+		const seen: { pct?: number; sizeHint?: string }[] = [];
+		const off = onModel((id, phase, detail) => {
+			if (phase === 'loading' && detail) seen.push(detail);
+		});
+		const emit = makeProgressEmitter();
+		const MB = 1048576;
+		emit({ status: 'progress', file: 'model.onnx', loaded: 25 * MB, total: 100 * MB });
+		emit({ status: 'progress', file: 'config.json', loaded: 1024, total: 2048 });
+		emit({ status: 'progress', file: 'model.onnx', loaded: 50 * MB, total: 100 * MB });
+		off();
+		expect(seen[0].pct).toBe(25);
+		expect(seen.at(-1)?.pct).toBe(50);
+		expect(seen.at(-1)?.sizeHint).toMatch(/MB/);
+	});
+
+	it('ignores non-progress callbacks and files without totals', () => {
+		const seen: unknown[] = [];
+		const off = onModel((id, phase, detail) => { if (detail) seen.push(detail); });
+		const emit = makeProgressEmitter();
+		emit({ status: 'initiate', file: 'x.onnx' });
+		emit({ status: 'done', file: 'x.onnx' });
+		emit({ status: 'progress', file: 'y.onnx', loaded: 10, total: 0 });
+		off();
+		expect(seen.length).toBe(0);
 	});
 });

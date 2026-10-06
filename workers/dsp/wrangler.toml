@@ -17,6 +17,14 @@ account_id = "cf1f279501abeda01c1260a60cf95f5f"
 name = "DSP"
 class_name = "DspBus"
 
+# MeterBus DO (defined in cic-ai-gateway) — funding gate on the paid
+# speech/edge lanes: /speech + /speech-token need a covering pool, and the
+# relay debits streamed seconds continuously. Unbound → gate off.
+[[durable_objects.bindings]]
+name = "METER"
+class_name = "MeterBus"
+script_name = "cic-ai-gateway"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["DspBus"]

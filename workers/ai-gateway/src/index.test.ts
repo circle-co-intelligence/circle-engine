@@ -518,3 +518,226 @@ describe('/ai/hf transformers.js proxy', () => {
 		expect(res.status).toBe(404);
 	});
 });
+
+// ------------------------------------------------------------- /charge
+
+describe('MeterBus /charge — atomic pay-before-serve', () => {
+	it('refuses when the pool cannot cover the full amount', async () => {
+		const stores = new Map<string, ReturnType<typeof fakeStorage>>();
+		const env = await makeEnv(stores);
+		const { mb, store } = makeDo('roomC', env, stores);
+		store.map.set('balance', 3);
+		const res = await call(mb, 'roomC', '/charge', TOKENS.spend, { amount: 5, room: 'roomC' });
+		expect(res.status).toBe(402);
+		expect(res.body.status).toBe('insufficient');
+		expect(res.body.balanceSeconds).toBe(3);
+		expect(store.map.get('balance')).toBe(3); // untouched — no partial serve
+	});
+
+	it('debits exactly once per callId — retries dedupe', async () => {
+		const stores = new Map<string, ReturnType<typeof fakeStorage>>();
+		const env = await makeEnv(stores);
+		const { mb, store } = makeDo('roomD', env, stores);
+		store.map.set('balance', 100);
+		const body = { amount: 5, room: 'roomD', callId: 'call-1' };
+		expect((await call(mb, 'roomD', '/charge', TOKENS.spend, body)).status).toBe(200);
+		const again = await call(mb, 'roomD', '/charge', TOKENS.spend, body);
+		expect(again.status).toBe(200);
+		expect(again.body.deduped).toBe(true);
+		expect(store.map.get('balance')).toBe(95); // one debit total
+		// a different callId is a new call — debits again
+		expect(
+			(await call(mb, 'roomD', '/charge', TOKENS.spend, { amount: 5, room: 'roomD', callId: 'call-2' })).status
+		).toBe(200);
+		expect(store.map.get('balance')).toBe(90);
+	});
+
+	it('never lets balance go negative — last unit refuses cleanly', async () => {
+		const stores = new Map<string, ReturnType<typeof fakeStorage>>();
+		const env = await makeEnv(stores);
+		const { mb, store } = makeDo('roomE', env, stores);
+		store.map.set('balance', 5);
+		expect((await call(mb, 'roomE', '/charge', TOKENS.spend, { amount: 5, room: 'roomE' })).status).toBe(200);
+		const res = await call(mb, 'roomE', '/charge', TOKENS.spend, { amount: 1, room: 'roomE' });
+		expect(res.status).toBe(402);
+		expect(store.map.get('balance')).toBe(0); // floor, not negative
+	});
+
+	it('acct charges need signed auth on an allowed path, amount from the signed body', async () => {
+		const stores = new Map<string, ReturnType<typeof fakeStorage>>();
+		const env = await makeEnv(stores);
+		const dev = await deviceKey();
+		const { mb, store } = makeDo(`acct:${dev.keyHash}`, env, stores);
+		store.map.set('balance', 1000);
+		// unsigned → 401 (spend token alone cannot drain a wallet)
+		expect(
+			(await call(mb, `acct:${dev.keyHash}`, '/charge', TOKENS.spend, { amount: 5, room: 'R' })).status
+		).toBe(401);
+		// signed /ai/chat body {room, callId} → DO derives CALL_COST=5 itself
+		const bodyObj = { room: 'R', callId: 'c9', account: dev.keyHash };
+		const auth = await signAuth(dev, dev.keyHash, '/ai/chat', bodyObj);
+		const res = await call(mb, `acct:${dev.keyHash}`, '/charge', TOKENS.spend, {
+			amount: 9999, // worker lies — DO must use the signed amount
+			room: 'R',
+			auth
+		});
+		expect(res.status).toBe(200);
+		expect(store.map.get('balance')).toBe(995); // signed CALL_COST, not 9999
+	});
+});
+
+// ------------------------------------------------------------- model lanes
+
+describe('model proxy funding gate', () => {
+	const get = (path: string) => new Request(`https://gw.example${path}`);
+
+	/** a METER namespace that dispatches to real MeterBus DOs */
+	async function meteredEnv(stores: Map<string, ReturnType<typeof fakeStorage>>) {
+		const base = await makeEnv(stores);
+		return {
+			...base,
+			METER: {
+				idFromName: (n: string) => fakeId(n),
+				get: (id: DurableObjectId) => {
+					const name = String(id);
+					const st = stores.get(name) ?? stores.set(name, fakeStorage()).get(name)!;
+					const ctx = { id: fakeId(name), storage: st } as unknown as DurableObjectState;
+					const mb = new MeterBus(ctx, base as never);
+					return { fetch: (u: string, init?: RequestInit) => mb.fetch(new Request(u, init)) };
+				}
+			}
+		};
+	}
+
+	it('funded room prefix proxies; unfunded/absent room gets 402', async () => {
+		const stores = new Map<string, ReturnType<typeof fakeStorage>>();
+		const env = await meteredEnv(stores);
+		(stores.get('fundedrm')?.map ?? stores.set('fundedrm', fakeStorage()).get('fundedrm')!.map).set('balance', 50);
+		const seen: { url?: string } = {};
+		vi.stubGlobal('fetch', async (url: string) => {
+			seen.url = String(url);
+			return new Response('{}', { status: 200 });
+		});
+		// funded room as the first path segment → proxied upstream
+		const ok = await worker.fetch(
+			get('/ai/hf/fundedrm/onnx-community/whisper-base/resolve/main/config.json'),
+			env as never,
+			{} as never
+		);
+		expect(ok.status).toBe(200);
+		expect(seen.url).toContain('huggingface.co/onnx-community/whisper-base');
+		// no room → refused
+		const denied = await worker.fetch(
+			get('/ai/hf/onnx-community/whisper-base/resolve/main/config.json'),
+			env as never,
+			{} as never
+		);
+		expect(denied.status).toBe(402);
+		// unfunded room → refused
+		const broke = await worker.fetch(
+			get('/ai/hf/emptyroom/onnx-community/whisper-base/resolve/main/config.json'),
+			env as never,
+			{} as never
+		);
+		expect(broke.status).toBe(402);
+		vi.unstubAllGlobals();
+	});
+
+	it('pack and ort honor ?room= the same way', async () => {
+		const stores = new Map<string, ReturnType<typeof fakeStorage>>();
+		const env = await meteredEnv(stores);
+		expect((await worker.fetch(get('/ai/pack/llm'), env as never, {} as never)).status).toBe(402);
+		expect(
+			(await worker.fetch(get('/ai/ort/ort-wasm-simd-threaded.asyncify.wasm'), env as never, {} as never)).status
+		).toBe(402);
+	});
+
+	it('MODELS_BASE redirects instead of proxying — no bytes served by the worker', async () => {
+		const stores = new Map<string, ReturnType<typeof fakeStorage>>();
+		const env = { ...(await meteredEnv(stores)), MODELS_BASE: 'https://pub-x.r2.dev' };
+		const res = await worker.fetch(
+			get('/ai/hf/onnx-community/whisper-base/resolve/main/config.json'),
+			env as never,
+			{} as never
+		);
+		expect(res.status).toBe(302);
+		expect(res.headers.get('location')).toBe(
+			'https://pub-x.r2.dev/hf/onnx-community/whisper-base/resolve/main/config.json'
+		);
+		const p = await worker.fetch(get('/ai/pack/llm'), env as never, {} as never);
+		expect(p.status).toBe(302);
+		expect(p.headers.get('location')).toBe('https://pub-x.r2.dev/pack/llm');
+	});
+});
+
+// ------------------------------------------------------------- gateway charge
+
+describe('/ai/chat prepaid gating', () => {
+	const post = (body: Record<string, unknown>) =>
+		new Request('https://gw.example/ai/chat', {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({ system: 's', prompt: 'p', ...body })
+		});
+
+	async function meteredEnv(stores: Map<string, ReturnType<typeof fakeStorage>>) {
+		const base = await makeEnv(stores);
+		return {
+			...base,
+			AI_PROVIDER: 'openai',
+			AI_API_KEY: 'test-key',
+			AI_CHAT_MODEL: 'gpt-5-mini',
+			METER: {
+				idFromName: (n: string) => fakeId(n),
+				get: (id: DurableObjectId) => {
+					const name = String(id);
+					const st = stores.get(name) ?? stores.set(name, fakeStorage()).get(name)!;
+					const ctx = { id: fakeId(name), storage: st } as unknown as DurableObjectState;
+					const mb = new MeterBus(ctx, base as never);
+					return { fetch: (u: string, init?: RequestInit) => mb.fetch(new Request(u, init)) };
+				}
+			}
+		};
+	}
+
+	it('402s without a funded pool and never calls the provider', async () => {
+		const stores = new Map<string, ReturnType<typeof fakeStorage>>();
+		const env = await meteredEnv(stores);
+		let called = false;
+		vi.stubGlobal('fetch', async () => {
+			called = true;
+			return new Response('{}');
+		});
+		const res = await worker.fetch(
+			post({ room: 'emptyroom', callId: 'x1' }),
+			env as never,
+			{} as never
+		);
+		expect(res.status).toBe(402);
+		expect((await res.json()).error).toBe('insufficient_credits');
+		expect(called).toBe(false); // provider never invoked — serve nothing unpaid
+		vi.unstubAllGlobals();
+	});
+
+	it('a funded room is debited CALL_COST; a same-callId retry is free', async () => {
+		const stores = new Map<string, ReturnType<typeof fakeStorage>>();
+		const env = await meteredEnv(stores);
+		(stores.get('paidrm')?.map ?? stores.set('paidrm', fakeStorage()).get('paidrm')!.map).set('balance', 20);
+		vi.stubGlobal(
+			'fetch',
+			async () =>
+				new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }), {
+					status: 200,
+					headers: { 'content-type': 'application/json' }
+				})
+		);
+		const r1 = await worker.fetch(post({ room: 'paidrm', callId: 'call-A' }), env as never, {} as never);
+		expect(r1.status).toBe(200);
+		expect(stores.get('paidrm')!.map.get('balance')).toBe(15); // CALL_COST=5
+		// retry with the same callId → served, not re-charged
+		const r2 = await worker.fetch(post({ room: 'paidrm', callId: 'call-A' }), env as never, {} as never);
+		expect(r2.status).toBe(200);
+		expect(stores.get('paidrm')!.map.get('balance')).toBe(15);
+		vi.unstubAllGlobals();
+	});
+});

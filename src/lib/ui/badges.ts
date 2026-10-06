@@ -11,6 +11,7 @@
  *      the two disclosures, same contract as prod's "not E2EE" badge.
  */
 import type { RoomSession } from '../state/room.svelte';
+import { lastIceReason } from '../net/room';
 
 export function mountBadges(session: RoomSession): () => void {
 	if (typeof document === 'undefined') return () => {};
@@ -36,6 +37,25 @@ export function mountBadges(session: RoomSession): () => void {
 		'display:none;background:#7c3aed;color:#fff;padding:4px 10px;border-radius:999px;' +
 		'letter-spacing:.02em;box-shadow:0 2px 8px #0006';
 	root.appendChild(pill);
+
+	// ear disclosure — REQUIRED whenever our mic ASR is feeding Milo's brain
+	// seat (ear-set on): speech leaves the transcript scope you see
+	const earpill = document.createElement('div');
+	earpill.textContent = 'Milo is listening to your mic';
+	earpill.title = 'Your speech is transcribed on-device and the text is sent to the room\'s AI seat. Turn off via Circle tools → let Milo hear me';
+	earpill.style.cssText =
+		'display:none;background:#0e7490;color:#fff;padding:4px 10px;border-radius:999px;' +
+		'letter-spacing:.02em;box-shadow:0 2px 8px #0006';
+	root.appendChild(earpill);
+
+	// credits pill — paid AI/metered lanes hard-paused until a top-up lands;
+	// the P2P call itself is unaffected
+	const creditpill = document.createElement('div');
+	creditpill.textContent = 'room credits exhausted — paid AI paused, top up in Circle tools';
+	creditpill.style.cssText =
+		'display:none;background:#b45309;color:#fff;padding:4px 10px;border-radius:999px;' +
+		'letter-spacing:.02em;box-shadow:0 2px 8px #0006';
+	root.appendChild(creditpill);
 
 	// connectivity pill — the honest "what's wrong" surface for states prod
 	// can't see: every lane failed (fatal), the ws bus cycling reconnects,
@@ -66,6 +86,8 @@ export function mountBadges(session: RoomSession): () => void {
 			(bars[i] as HTMLElement).style.background = i <= level ? COLORS[level] || '#38a169' : '#4a556866';
 		pill.style.display = session.edgeProcessed ? 'block' : 'none';
 		e2eepill.style.display = session.e2ee.supported ? 'none' : 'block';
+		earpill.style.display = session.ai.enabled && session.miloEars[session.selfId] ? 'block' : 'none';
+		creditpill.style.display = session.creditsOut ? 'block' : 'none';
 		if (session.signalState === 'down') {
 			netpill.textContent = 'signaling unreachable — check connection, reload to retry';
 			netpill.style.background = '#b91c1c';
@@ -75,11 +97,17 @@ export function mountBadges(session: RoomSession): () => void {
 			netpill.style.background = '#b45309';
 			netpill.style.display = 'block';
 		} else if (session.badPeers > 0) {
-			netpill.textContent = `connection trouble with ${session.badPeers} seat${session.badPeers > 1 ? 's' : ''} — retrying`;
+			netpill.textContent =
+				lastIceReason === 'topup'
+					? `connection trouble with ${session.badPeers} seat${session.badPeers > 1 ? 's' : ''} — relay credits exhausted, top up to restore TURN`
+					: `connection trouble with ${session.badPeers} seat${session.badPeers > 1 ? 's' : ''} — retrying`;
 			netpill.style.background = '#b45309';
 			netpill.style.display = 'block';
 		} else if (session.modelBusy.length) {
-			netpill.textContent = 'preparing on-device models… (first use downloads them)';
+			const d = session.modelProgress[session.modelBusy[0]];
+			netpill.textContent = d?.sizeHint
+				? `downloading caption model — ${d.pct ?? 0}% of ~${d.sizeHint} (one-time, then cached)`
+				: 'preparing on-device models… (first use downloads ~100MB)';
 			netpill.style.background = '#b45309';
 			netpill.style.display = 'block';
 		} else if (session.modelFailed.length) {
@@ -127,7 +155,17 @@ export function mountBadges(session: RoomSession): () => void {
 	const env = import.meta.env as Record<string, string | undefined>;
 	type Action = { label: string; desc: string; run: (b: HTMLButtonElement) => void };
 	const actions: Action[] = [
-		{ label: 'whiteboard', desc: 'Shared Excalidraw canvas for the circle', run: () => void toggleWb() }
+		{ label: 'whiteboard', desc: 'Shared Excalidraw canvas for the circle', run: () => void toggleWb() },
+		{
+			label: 'let Milo hear me',
+			desc: 'Opt-in: your speech (transcribed on-device) is shared with the room AI seat only',
+			run: (b) => {
+				const on = !session.miloEars[session.selfId];
+				session.setEar(on);
+				b.querySelector('strong')!.textContent = on ? 'Milo can hear you (on)' : 'let Milo hear me';
+				setTimeout(() => (b.querySelector('strong')!.textContent = 'let Milo hear me'), 4000);
+			}
+		}
 	];
 	if (env.VITE_CIC_DSP_ENDPOINT) {
 		actions.push(
@@ -143,9 +181,9 @@ export function mountBadges(session: RoomSession): () => void {
 				const grant = prompt('Paste top-up grant');
 				if (!grant) return;
 				const { topUp } = await import('../tier');
-				b.querySelector('strong')!.textContent = (await topUp(session.roomCode, grant.trim()))
-					? 'topped up'
-					: 'invalid grant';
+				const ok = await topUp(session.roomCode, grant.trim());
+				if (ok) session.markToppedUp();
+				b.querySelector('strong')!.textContent = ok ? 'topped up' : 'invalid grant';
 				setTimeout(() => (b.querySelector('strong')!.textContent = 'top up'), 4000);
 			}
 		});

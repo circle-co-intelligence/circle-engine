@@ -15,7 +15,9 @@ import { LocalTts } from '../ai/speech';
 import { llmModelUrl } from '../ai/translate';
 import { onModel } from '../ai/modelStatus';
 import { Milo } from '../ai/milo';
-import { CloudMilo, aiEndpoint, cloudTts } from '../ai/cloud';
+import { MicEar } from '../ai/ear';
+import { setModelRoom } from '../ai/modelHost';
+import { CloudMilo, aiEndpoint, cloudTts, CreditsError } from '../ai/cloud';
 import { adaptSenders, deviceClass, pressureLevel } from '../media/adapt';
 import { paidEntitled, invalidateTier, UsageMeter } from '../tier';
 import { BwBroker } from '../media/broker';
@@ -121,6 +123,8 @@ export class RoomSession {
 	captionSections = $state<Record<string, Record<string, unknown>>>({});
 	miloState = $state<'off' | 'standby' | 'listening' | 'speaking'>('off');
 	miloStopNotice = $state<{ by: string; eventId: string } | null>(null); // last stop-ai (peerId + event)
+	/** pool ran dry on a metered AI call — UI shows "top up to continue" */
+	creditsOut = $state(false);
 	/** sha256(code + ':' + password) — '' means cleared; enforced per-bridge at hello */
 	passwordHash = $state('');
 	/** sentAt of the password-set op that armed the hash — sessions that
@@ -196,7 +200,12 @@ export class RoomSession {
 	ai = $state<{
 		name?: string; enabled?: boolean; transcription?: boolean; contextProcessing?: boolean;
 		instructions?: string; voice?: string; standby?: boolean; scope?: string; storeTranscript?: boolean;
+		brain?: 'auto' | 'local' | 'cloud';
+		roundSummary?: boolean; equityNudge?: boolean; welcome?: boolean;
 	}>({ name: 'Milo', enabled: false });
+	/** per-speaker Milo hearing consent — peerId → ear-set{on}. Milo's context
+	 *  only ever contains lines from consenting speakers. */
+	miloEars = $state<Record<string, boolean>>({});
 	waiting = $state<{ id: string; name: string; joinedAt: number }[]>([]);
 	peerMuted = $state<Record<string, { audio: boolean; video: boolean }>>({});
 	peerAway = $state<Set<string>>(new Set());
@@ -220,9 +229,32 @@ export class RoomSession {
 	private paid(): Promise<boolean> {
 		return (this.paidP ??= paidEntitled(this.roomCode));
 	}
+	/** drop the memo — pool state changed (exhaustion or a fresh top-up) */
+	private repaid() {
+		this.paidP = null;
+		invalidateTier(this.roomCode);
+	}
 	private tts = new LocalTts();
 	private ttsReady: boolean | null = null;
 	private transcriptWindow: string[] = [];
+	/** Milo's consent-bounded context — only lines from ear-consenting
+	 *  speakers, direct addresses, or the room-level sensory lane ever land
+	 *  here. transcriptWindow above is broader (recaps/notes). */
+	private miloWindow: string[] = [];
+	/** dedupe: the same utterance can arrive via captions AND the ear lane */
+	private seenMiloLines = new Map<string, number>();
+	// ear lane — local mic ASR whose finals go ONLY to the milo-brain seat
+	private ear: MicEar | null = null;
+	private earFeedUnsub: (() => void) | null = null;
+	// Milo's voice is a real pooled mesh track: an AudioContext destination
+	// published tagged 'milo' — receivers route him to his own stream/tile
+	private miloAudioCtx: AudioContext | null = null;
+	private miloDest: MediaStreamAudioDestinationNode | null = null;
+	private miloSrc: AudioBufferSourceNode | null = null;
+	/** which peer's tagged 'milo' stream currently fills remoteStreams['milo'] */
+	private miloStreamFrom: string | null = null;
+	private streamTags = new Map<MediaStream, string>(); // published stream → smap tag
+	private lastNudgeAt = 0; private lastSummaryAt = 0; private welcomed = new Set<string>();
 	private publishedStreams = new Set<MediaStream>();
 	/** beyond-GCC: RTT-gradient pre-emption bumps this before adaptMedia reads it */
 	private preemptBoost = 0;
@@ -235,7 +267,8 @@ export class RoomSession {
 		public roomCode: string
 	) {
 		this.identity = createIdentity('');
-		this.handle = openRoom(roomSecret);
+		this.handle = openRoom(roomSecret, { roomCode: this.roomCode });
+		setModelRoom(this.roomCode); // metered model proxies carry the room code
 		this.e2ee = new E2EESession(this.handle);
 		this.recorder = new Recorder(roomCode);
 		this.notes = new NotesDoc(this.handle);
@@ -255,6 +288,7 @@ export class RoomSession {
 					(this.talkMs.get(heldSince.id) ?? 0) + (Date.now() - heldSince.at)
 				);
 			if (heldSince.id !== id) {
+				this.miloHolderChange(heldSince.id, id, snap.context);
 				heldSince = { id, at: Date.now() };
 				this.pullHintAll(); // witnesses re-pin video to the new stage
 			}
@@ -386,6 +420,13 @@ export class RoomSession {
 			console.debug('[engine] remote stream', peerId, stream.getTracks().map((t) => t.kind).join('+'));
 			this.remoteStreams[peerId] = merged;
 		});
+		// tagged slots (e.g. 'milo') land on their own stream — receivers route
+		// Milo to his own tile/audio element instead of the voice seat's mix
+		this.handle.onPeerTaggedStream?.((stream, peerId, tag) => {
+			if (tag !== 'milo') return;
+			this.miloStreamFrom = peerId;
+			this.remoteStreams = { ...this.remoteStreams, milo: stream };
+		});
 		this.handle.onRealtime((msg, peerId) => this.onRealtime(msg, peerId));
 		// ops arriving before the policy wasm loads are queued, not denied
 		this.handle.onOp((env, peerId) => void this.policyReady.then(() => this.onOp(env, peerId)));
@@ -404,11 +445,18 @@ export class RoomSession {
 		});
 
 		// on-device model loads (100–270MB first touch): busy → "preparing"
-		// pill, error → persistent "degraded" note so silent stalls read honest
-		onModel((id, phase) => {
+		// pill with live download %, error → persistent "degraded" note
+		onModel((id, phase, detail) => {
 			if (phase === 'loading' && !this.modelBusy.includes(id))
 				this.modelBusy = [...this.modelBusy, id];
-			if (phase !== 'loading') this.modelBusy = this.modelBusy.filter((p) => p !== id);
+			if (phase !== 'loading') {
+				this.modelBusy = this.modelBusy.filter((p) => p !== id);
+				const next = { ...this.modelProgress };
+				delete next[id];
+				this.modelProgress = next;
+			}
+			if (phase === 'loading' && detail)
+				this.modelProgress = { ...this.modelProgress, [id]: detail };
 			if (phase === 'error' && !this.modelFailed.includes(id))
 				this.modelFailed = [...this.modelFailed, id];
 		});
@@ -580,7 +628,7 @@ export class RoomSession {
 		if (!offered) this.streamOffers.set(peerId, (offered = new Set()));
 		if (offered.has(stream.id)) return;
 		try {
-			this.handle.addStream(stream, [peerId]);
+			this.handle.addStream(stream, [peerId], this.streamTags.get(stream));
 			offered.add(stream.id);
 		} catch { /* track already negotiated — trystero throws instead of no-op */ }
 	}
@@ -690,6 +738,8 @@ export class RoomSession {
 					this.peerHelloCap.set(peerId, msg.cap);
 				}
 				this.names[peerId] = msg.name;
+				// opt-in welcome — fires once per peer, only once we know the name
+				this.maybeWelcome(peerId);
 				// a verified hello releases the media held back at join —
 				// denied hellos break above before this point
 				for (const stream of this.publishedStreams) this.offerStream(stream, peerId);
@@ -767,7 +817,7 @@ export class RoomSession {
 				// Milo, recaps, or persisted transcript artifacts
 				this.captions = [...this.captions.slice(-50), { from: peerId, text: msg.text, final: msg.final }];
 				if (msg.final && (!this.recording || this.isConsented(peerId)))
-					void this.maybeMilo(msg.text);
+					void this.maybeMilo(msg.text, peerId, msg.lang);
 				break;
 			case 'caption-sections':
 				// personal-caption lane sections from a remote source — forwarded to
@@ -776,6 +826,15 @@ export class RoomSession {
 				break;
 			case 'milo-state':
 				this.miloState = msg.state;
+				break;
+			case 'milo-hear':
+				// ear lane — a consenting peer's own-ASR final. Brain seat only;
+				// double-check the sender's consent op landed (defense in depth)
+				// and heartMode deafens regardless.
+				if (this.roles?.['milo-brain'] !== this.selfId || this.heartMode) break;
+				if (!this.miloEars[peerId]) break;
+				if (this.recording && !this.isConsented(peerId)) break;
+				this.ingestMiloLine(peerId, msg.text, msg.lang);
 				break;
 			case 'hand-raise':
 				this.raisedHands = new Set([...this.raisedHands, peerId]);
@@ -821,8 +880,9 @@ export class RoomSession {
 				this.notesText = msg.text;
 				break;
 			case 'ask-ai':
-				if (msg.text) void this.maybeMilo(`milo ${msg.text}`);
-				else void this.maybeMilo('milo check in');
+				// addressing Milo directly is implicit consent for that one line
+				if (msg.text) void this.maybeMilo(`milo ${msg.text}`, peerId);
+				else void this.maybeMilo('milo check in', peerId);
 				break;
 			case 'reaction-kind':
 				this.onReaction?.(msg.kind, peerId, this.names[peerId] ?? 'Peer');
@@ -1024,11 +1084,13 @@ export class RoomSession {
 			case 'direction-set': this.direction = env.op.direction; this.sendStick({ type: 'DIRECTION_SET', direction: env.op.direction }); break;
 			case 'heart-set':
 				this.heartMode = env.op.on;
-				// invariant: heart-sharing forces recording + transcription off
+				// invariant: heart-sharing forces recording + transcription off —
+				// and deafens Milo's ear lane on this device entirely
 				if (env.op.on) {
 					if (this.recording) { this.recording = false; void this.finishRecording(); }
 					this.captionsAvailable = false;
 				}
+				this.refreshEar();
 				break;
 			case 'lobby-set':
 				this.lobbyEnabled = env.op.enabled;
@@ -1067,7 +1129,17 @@ export class RoomSession {
 			}
 			case 'ai-set': {
 				const { t: _t, ...patch } = env.op;
+				const wasEnabled = this.ai.enabled;
 				this.ai = { ...this.ai, ...patch };
+				// enabled flips Milo's whole surface: the ear lane, the state
+				// badge, and the brain's willingness to generate
+				if (patch.enabled !== undefined) this.refreshEar();
+				if (patch.enabled === false && wasEnabled !== false) {
+					this.milo.interrupt();
+					this.miloState = 'off';
+				} else if (patch.enabled === true && this.roles?.['milo-brain'] === this.selfId && this.miloState === 'off') {
+					this.miloState = 'standby';
+				}
 				break;
 			}
 			case 'milo-wake-set': this.miloWake = env.op.mode; break;
@@ -1097,7 +1169,7 @@ export class RoomSession {
 				if (p.recording === false && this.recording) { this.recording = false; void this.finishRecording(); }
 				break;
 			}
-			case 'recording-start': this.recording = true; this.recordingStartedBy = env.senderId; this.consentAsked = false; void this.maybeRecord(); break;
+			case 'recording-start': this.recording = true; this.recordingStartedBy = env.senderId; this.consentAsked = false; void this.maybeRecord(); this.refreshEar(); break;
 			case 'consent':
 				// self-attributed: the op is signed by senderId — consent can
 				// never be forged for another participant. Mirror the realtime
@@ -1107,7 +1179,15 @@ export class RoomSession {
 					this.consents[env.senderId] = env.op.state;
 					if (this.recording) this.recorder.setConsented(this.consentedPeers);
 					this.maybeStartRecording();
+					// a self-exclusion flip changes whether OUR ear may hear us
+					if (env.senderId === this.selfId) this.refreshEar();
 				}
+				break;
+			case 'ear-set':
+				// self-attributed Milo-hearing consent — same self-attribution
+				// guarantee as consent: only the signer's own flag flips
+				this.miloEars = { ...this.miloEars, [env.senderId]: env.op.on };
+				if (env.senderId === this.selfId) this.refreshEar();
 				break;
 			case 'erasure': {
 				// self: purge own contributions; participant: authority purges
@@ -1125,6 +1205,7 @@ export class RoomSession {
 				this.consentAsked = false;
 				this.recordingProposer = null;
 				void this.finishRecording();
+				this.refreshEar(); // exclusion lifted — a consenting ear re-opens
 				break;
 			case 'room-end': this.roomEnded = true; void this.leave(); break;
 			case 'peer-remove': {
@@ -1259,6 +1340,8 @@ export class RoomSession {
 	private peerConns = new Map<string, string>();
 	/** on-device model packs currently downloading/initializing */
 	modelBusy = $state<string[]>([]);
+	/** per-model download detail (pct/sizeHint) for the busy pill */
+	modelProgress = $state<Record<string, { pct?: number; sizeHint?: string }>>({});
 	/** model packs that failed to load — their features degrade visibly */
 	modelFailed = $state<string[]>([]);
 
@@ -1413,7 +1496,10 @@ export class RoomSession {
 	 */
 	async enableEdgeDenoise(): Promise<boolean> {
 		if (!this.sfuSession || this.edgeProcessed) return this.edgeProcessed;
-		if (!(await paidEntitled(this.roomCode))) return false; // paid lane only
+		if (!(await paidEntitled(this.roomCode))) {
+			this.creditsOut = true; // paid lane only — surface the top-up pill
+			return false;
+		}
 		// adapter URL is dialed by the SFU — wants ws(s)://
 		const base = (
 			(import.meta.env as Record<string, string | undefined>).VITE_CIC_DSP_ENDPOINT ??
@@ -1429,7 +1515,10 @@ export class RoomSession {
 						{
 							location: 'local',
 							trackName: this.sfuTrackNames.find((n) => n.startsWith('audio')) ?? 'audio',
-							adapter: { type: 'audio', url: `${base}/audio?session=${this.sfuSession}` }
+							adapter: {
+								type: 'audio',
+								url: `${base}/audio?session=${this.sfuSession}&room=${encodeURIComponent(this.roomCode)}`
+							}
 						}
 					]
 				})
@@ -1451,34 +1540,33 @@ export class RoomSession {
 	async enableSensory(): Promise<boolean> {
 		if (this.sensory) return true;
 		const env = import.meta.env as Record<string, string | undefined>;
-		// direct mode: Speechmatics RT endpoint reachable by the client —
-		// SaaS (temp JWT from cic-dsp/speech-token), on-prem appliance, or
-		// On-Device's local service in a native shell
 		// VITE_CIC_DSP_ENDPOINT is an https origin; WS paths derive ws(s)://
 		const dsp = env.VITE_CIC_DSP_ENDPOINT;
 		const dspWs = dsp?.replace(/^http/, 'ws');
 		// native shell: the in-process speechd endpoint is local — no JWT,
-		// no cloud hop; preferred over any configured remote
+		// no cloud hop, no meter; preferred over any configured remote
 		const nativeEp = await nativeSpeechEndpoint();
 		if (nativeEp) {
 			this.sensory = new SensoryPipe(nativeEp, this, true);
+		} else if (!(await paidEntitled(this.roomCode))) {
+			// every remaining lane is paid (Speechmatics relay / dsp relay) —
+			// fail before minting tokens or opening sockets
+			this.creditsOut = true;
+			return false;
 		} else if (env.VITE_CIC_SPEECH_URL) {
 			let url = env.VITE_CIC_SPEECH_URL;
 			if (!url.includes('jwt=') && dsp) {
-				const tok = await fetch(`${dsp}/speech-token`)
-					.then((r) => r.json() as Promise<{ key_value?: string }>)
+				const tok = await fetch(`${dsp}/speech-token?room=${encodeURIComponent(this.roomCode)}`)
+					.then((r) => (r.ok ? (r.json() as Promise<{ key_value?: string }>) : null))
 					.catch(() => null);
 				if (tok?.key_value) url += `${url.includes('?') ? '&' : '?'}jwt=${tok.key_value}`;
 			}
 			this.sensory = new SensoryPipe(url, this, true);
 		} else if (dspWs) {
-			// relay mode: cic-dsp owns provider auth, we ship raw PCM16
-			this.sensory = new SensoryPipe(`${dspWs}/speech`, this);
+			// relay mode: cic-dsp owns provider auth, we ship raw PCM16 —
+			// the ?room= query identifies the metered pool (WS can't carry headers)
+			this.sensory = new SensoryPipe(`${dspWs}/speech?room=${encodeURIComponent(this.roomCode)}`, this);
 		} else {
-			return false;
-		}
-		if (!(await paidEntitled(this.roomCode))) {
-			this.sensory = null;
 			return false;
 		}
 		this.sensory.start();
@@ -1486,13 +1574,27 @@ export class RoomSession {
 		return true;
 	}
 
-	/** pool hit zero mid-session: lanes we own stop now; the SFU session runs
-	 *  to call-end but can't debit below the pool floor — next room joins free */
+	/** pool hit zero mid-session: paid lanes stop now and the top-up pill
+	 *  shows; the P2P call continues on the free floor (mesh + on-device) */
 	private onPoolEmpty() {
+		this.creditsOut = true;
 		this.sensory?.stop();
 		this.sensory = null;
 		this.edgeProcessed = false;
-		invalidateTier(this.roomCode);
+		this.repaid();
+	}
+
+	/** the relay itself reported exhaustion (4402 close) — same handling */
+	creditsEmpty() {
+		this.onPoolEmpty();
+	}
+
+	/** a grant landed on this room — re-arm the meter + clear the exhaustion
+	 *  pill so paid lanes are eligible again on the next request */
+	markToppedUp() {
+		this.creditsOut = false;
+		this.meter?.reset();
+		this.repaid();
 	}
 
 	/** sensory events from the /speech relay: diarized transcript + audio events */
@@ -1503,7 +1605,13 @@ export class RoomSession {
 		if (ev.t === 'transcript' && ev.text) {
 			const label = ev.speaker ? `[${ev.speaker}] ${ev.text}` : ev.text;
 			this.transcriptWindow = [...this.transcriptWindow.slice(-39), label];
-			if (ev.final) void this.maybeMilo(label);
+			// the sensory lane IS the speaker's opt-in — enabling it forwards our
+			// mic to a cloud ASR; feeding Milo's context here needs no ear-set
+			if (ev.final && this.ai.enabled && !this.heartMode &&
+				!this.miloLineSeen(this.selfId, ev.text)) {
+				this.miloWindow = [...this.miloWindow.slice(-39), label];
+				void this.miloTrigger(ev.text);
+			}
 		} else if (ev.t === 'event' && ev.event && !ev.end) {
 			// audio events → room mood signal: transcript context + a reaction op
 			this.transcriptWindow = [...this.transcriptWindow.slice(-39), `[room] ${ev.event}`];
@@ -1521,7 +1629,7 @@ export class RoomSession {
 			this.handle.sendRealtime({ t: 'caption-update', text, final, lang: lang ?? CAPTION_LANG });
 		if (final && !excluded) {
 			this.storeTranscriptLine(this.names[this.selfId] ?? this.displayName, text);
-			void this.maybeMilo(text);
+			void this.maybeMilo(text, this.selfId, lang);
 		}
 	}
 
@@ -1540,9 +1648,14 @@ export class RoomSession {
 	private miloInitStarted = false;
 	private async ensureMilo() {
 		if (this.miloInitStarted || this.roles?.['milo-brain'] !== this.selfId) return;
+		if (!this.ai.enabled) { this.miloState = 'off'; return; }
 		this.miloInitStarted = true;
-		// paid rooms get the zero-retention cloud brain; free rooms stay on-device
-		this.milo = aiEndpoint() && (await this.paid()) ? new CloudMilo() : new Milo();
+		// brain selection: 'local' pins on-device; 'cloud' refuses the local
+		// fallback (zero-retention-only rooms); 'auto' = cloud when the room
+		// is entitled + a gateway is configured, local otherwise
+		const pref = this.ai.brain ?? 'auto';
+		const cloud = pref === 'cloud' || (pref === 'auto' && !!aiEndpoint() && (await this.paid()));
+		this.milo = cloud ? new CloudMilo(this.roomCode) : new Milo();
 		const ok = await this.milo.init({
 			modelUrl: await llmModelUrl(),
 			maxContextTokens: 2048
@@ -1558,35 +1671,212 @@ export class RoomSession {
 		void ok;
 	}
 
-	/** direct-address trigger: final transcript lines starting with "milo" */
-	private async maybeMilo(text: string) {
-		this.transcriptWindow = [...this.transcriptWindow.slice(-39), text];
+	/** one brain call — cloud failures fall back to the on-device lane unless
+	 *  the room's ai-set pinned brain:'cloud' (zero-retention rooms) */
+	private async miloAsk(prompt: string, lang?: string) {
+		const opts = { lang, instructions: this.ai.instructions, name: this.ai.name };
+		try {
+			const reply = await this.milo.ask(prompt, this.miloWindow, opts);
+			if (this.milo instanceof CloudMilo) this.meter?.tickCall(this.milo.lastCallId);
+			return reply;
+		} catch (e) {
+			if (e instanceof CreditsError) { this.creditsOut = true; invalidateTier(this.roomCode); }
+			if (this.milo instanceof CloudMilo && (this.ai.brain ?? 'auto') !== 'cloud') {
+				console.warn('[milo] cloud brain failed — falling back to on-device', e);
+				const local = new Milo();
+				local.onSay = this.milo.onSay;
+				const ok = await local.init({ modelUrl: await llmModelUrl(), maxContextTokens: 2048 });
+				if (ok) { this.milo = local; return local.ask(prompt, this.miloWindow, opts); }
+			}
+			return '';
+		}
+	}
+
+	/** normalized dedupe — a consenting speaker's utterance can reach Milo via
+	 *  both the ear lane (milo-hear) and broadcast captions; feed it once */
+	private miloLineSeen(speakerId: string, text: string): boolean {
+		const key = `${speakerId}:${text.trim().toLowerCase().replace(/\s+/g, ' ')}`;
+		const now = Date.now();
+		for (const [k, at] of this.seenMiloLines) if (now - at > 15_000) this.seenMiloLines.delete(k);
+		if (this.seenMiloLines.has(key)) return true;
+		this.seenMiloLines.set(key, now);
+		return false;
+	}
+
+	private miloLabel(speakerId: string, lang?: string): string {
+		const name = speakerId === this.selfId
+			? (this.names[this.selfId] ?? this.displayName ?? 'me')
+			: (this.names[speakerId] ?? 'peer');
+		return `[${name}${lang && lang !== 'auto' ? `/${lang}` : ''}]`;
+	}
+
+	/** a line enters Milo's context — speakers the ear lane reports get a
+	 *  labeled entry; the brain then checks it for a direct address */
+	private ingestMiloLine(speakerId: string, text: string, lang?: string) {
+		if (!this.ai.enabled || this.heartMode || !text.trim()) return;
+		if (this.miloLineSeen(speakerId, text)) return;
+		this.miloWindow = [...this.miloWindow.slice(-39), `${this.miloLabel(speakerId, lang)} ${text.trim()}`];
+		void this.miloTrigger(text, lang);
+	}
+
+	/** direct-address check + generation — runs only on the brain seat and
+	 *  only while ai.enabled && !ai.standby && !heartMode */
+	private async miloTrigger(raw: string, lang?: string) {
+		if (!this.ai.enabled || this.ai.standby || this.heartMode) return;
 		if (this.roles?.['milo-brain'] !== this.selfId) return;
-		const src = text.trim();
-		// click mode: strict "milo, <question>" line start (chat + captions).
-		// hey_milo: the wake word IS the transcript — sherpa ASR already
-		// streams every speaker's finals here, so "hey milo" mid-utterance
-		// also wakes. No separate KWS model (and no license question) needed.
-		let match =
+		const src = raw.trim();
+		// click mode: strict "milo, <question>" line start. hey_milo: the wake
+		// word anywhere in the utterance also wakes (ASR streams finals here).
+		const match =
 			src.match(/^milo[\s,.:;-]+(.+)/i) ??
 			(this.miloWake === 'hey_milo' ? src.match(/\bhey[,.\s]*milo[\s,.:;-]+(.+)/i) : null);
 		if (!match) return;
 		this.miloState = 'listening';
+		this.handle.sendRealtime({ t: 'milo-state', state: 'listening' });
 		await this.ensureMilo();
-		await this.milo.ask(match[1], this.transcriptWindow);
-		if (this.milo instanceof CloudMilo) this.meter?.tickCall();
+		await this.miloAsk(match[1], lang);
 		this.miloState = this.milo.state;
+	}
+
+	/** caption/chat/sensory ingest — recap context is unconditional; Milo's
+	 *  context is consent-bounded (ear-set opt-in, or a direct address is
+	 *  implicit consent for that one line) */
+	private async maybeMilo(text: string, speakerId?: string, lang?: string) {
+		this.transcriptWindow = [...this.transcriptWindow.slice(-39), text];
+		if (!this.ai.enabled || this.heartMode) return;
+		const sid = speakerId ?? this.selfId;
+		const src = text.trim();
+		const direct =
+			/^milo[\s,.:;-]+/i.test(src) ||
+			(this.miloWake === 'hey_milo' && /\bhey[,.\s]*milo[\s,.:;-]+/i.test(src));
+		if (this.miloEars[sid] || direct)
+			this.ingestMiloLine(sid, src, lang);
+	}
+
+	// --- ear lane: consenting speakers' own ASR → the milo-brain seat ---
+
+	/** local user toggles Milo-hearing consent — self-attributed signed op */
+	setEar(on: boolean) { this.emitOp({ t: 'ear-set', on }); }
+
+	/** start/stop the mic tap. Milo's ear runs only while: the room enabled AI,
+	 *  we signed ear-set{on}, heartMode is off, and we're not a
+	 *  recording-excluded participant (their speech must not reach context). */
+	private refreshEar() {
+		const want = !!(
+			this.ai.enabled && this.miloEars[this.selfId] && !this.heartMode &&
+			!(this.recording && !this.isConsented(this.selfId))
+		);
+		if (!want) {
+			this.ear?.stop();
+			this.ear = null;
+			return;
+		}
+		if (this.ear) return;
+		const mic = this.localMedia?.stream ?? localFeed();
+		if (!mic) {
+			// media not acquired yet — retry when the join-time capture lands
+			if (!this.earFeedUnsub)
+				this.earFeedUnsub = onLocalFeed(() => {
+					this.earFeedUnsub = null;
+					this.refreshEar();
+				});
+			return;
+		}
+		const ear = new MicEar({ onLine: (text, lang) => this.ownEarLine(text, lang) });
+		this.ear = ear;
+		void ear.start(mic).then((ok) => { if (!ok && this.ear === ear) this.ear = null; });
+	}
+
+	/** our own ASR final — to the brain seat (self: ingest directly, remote:
+	 *  a targeted milo-hear realtime frame). Text-only: audio never leaves. */
+	private ownEarLine(text: string, lang?: string) {
+		if (!this.ai.enabled || this.heartMode) return;
+		if (this.recording && !this.isConsented(this.selfId)) return;
+		const brain = this.roles?.['milo-brain'];
+		if (!brain) return;
+		if (brain === this.selfId) this.ingestMiloLine(this.selfId, text, lang);
+		else this.handle.sendRealtime({ t: 'milo-hear', text, lang }, brain);
+	}
+
+	/** Milo facilitation acts — opt-in via ai-set (roundSummary/equityNudge/
+	 *  welcome). He never holds the floor: speaks only between turns or when
+	 *  the floor is free. Brain seat generates; voice seat speaks. */
+	private miloHolderChange(prev: string | null, next: string | null, ctx: { seats: string[]; mode: string; direction: string }) {
+		if (!this.ai.enabled || this.ai.standby || this.heartMode) return;
+		if (this.roles?.['milo-brain'] !== this.selfId) return;
+		const order = ctx.direction === 'sunwise' ? ctx.seats : [...ctx.seats].reverse();
+		// circle_round wrap: the stick passed the last seat and came back
+		// around — the round completed, summarize if the room opted in
+		if (this.ai.roundSummary && ctx.mode === 'circle_round' && prev && next) {
+			const pi = order.indexOf(prev), ni = order.indexOf(next);
+			if (pi >= 0 && ni >= 0 && ni <= pi && Date.now() - this.lastSummaryAt > 60_000) {
+				this.lastSummaryAt = Date.now();
+				void this.miloAsk('The circle just completed a full round. Summarize what was shared in one or two sentences.');
+			}
+		}
+		// equity nudge: stick returned to table with skewed talk-time —
+		// invite quieter voices, rate-limited so he nudges at most every 5min
+		if (this.ai.equityNudge && !next && Date.now() - this.lastNudgeAt > 300_000) {
+			const entries = [...this.talkMs.entries()].filter(([, ms]) => ms > 60_000);
+			if (entries.length >= 3) {
+				const total = entries.reduce((a, [, ms]) => a + ms, 0);
+				const [topId, topMs] = entries.sort((a, b) => b[1] - a[1])[0];
+				if (topMs / total > 0.6) {
+					this.lastNudgeAt = Date.now();
+					void this.miloAsk(`Talk time has skewed — ${this.names[topId] ?? 'one voice'} has carried most of the floor. In one sentence, gently invite voices we haven't heard from.`);
+				}
+			}
+		}
+	}
+
+	/** welcome a newly seated peer — opt-in (ai-set welcome) and rate-safe:
+	 *  each peer is greeted once per session, only when we know their name */
+	private maybeWelcome(peerId: string) {
+		if (!this.ai.enabled || this.ai.standby || this.heartMode || !this.ai.welcome) return;
+		if (this.roles?.['milo-brain'] !== this.selfId || this.welcomed.has(peerId)) return;
+		const name = this.names[peerId];
+		if (!name) return; // names arrive via hello — the caller retries once it's known
+		this.welcomed.add(peerId);
+		void this.miloAsk(`A new participant named ${name} just took a seat. Welcome them in one short sentence.`);
 	}
 
 	private speakCtx: AudioContext | null = null;
 
+	/** Milo's voice as a real pooled mesh audio track: an AudioContext
+	 *  destination whose stream is published tagged 'milo' via replaceTrack
+	 *  (no renegotiation). Published once and kept — silent between replies.
+	 *  Local playback rides the same remoteStreams['milo'] → SFU-pull path
+	 *  every client uses — no ctx.destination tap, so no double audio. */
+	private miloAudioOut(): MediaStreamAudioDestinationNode | null {
+		try {
+			if (!this.miloAudioCtx) this.miloAudioCtx = new AudioContext();
+			if (!this.miloDest) {
+				this.miloDest = this.miloAudioCtx.createMediaStreamDestination();
+				this.streamTags.set(this.miloDest.stream, 'milo');
+				this.publishedStreams.add(this.miloDest.stream);
+				this.handle.addStream(this.miloDest.stream, undefined, 'milo');
+				this.miloStreamFrom = this.selfId;
+				this.remoteStreams = { ...this.remoteStreams, milo: this.miloDest.stream };
+			}
+			return this.miloDest;
+		} catch {
+			return null; // no WebAudio (test env) — chat still delivers the reply
+		}
+	}
+
 	/** milo-voice role synthesizes replies — cloud TTS when configured, sherpa
-	 *  VITS locally otherwise (and as the fallback when the gateway fails) */
+	 *  VITS locally otherwise (and as the fallback when the gateway fails).
+	 *  The PCM is pushed into the tagged 'milo' mesh track AND the local
+	 *  speaker path so everyone hears him, not just the voice seat. */
 	private async speakMilo(text: string) {
 		if (this.roles?.['milo-voice'] !== this.selfId) return;
+		if (!this.ai.enabled) return;
 		let audio: { samples: Float32Array; sampleRate: number } | null = null;
 		if (aiEndpoint() && (await this.paid())) {
-			audio = await cloudTts(text, this.ai.voice).catch(() => null);
+			audio = await cloudTts(text, this.ai.voice, this.roomCode).catch((e) => {
+				if (e instanceof CreditsError) { this.creditsOut = true; invalidateTier(this.roomCode); }
+				return null;
+			});
 			if (audio) this.meter?.tickCall();
 		}
 		if (!audio) {
@@ -1595,14 +1885,17 @@ export class RoomSession {
 			audio = await this.tts.speak(text);
 		}
 		if (!audio) return;
-		const ctx = new AudioContext({ sampleRate: audio.sampleRate });
-		this.speakCtx = ctx;
+		const dest = this.miloAudioOut();
+		if (!dest || !this.miloAudioCtx) return;
+		const ctx = this.miloAudioCtx;
+		if (ctx.state === 'suspended') void ctx.resume().catch(() => {});
 		const buf = ctx.createBuffer(1, audio.samples.length, audio.sampleRate);
 		buf.copyToChannel(audio.samples as Float32Array<ArrayBuffer>, 0);
 		const node = ctx.createBufferSource();
 		node.buffer = buf;
-		node.connect(ctx.destination);
-		node.onended = () => void ctx.close().then(() => { if (this.speakCtx === ctx) this.speakCtx = null; });
+		this.miloSrc = node;
+		node.connect(dest);
+		node.onended = () => { node.disconnect(); if (this.miloSrc === node) this.miloSrc = null; };
 		node.start();
 	}
 
@@ -1615,6 +1908,8 @@ export class RoomSession {
 	private applyMiloStop(byPeerId: string) {
 		this.milo.interrupt();
 		if (this.speakCtx) { void this.speakCtx.close(); this.speakCtx = null; }
+		try { this.miloSrc?.stop(); } catch { /* not started */ }
+		this.miloSrc = null;
 		this.miloState = 'standby';
 		this.miloStopNotice = { by: byPeerId, eventId: crypto.randomUUID() };
 	}
@@ -1824,7 +2119,7 @@ export class RoomSession {
 		this.handle.sendRealtime({ t: 'breakout-broadcast', text });
 	}
 	async joinBreakout(roomId: string) {
-		this.breakout = new BreakoutSession(this.roomSecret, roomId);
+		this.breakout = new BreakoutSession(this.roomSecret, roomId, this.roomCode);
 		for (const st of this.publishedStreams) this.breakout.publish(st);
 		this.pendingBreakout = null;
 	}
@@ -1921,7 +2216,7 @@ export class RoomSession {
 		this.notesText = text;
 		this.handle.sendRealtime({ t: 'notes', text });
 	}
-	askAi(text?: string) { this.handle.sendRealtime({ t: 'ask-ai', text }); void this.maybeMilo(`milo ${text ?? 'check in'}`); }
+	askAi(text?: string) { this.handle.sendRealtime({ t: 'ask-ai', text }); void this.maybeMilo(`milo ${text ?? 'check in'}`, this.selfId); }
 	react(kind: string) {
 		this.handle.sendRealtime({ t: 'reaction-kind', kind, name: this.names[this.selfId] ?? this.displayName });
 		this.onReaction?.(kind, this.selfId, this.names[this.selfId] ?? this.displayName);
@@ -2043,6 +2338,17 @@ export class RoomSession {
 		this.detachStreamHls();
 		this.isoFeedUnsub?.();
 		this.isoFeedUnsub = null;
+		this.earFeedUnsub?.();
+		this.earFeedUnsub = null;
+		this.ear?.stop();
+		this.ear = null;
+		try { this.miloSrc?.stop(); } catch { /* not started */ }
+		this.miloSrc = null;
+		void this.miloAudioCtx?.close().catch(() => {});
+		this.miloAudioCtx = null;
+		this.miloDest = null;
+		void this.speakCtx?.close().catch(() => {});
+		this.speakCtx = null;
 		await this.finishRecording();
 		this.notes.destroy();
 		this.localMedia?.stop();

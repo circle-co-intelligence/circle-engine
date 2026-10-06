@@ -89,6 +89,11 @@ const SMAP_NS = '__wsroom_smap__';
 interface SmapFrame {
 	i: number;
 	off?: boolean;
+	// synthetic-source tag (e.g. 'milo'): receivers route the slot's track to
+	// a separate per-tag stream instead of the seat's merged stream — lets
+	// Milo get his own audio element / mute. Unknown to old peers → they
+	// merge it into the seat stream (still audible, graceful degrade)
+	tag?: string;
 }
 interface Peer {
 	busId: string;
@@ -114,9 +119,12 @@ interface Peer {
 	// slots (SMAP_NS), plus tracks pending adoption until their index maps
 	mapped: Set<number>;
 	pendingIdx: Set<number>;
+	// slot index → synthetic-source tag ('milo') — routed to tagStreams not recvStream
+	tagByIdx: Map<number, string>;
 	// receive side: one merged MediaStream carrying every remote receiver
-	// track that has ever delivered media
+	// track that has ever delivered media, plus per-tag streams for tagged slots
 	recvStream: MediaStream;
+	tagStreams: Map<string, MediaStream>;
 	recvSeen: Set<MediaStreamTrack>;
 	// serializes decrypt→dispatch of bus-relayed app frames so per-peer
 	// ordering matches arrival order
@@ -162,6 +170,7 @@ export async function openWsRoom(
 	const joinListeners = new Set<(peerId: string) => void>();
 	const leaveListeners = new Set<(peerId: string) => void>();
 	const streamListeners = new Set<(stream: MediaStream, peerId: string) => void>();
+	const taggedListeners = new Set<(stream: MediaStream, peerId: string, tag: string) => void>();
 	const actionListeners = new Map<string, Set<(data: unknown, peerId: string) => void>>();
 
 	// peers keyed by the remote's trystero selfId ('pending:*' until their first
@@ -315,31 +324,57 @@ export async function openWsRoom(
 	// remote told us pool index i carries real published media — adopt that
 	// transceiver's receiver track once it can deliver frames (its 'unmute'
 	// is the genuine media-arrival signal); 'off' releases the slot so a
-	// stopped publish shrinks the seat's stream back down
-	const attachTrack = (p: Peer, t: MediaStreamTrack) => {
-		if (p.recvStream.getTracks().includes(t)) return;
-		p.recvStream.addTrack(t);
-		streamListeners.forEach((fn) => fn(p.recvStream, p.sid));
+	// stopped publish shrinks the seat's stream back down.
+	// Tagged slots ('milo') route into a per-tag stream so the synthetic
+	// source is separately addressable (own audio element, own mute).
+	const streamFor = (p: Peer, i: number): MediaStream => {
+		const tag = p.tagByIdx.get(i);
+		if (!tag) return p.recvStream;
+		let s = p.tagStreams.get(tag);
+		if (!s) {
+			s = new MediaStream();
+			p.tagStreams.set(tag, s);
+		}
+		return s;
+	};
+	const attachTrack = (p: Peer, i: number, t: MediaStreamTrack) => {
+		const s = streamFor(p, i);
+		if (s.getTracks().includes(t)) return;
+		s.addTrack(t);
+		const tag = p.tagByIdx.get(i);
+		if (tag) taggedListeners.forEach((fn) => fn(s, p.sid, tag));
+		else streamListeners.forEach((fn) => fn(p.recvStream, p.sid));
 	};
 	const adoptTrack = (p: Peer, i: number) => {
 		const t = p.pc.getTransceivers()[i]?.receiver?.track;
 		if (!t || p.recvSeen.has(t)) return;
 		p.recvSeen.add(t);
-		if (!t.muted) attachTrack(p, t);
-		else t.addEventListener('unmute', () => attachTrack(p, t));
+		if (!t.muted) attachTrack(p, i, t);
+		else t.addEventListener('unmute', () => attachTrack(p, i, t));
 	};
 	const handleSmap = (p: Peer, data: unknown) => {
 		const f = data as SmapFrame | undefined;
 		if (typeof f?.i !== 'number') return;
 		if (f.off) {
 			p.mapped.delete(f.i);
+			const tag = p.tagByIdx.get(f.i);
+			p.tagByIdx.delete(f.i);
 			const t = p.pc.getTransceivers()[f.i]?.receiver?.track;
-			if (t && p.recvStream.getTracks().includes(t)) {
-				p.recvStream.removeTrack(t);
-				streamListeners.forEach((fn) => fn(p.recvStream, p.sid));
+			if (t) {
+				for (const [tg, s] of p.tagStreams) {
+					if (!s.getTracks().includes(t)) continue;
+					s.removeTrack(t);
+					taggedListeners.forEach((fn) => fn(s, p.sid, tg));
+					return;
+				}
+				if (p.recvStream.getTracks().includes(t)) {
+					p.recvStream.removeTrack(t);
+					streamListeners.forEach((fn) => fn(p.recvStream, p.sid));
+				}
 			}
 			return;
 		}
+		if (f.tag) p.tagByIdx.set(f.i, f.tag);
 		p.mapped.add(f.i);
 		adoptTrack(p, f.i);
 		// drain any receiver arrivals that beat the map frame
@@ -490,6 +525,7 @@ export async function openWsRoom(
 			pendingLocalOp: Promise.resolve(),
 			initiator, offered: false,
 			claims: new Map(), mapped: new Set(), pendingIdx: new Set(),
+			tagByIdx: new Map(), tagStreams: new Map(),
 			recvStream: new MediaStream(), recvSeen: new Set(),
 			appChain: Promise.resolve()
 		};
@@ -527,6 +563,8 @@ export async function openWsRoom(
 		p.claims.clear();
 		p.mapped.clear();
 		p.pendingIdx.clear();
+		p.tagByIdx.clear();
+		p.tagStreams.clear();
 		p.recvStream = new MediaStream();
 		p.recvSeen.clear();
 		p.dc = null;
@@ -762,12 +800,16 @@ export async function openWsRoom(
 		onPeerJoin: (fn: (id: string) => void) => joinListeners.add(fn),
 		onPeerLeave: (fn: (id: string) => void) => leaveListeners.add(fn),
 		onPeerStream: (fn: (s: MediaStream, id: string) => void) => streamListeners.add(fn),
+		// tagged synthetic sources (e.g. 'milo') — the remote tagged a pool
+		// slot; this fires with that tag's own stream, not the seat's
+		onPeerTaggedStream: (fn: (s: MediaStream, id: string, tag: string) => void) =>
+			taggedListeners.add(fn),
 		onPeerTrack: () => {},
 		// publishing is replaceTrack-into-pool on BOTH roles — identical for
 		// initiator and acceptor, and never triggers renegotiation. This is
 		// the invariant that keeps WebKitGTK's GstWebRTC alive: one
 		// offer/answer per pc, ever.
-		addStream: (stream: MediaStream, targets?: string[]) => {
+		addStream: (stream: MediaStream, targets?: string[], tag?: string) => {
 			for (const p of peers.values()) {
 				if (targets && !targets.includes(p.sid)) continue;
 				for (const t of stream.getTracks()) {
@@ -779,7 +821,7 @@ export async function openWsRoom(
 					}
 					p.claims.set(t, i);
 					void p.pc.getTransceivers()[i].sender.replaceTrack(t).catch(() => {});
-					void sendAppFrame(p, SMAP_NS, { i } as SmapFrame);
+					void sendAppFrame(p, SMAP_NS, { i, ...(tag ? { tag } : {}) } as SmapFrame);
 				}
 			}
 		},

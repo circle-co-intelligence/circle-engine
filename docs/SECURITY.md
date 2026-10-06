@@ -85,6 +85,20 @@ first-write-wins inside the DO. Every acct money op lands in the 50-entry
 server-side audit ring visible on /billing **and** mirrors append-only to
 Analytics Engine — an attacker can stop writing but can't erase history.
 
+Spend coverage is **prepaid, never post-billed**: MeterBus `/charge` debits
+the pool atomically inside the single-threaded DO *before* any upstream
+provider is invoked, and `/debit` clamps to the remaining balance — no lane
+can accrue past what was funded. Every metered edge sits behind it: AI
+calls (per-call `callId` dedupe), the speech relay (funded check at
+connect + streaming debit, `4402` close at zero), SFU session create +
+`tracks/new` lease re-check, the DSP adapter at upgrade, TURN credential
+minting (unfunded → STUN-only, P2P still works), and R2 recording offload
+(per-MiB charge before write). Model asset delivery prefers a 302 to the
+free-egress R2 origin (`MODELS_BASE`); without it the proxies serve funded
+rooms only. An exhausted pool returns `402 insufficient_credits` → the
+client's `creditsOut` state surfaces a top-up affordance rather than
+silently accruing debt.
+
 ## Honest residual risks
 
 - **Active XSS** can invoke signing while on-origin (CSP + non-extractable

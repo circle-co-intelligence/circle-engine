@@ -42,3 +42,12 @@ new_sqlite_classes = ["MeterBus"]
 
 # Turnstile — abuse protection on paid lanes (secret via wrangler secret put):
 #   TURNSTILE_SECRET — unset = gate off
+
+# Model byte lanes (/ai/hf, /ai/ort, /ai/pack) — pay-before-serve:
+#   MODELS_BASE set (production) → 302 to the free-egress bucket; the worker
+#     never serves model bytes. Provision via scripts/models-to-r2.sh.
+#   MODELS_BASE unset + METER bound → proxies only for a funded room
+#     (room in path prefix or ?room=); unfunded → 402.
+#   METER unbound → self-host mode, proxies unconditionally.
+# [vars]
+# MODELS_BASE = "https://pub-<hash>.r2.dev"  # or the models custom domain

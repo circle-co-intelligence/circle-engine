@@ -12,6 +12,7 @@ Required license texts ship in `static/licenses/`.
 | Package | Version | License | Obligation | Repository |
 |---|---|---|---|---|
 | `@excalidraw/excalidraw` | 0.17.6 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/excalidraw/excalidraw |
+| `@huggingface/transformers` | 4.3.0 | Apache-2.0 | permissive — retain NOTICE; text vendored at `/licenses/Apache-2.0.txt` | https://github.com/huggingface/transformers.js |
 | `@mediapipe/tasks-vision` | 0.10.35 | Apache-2.0 | permissive — retain NOTICE; text vendored at `/licenses/Apache-2.0.txt` |  |
 | `@noble/ciphers` | 2.4.0 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/paulmillr/noble-ciphers |
 | `@noble/curves` | 1.9.7 | MIT | permissive — keep copyright line; text vendored at `/licenses/MIT.txt` | https://github.com/paulmillr/noble-curves |
@@ -54,14 +55,15 @@ Required license texts ship in `static/licenses/`.
 
 | License | Package count |
 |---|---|
-| MIT | 366 |
-| Apache-2.0 | 81 |
+| MIT | 382 |
+| Apache-2.0 | 87 |
 | Apache-2.0 OR MIT | 66 |
-| ISC | 21 |
-| BSD-3-Clause | 17 |
+| ISC | 22 |
+| BSD-3-Clause | 18 |
 | MIT OR Apache-2.0 | 9 |
 | BSD-2-Clause | 6 |
 | MPL-2.0 | 3 |
+| LGPL-3.0-or-later | 1 |
 | CC0-1.0 | 1 |
 | CC-BY-4.0 | 1 |
 | BlueOak-1.0.0 | 1 |
@@ -103,12 +105,13 @@ break) and a zombie dep can't accumulate.
 |---|---|
 || `@axe-core/playwright` | `e2e/smoke.spec.ts`, `package.json` |
 | `@excalidraw/excalidraw` | `src/lib/whiteboard/island.ts`, `package.json` |
+| `@huggingface/transformers` | `src/lib/ai/whisper.ts`, `package.json` |
 | `@mediapipe/tasks-vision` | `src/lib/media/enhance.ts`, `package.json` |
 | `@noble/ciphers` | `src/lib/rec/cloud.ts`, `package.json` |
 | `@noble/curves` | `src/lib/crypto/identity.ts`, `src/lib/tier.test.ts`, `scripts/grant.mjs`, `package.json` |
 | `@noble/hashes` | `src/lib/audit/export.test.ts`, `src/lib/bridge/account.ts`, `src/lib/bridge/cloudSfu.ts`, `src/lib/bridge/roomBridge.svelte.ts` (+8 more) |
-| `@open-policy-agent/opa-wasm` | `src/lib/policy/engine.ts`, `package.json` |
-| `@playwright/test` | `e2e/mobile-network.spec.ts`, `e2e/smoke.spec.ts`, `e2e/ux-telemetry.spec.ts`, `playwright.config.ts` (+12 more) |
+| `@open-policy-agent/opa-wasm` | `src/lib/policy/cic.policy.test.ts`, `src/lib/policy/engine.ts`, `package.json` |
+| `@playwright/test` | `e2e/mobile-network.spec.ts`, `e2e/room-real.spec.ts`, `e2e/smoke.spec.ts`, `e2e/ux-telemetry.spec.ts` (+14 more) |
 | `@scure/base` | `src/lib/ai/cloud.ts`, `src/lib/bridge/push.ts`, `src/lib/bridge/stt.ts`, `src/lib/crypto/accountKey.ts` (+3 more) |
 | `@sentry/browser` | `src/lib/obs/errors.ts`, `package.json` |
 | `@sveltejs/adapter-static` | `svelte.config.js`, `package.json`, `svelte.config.js` |
@@ -151,7 +154,7 @@ break) and a zombie dep can't accumulate.
 | `typescript` | `scripts/licenses.mjs`, `package.json` |
 | `ua-parser-js` | `src/lib/obs/ux.ts`, `package.json` |
 | `vite` | `scripts/licenses.mjs`, `package.json` |
-| `vitest` | `src/lib/ai/sensory.test.ts`, `src/lib/audit/export.test.ts`, `src/lib/authority/authority.test.ts`, `src/lib/bridge/stt.test.ts` (+17 more) |
+| `vitest` | `src/lib/ai/sensory.test.ts`, `src/lib/ai/whisper.test.ts`, `src/lib/audit/export.test.ts`, `src/lib/authority/authority.test.ts` (+21 more) |
 | `webrtc-adapter` | `src/routes/+layout.svelte`, `package.json` |
 | `xstate` | `src/lib/domain/stick.machine.test.ts`, `src/lib/domain/stick.machine.ts`, `src/lib/state/room.svelte.ts`, `package.json` |
 | `y-protocols` | `src/lib/notes/notes.ts`, `package.json` |
@@ -187,7 +190,10 @@ linking to an unmodified system library is compliant; no source offer owed.
 |---|---|---|
 | vad — sherpa-onnx | Apache-2.0 | https://github.com/snakers4/silero-vad/blob/master/LICENSE |
 | asr-en — sherpa-onnx | Apache-2.0 | https://github.com/k2-fsa/sherpa-onnx/blob/master/LICENSE |
+| asr-zh-en — sherpa-onnx | Apache-2.0 | https://github.com/k2-fsa/sherpa-onnx/blob/master/LICENSE |
+| asr-zh-yue-en — sherpa-onnx | Apache-2.0 | https://github.com/k2-fsa/sherpa-onnx/blob/master/LICENSE |
 | tts-en — sherpa-onnx | MIT | https://github.com/rhasspy/piper/blob/master/LICENSE.md |
+| tts-multi — sherpa-onnx | Apache-2.0 | https://github.com/hexgrad/kokoro/blob/main/LICENSE |
 | llm — wllama | Apache-2.0 | https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct |
 
 ## Vendored runtimes & libraries (static/)
@@ -242,9 +248,9 @@ Measured at generation time:
 
 | Metric | Value | Reading |
 |---|---|---|
-| Authored runtime LOC | 20,356 | vs 56 direct OSS deps + 575 pkgs in the transitive closure → **<5%** of the delivered application's source composition |
-| Authored test/probe LOC | 2,803 | dev-time only, never shipped |
+| Authored runtime LOC | 23,268 | vs 57 direct OSS deps + 600 pkgs in the transitive closure → **<5%** of the delivered application's source composition |
+| Authored test/probe LOC | 3,472 | dev-time only, never shipped |
 | Shipped non-OSS bytes | **0%** | every build artifact is third-party OSS or org-owned AGPL-3.0 |
-| Org-authored shipped bytes | ~9 MiB of ~44 MiB (~20%) | vendored product bundles + compiled authored code — all AGPL-3.0, so OSS-licensed even though org-authored |
+| Org-authored shipped bytes | ~9 MiB of ~45 MiB (~20%) | vendored product bundles + compiled authored code — all AGPL-3.0, so OSS-licensed even though org-authored |
 | Third-party OSS shipped bytes | ~16 MiB static assets + dep code inside `_app` | wasm runtimes, fonts, vendored libs |
 

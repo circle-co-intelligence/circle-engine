@@ -26,6 +26,7 @@
 import { pipeline, env as hfEnv } from '@huggingface/transformers';
 import type { SpeechSegment } from './speech';
 import { emitModel } from './modelStatus';
+import { hfBase, ortUrl, modelsFreeHosted } from './modelHost';
 
 const ENV = import.meta.env as Record<string, string | undefined>;
 const MODEL = ENV.VITE_CIC_WHISPER_MODEL ?? 'onnx-community/whisper-base';
@@ -33,25 +34,26 @@ const DTYPE = (ENV.VITE_CIC_WHISPER_DTYPE ?? 'q8') as 'q8';
 const FIXED_LANG = ENV.VITE_CIC_ASR_LANG;
 const DEVICE_PREF = ENV.VITE_CIC_WHISPER_DEVICE ?? 'auto';
 
-// route model files through our origin — under COEP require-corp a direct
-// huggingface.co fetch is blocked (their CDN doesn't send CORP headers).
+// model bytes resolve through modelHost — the free-egress bucket when
+// VITE_CIC_MODELS_BASE is set, else the metered /ai/hf + /ai/ort proxies
+// carrying the room code for the funded-pool gate (set at getAsr() time so
+// the room is known)
 const aiBase = ENV.VITE_CIC_AI_ENDPOINT;
 const edgeBase = aiBase?.replace(/\/ai\/?$/, '') ?? '';
-if (aiBase) hfEnv.remoteHost = `${edgeBase}/ai/hf/`;
 
-/** point onnxruntime-web's wasm loader at our /ai/ort proxy — the bundled
- *  26MB asset is stripped at deploy (Pages 25MiB limit); jsdelivr is the
- *  upstream either way. Set inside getAsr(): env.backends.onnx is only
- *  populated once the onnx backend module loads. */
+/** point onnxruntime-web's wasm loader at the model lane — the bundled
+ *  26MB asset is stripped at deploy (Pages 25MiB limit). Set inside
+ *  getAsr(): env.backends.onnx is only populated once the onnx backend
+ *  module loads. */
 function wireOrtProxy() {
-	if (!edgeBase) return;
+	if (!edgeBase && !modelsFreeHosted()) return;
 	const onnx = hfEnv.backends?.onnx as
 		| { wasm?: { wasmPaths?: unknown } }
 		| undefined;
 	if (onnx?.wasm) {
 		onnx.wasm.wasmPaths = {
-			mjs: `${edgeBase}/ai/ort/ort-wasm-simd-threaded.asyncify.mjs`,
-			wasm: `${edgeBase}/ai/ort/ort-wasm-simd-threaded.asyncify.wasm`
+			mjs: ortUrl('ort-wasm-simd-threaded.asyncify.mjs'),
+			wasm: ortUrl('ort-wasm-simd-threaded.asyncify.wasm')
 		};
 	}
 }
@@ -67,11 +69,36 @@ type Asr = Transcriber & {
 	processor: (audio: Float32Array) => Promise<{ input_features: unknown }>;
 };
 
+/** Aggregate transformers.js per-file download callbacks into one overall
+ *  % + size hint emitted on the asr model channel — the model spans
+ *  several onnx/config files fetched through the /ai/hf proxy. */
+export function makeProgressEmitter() {
+	const files = new Map<string, { loaded: number; total: number }>();
+	return (p: { status?: string; file?: string; loaded?: number; total?: number }) => {
+		if (p.status !== 'progress' || !p.file) return;
+		files.set(p.file, { loaded: p.loaded ?? 0, total: p.total ?? 0 });
+		let loaded = 0;
+		let total = 0;
+		for (const f of files.values()) {
+			loaded += f.loaded;
+			total += f.total;
+		}
+		if (total > 0)
+			emitModel('asr', 'loading', {
+				pct: Math.min(99, Math.round((loaded / total) * 100)),
+				sizeHint: `${Math.max(1, Math.round(total / 1048576))} MB`
+			});
+	};
+}
+
 let asrPromise: Promise<Asr | null> | null = null;
 function getAsr(): Promise<Asr | null> {
 	if (!asrPromise) {
 		asrPromise = (async () => {
 			emitModel('asr', 'loading');
+			// room code is set by the session before init — the metered proxy
+			// embeds it in the path so the funded-pool gate can bill it
+			hfEnv.remoteHost = hfBase();
 			wireOrtProxy();
 			// 'gpu' in navigator lies in headless/disabled-GPU browsers — the API
 			// exists but requestAdapter() returns null. Probe the adapter so the
@@ -84,11 +111,13 @@ function getAsr(): Promise<Asr | null> {
 						? (['webgpu', 'wasm'] as const)
 						: (['wasm'] as const)
 					: ([DEVICE_PREF] as const);
+			const progress_callback = makeProgressEmitter();
 			for (const device of order) {
 				try {
 					const t = (await pipeline('automatic-speech-recognition', MODEL, {
 						dtype: DTYPE,
-						device: device as 'wasm' | 'webgpu'
+						device: device as 'wasm' | 'webgpu',
+						progress_callback
 					})) as unknown as Asr;
 					emitModel('asr', 'ready');
 					return t;
