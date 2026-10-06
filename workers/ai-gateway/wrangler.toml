@@ -49,5 +49,5 @@ new_sqlite_classes = ["MeterBus"]
 #   MODELS_BASE unset + METER bound → proxies only for a funded room
 #     (room in path prefix or ?room=); unfunded → 402.
 #   METER unbound → self-host mode, proxies unconditionally.
-# [vars]
-# MODELS_BASE = "https://pub-<hash>.r2.dev"  # or the models custom domain
+[vars]
+MODELS_BASE = "https://pub-89d76cb967404b349d9c3052caff30ef.r2.dev"  # cic-models bucket, free-egress

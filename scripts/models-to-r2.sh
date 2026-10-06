@@ -38,18 +38,18 @@ $WRANGLER r2 bucket create "$BUCKET" 2>/dev/null || echo "exists"
 # CORS — browsers fetch these under COEP require-corp; ACAO via bucket CORS
 # satisfies it (fetch() is cors-mode by default). Scoped to the site origins.
 cat > "$TMP/cors.json" <<'JSON'
-[{
-	"AllowedOrigins": ["https://circle-engine.pages.dev", "http://localhost:5173", "tauri://localhost"],
-	"AllowedMethods": ["GET", "HEAD"],
-	"AllowedHeaders": ["*"],
-	"MaxAgeSeconds": 86400
-}]
+{"rules": [{
+	"allowed": {"origins": ["https://circle-engine-7ny.pages.dev", "https://circle-engine.pages.dev", "http://localhost:5173", "tauri://localhost"],
+		"methods": ["GET", "HEAD"],
+		"headers": ["*"]},
+	"max_age_seconds": 86400
+}]}
 JSON
 $WRANGLER r2 bucket cors set "$BUCKET" --file "$TMP/cors.json" --force
 
 put() { # put <local-file> <r2-key>
 	echo "  → $2 ($(du -h "$1" | cut -f1))"
-	$WRANGLER r2 object put "$BUCKET/$2" --file "$1" --quiet
+	$WRANGLER r2 object put "$BUCKET/$2" --file "$1" -y --remote
 }
 pull() { # pull <url> <local-file>
 	curl -sfL --retry 3 -o "$2" "$1"

@@ -197,7 +197,9 @@ a sherpa WASM pack `en|zh-en|zh-yue-en`. `VITE_CIC_TTS_PACK=en|multi`
 variants under `FETCH_HEAVY=1`. **Production model hosting**: mirror all
 model bytes to the `cic-models` R2 bucket (free egress, free GETs) with
 `scripts/models-to-r2.sh`, then set `MODELS_BASE=<bucket pub URL>` on
-cic-ai-gateway and `VITE_CIC_MODELS_BASE=<same>` in `build:cf`. The
+cic-ai-gateway and `VITE_CIC_MODELS_BASE=<same>` in `build:cf`
+(**live**: `cic-models` bucket, 47 objects / ~3.5 GiB,
+`MODELS_BASE=https://pub-89d76cb967404b349d9c3052caff30ef.r2.dev`). The
 `/ai/hf|ort|pack` proxies then become redirects (or funded-room-only
 proxies when `MODELS_BASE` is unset on a metered deploy). `/ai/stt`
 → whisper-large-v3-turbo (~99 languages auto-detected, optional
