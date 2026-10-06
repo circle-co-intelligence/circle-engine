@@ -68,10 +68,18 @@ export function onLocalFeed(fn: () => void): () => void {
 	return () => feedListeners.delete(fn);
 }
 
-/** attach E2EE cryptors to all senders/receivers on trystero's peer connections */
-export function wireE2EE(room: RoomHandle, e2ee: E2EESession) {
-	if (!e2ee.supported) return;
+/** attach E2EE cryptors to all senders/receivers on trystero's peer connections.
+ *  Per-peer gating: a peer that didn't advertise a cap[1] key (browser without
+ *  insertable streams — iOS <18.4, old Firefox) stays a PLAINTEXT pc — no
+ *  transforms either direction. Encrypting to a peer that can't decode, or
+ *  decrypting a plaintext peer, would black their media entirely; SFrame
+ *  transforms are per-pc so capable peers still get E2EE between themselves.
+ *  Returns a rescan for post-hello re-attach (hello lands after onPeerJoin). */
+export function wireE2EE(room: RoomHandle, e2ee: E2EESession): () => void {
+	const noop = () => {};
+	if (!e2ee.supported) return noop;
 	const attach = (peerId: string) => {
+		if (!e2ee.peerSupported(peerId)) return; // no cap[1] → plaintext interop
 		const pc = room.raw.getPeers()[peerId];
 		if (!pc) return;
 		for (const s of pc.getSenders()) e2ee.attachSender(peerId, s);
@@ -86,11 +94,12 @@ export function wireE2EE(room: RoomHandle, e2ee: E2EESession) {
 	// adopted remote stream so cryptors cover transceivers that appear late
 	room.onPeerStream(attachAll);
 	const origAdd = room.addStream.bind(room);
-	room.addStream = (stream, targets) => {
-		origAdd(stream, targets);
+	room.addStream = (stream, targets, tag) => {
+		origAdd(stream, targets, tag);
 		// addTrack happens synchronously inside lane addStream — defer one tick
 		// so senders exist before we scan (transform must precede media flow)
 		queueMicrotask(attachAll);
 	};
 	attachAll();
+	return attachAll;
 }

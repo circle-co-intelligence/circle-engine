@@ -109,6 +109,13 @@ export class RoomSession {
 	recording = $state(false);
 	recordingStartedBy = $state<string | null>(null); // recording-start op author — policy gate for recording-stop
 	e2eeActive = $state(false);
+	/** peers that advertised a cap[1] SFrame key — seats without one get a
+	 *  plaintext pc (they can't transform), which means the room is only
+	 *  partially E2EE and the disclosure pill must say so */
+	private e2eeCapPeers = $state<Record<string, boolean>>({});
+	get e2eeUncovered(): number {
+		return this.e2ee.supported ? this.peers.filter((p) => !this.e2eeCapPeers[p]).length : 0;
+	}
 	breakoutCount = $state(0);
 	pendingBreakout = $state<string | null>(null);
 	breakout = $state<BreakoutSession | null>(null);
@@ -259,6 +266,8 @@ export class RoomSession {
 	// ear lane — local mic ASR whose finals go ONLY to the milo-brain seat
 	private ear: MicEar | null = null;
 	private earFeedUnsub: (() => void) | null = null;
+	/** post-hello cryptor rescan — peer identities land after onPeerJoin */
+	private e2eeRescan: (() => void) | null = null;
 	// Milo's voice is a real pooled mesh track: an AudioContext destination
 	// published tagged 'milo' — receivers route him to his own stream/tile
 	private miloAudioCtx: AudioContext | null = null;
@@ -634,6 +643,12 @@ export class RoomSession {
 						s.getTracks().map((t) => `${t.kind}:${t.readyState}`)
 					])
 				)
+			},
+			// mobile-debuggable: false on iOS<18.4/old FF (no insertable streams)
+			e2ee: {
+				supported: this.e2ee.supported,
+				active: this.e2ee.active,
+				uncovered: this.e2eeUncovered
 			}
 		};
 	}
@@ -674,7 +689,11 @@ export class RoomSession {
 
 	/** hello frame — cap[0]=idkey, cap[1]=e2ee key, cap[2]=access proof hash */
 	private helloMsg(): RealtimeMessage {
-		const cap = [bytesToHex(this.identity.publicKey), this.e2ee.publicKeyHex];
+		// cap[1] is the e2ee slot only when we can actually transform —
+		// advertising it without insertable-streams support would get us keyed
+		// into the epoch and fed ciphertext we cannot decode (the iOS<18.4
+		// black-media bug). Empty string keeps cap[2] (access proof) positional.
+		const cap = [bytesToHex(this.identity.publicKey), this.e2ee.supported ? this.e2ee.publicKeyHex : ''];
 		if (this.accessHash) cap.push(this.accessHash);
 		return {
 			t: 'hello',
@@ -783,7 +802,11 @@ export class RoomSession {
 				}
 				if (msg.cap[1]) {
 					this.e2ee.addPeerIdentity(peerId, msg.cap[1]);
+					this.e2eeCapPeers = { ...this.e2eeCapPeers, [peerId]: true };
 					void this.rotateKeys('join', peerId);
+					// hello lands after onPeerJoin — rescan so their pc's
+					// senders/receivers get cryptors before media flows
+					this.e2eeRescan?.();
 				}
 				// held peer's hello proves her DC is live — the onPeerJoin
 				// lobby-wait may have raced it; re-deliver, and add the waiting
@@ -1324,7 +1347,7 @@ export class RoomSession {
 			this.handle.addStream(this.localMedia.stream);
 		}
 		this.joinedAtMs = Date.now();
-		wireE2EE(this.handle, this.e2ee);
+		this.e2eeRescan = wireE2EE(this.handle, this.e2ee);
 		// media egress gate (all lanes/offer paths): denied + lobby-held peers
 		// never receive our streams, password rooms hold every joiner's pulls
 		// until their hello verifies cap[2], and a joiner who arrived after the
@@ -2023,7 +2046,19 @@ export class RoomSession {
 	 *  every client uses — no ctx.destination tap, so no double audio. */
 	private miloAudioOut(): MediaStreamAudioDestinationNode | null {
 		try {
-			if (!this.miloAudioCtx) this.miloAudioCtx = new AudioContext();
+			if (!this.miloAudioCtx) {
+				this.miloAudioCtx = new AudioContext();
+				// iOS suspends contexts created outside a user gesture — resume()
+				// from an async TTS callback is ignored there, so also arm a
+				// one-shot gesture listener until the context actually runs
+				const ctx = this.miloAudioCtx;
+				const unstick = () => {
+					if (ctx.state !== 'running') void ctx.resume().catch(() => {});
+					if (ctx.state === 'running')
+						document.removeEventListener('pointerdown', unstick);
+				};
+				document.addEventListener('pointerdown', unstick);
+			}
 			if (!this.miloDest) {
 				this.miloDest = this.miloAudioCtx.createMediaStreamDestination();
 				this.streamTags.set(this.miloDest.stream, 'milo');

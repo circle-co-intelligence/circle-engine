@@ -55,6 +55,13 @@ export class MicEar {
 		};
 		try {
 			const ctx = new AudioContext();
+			// iOS suspends contexts created outside a gesture — the ear opens on
+			// op-apply paths, so arm a one-shot resume for the next real tap
+			const unstick = () => {
+				if (ctx.state !== 'running') void ctx.resume().catch(() => {});
+				if (ctx.state === 'running') document.removeEventListener('pointerdown', unstick);
+			};
+			document.addEventListener('pointerdown', unstick);
 			await ctx.audioWorklet.addModule(
 				URL.createObjectURL(new Blob([WORKLET_SRC], { type: 'text/javascript' }))
 			);

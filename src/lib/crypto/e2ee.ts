@@ -81,6 +81,14 @@ export class E2EESession {
 		this.members.set(peerId, { peerId, publicKey: hexToBytes(x25519PubHex) });
 	}
 
+	/** can this peer's pc carry SFrame transforms? False when we can't
+	 *  transform at all, or they never advertised a cap[1] key (old iOS /
+	 *  Firefox without insertable streams) — those pcs stay plaintext so
+	 *  media interops; capable peers still get E2EE between themselves. */
+	peerSupported(peerId: string): boolean {
+		return this.supported && this.members.has(peerId);
+	}
+
 	/**
 	 * Membership changed. If we are the epoch author (lex-min peer id), mint
 	 * announcements and return {peerId -> json} for targeted delivery.

@@ -85,7 +85,15 @@ export function mountBadges(session: RoomSession): () => void {
 		for (let i = 0; i < bars.length; i++)
 			(bars[i] as HTMLElement).style.background = i <= level ? COLORS[level] || '#38a169' : '#4a556866';
 		pill.style.display = session.edgeProcessed ? 'block' : 'none';
-		e2eepill.style.display = session.e2ee.supported ? 'none' : 'block';
+		if (!session.e2ee.supported) {
+			e2eepill.textContent = 'not end-to-end encrypted — browser lacks insertable streams';
+			e2eepill.style.display = 'block';
+		} else if (session.e2eeUncovered > 0) {
+			e2eepill.textContent = `not end-to-end encrypted — ${session.e2eeUncovered} seat${session.e2eeUncovered > 1 ? 's' : ''} can't do SFrame`;
+			e2eepill.style.display = 'block';
+		} else {
+			e2eepill.style.display = 'none';
+		}
 		earpill.style.display = session.ai.enabled && session.miloEars[session.selfId] ? 'block' : 'none';
 		creditpill.style.display = session.creditsOut ? 'block' : 'none';
 		if (session.signalState === 'down') {
